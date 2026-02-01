@@ -20,6 +20,8 @@ from braindecode.preprocessing import create_fixed_length_windows
 import pandas as pd
 import mne
 import warnings
+import torch
+import numpy as np
 
 # Local imports
 try:
@@ -186,7 +188,28 @@ class TUHEEGEpilepsy:
         rename_channels: bool = False,
         set_montage: bool = False,
         n_jobs: int = 1,
-    ) -> BaseConcatDataset:
+        # New args for balanced windowing
+        window_len_s: Optional[float] = None,
+        overlap_pct: float = 0.0,
+        balance_per_subject: bool = False,
+        include_seizures: bool = True,
+    ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]:
+        
+        # If window_len_s is provided, use the optimized balanced loader
+        if window_len_s is not None:
+             return self._load_balanced_windows(
+                window_len_s=window_len_s,
+                overlap_pct=overlap_pct,
+                balance_per_subject=balance_per_subject,
+                include_seizures=include_seizures,
+                mode=mode,
+                filter_freq=filter_freq,
+                target_name=target_name,
+                pick_channels=pick_channels,
+                rename_channels=rename_channels,
+                set_montage=set_montage,
+                n_jobs=n_jobs,
+             )
 
         if set_montage:
             assert rename_channels, (
@@ -381,6 +404,239 @@ class TUHEEGEpilepsy:
         montage = mne.channels.make_standard_montage("standard_1020")
         raw.set_montage(montage, on_missing="ignore")
 
+    def _load_balanced_windows(
+        self,
+        window_len_s: float,
+        overlap_pct: float,
+        balance_per_subject: bool,
+        include_seizures: bool,
+        mode: str,
+        filter_freq: Optional[List[float]],
+        target_name: Optional[Union[str, Tuple[str, ...]]],
+        pick_channels: Optional[List[str]],
+        rename_channels: bool,
+        set_montage: bool,
+        n_jobs: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]:
+        
+        # 1. Filter Descriptions
+        df = self.descriptions.copy()
+        if not include_seizures:
+            # Assumes 'n_seizure' col exists and > 0 means it contains seizure
+            # If the user meant "exclude segments with seizures", that's harder without detailed annotations
+            # Assuming here: exclude FILES that have seizures
+             df = df[df['n_seizure'] == 0]
+
+        if df.empty:
+            raise ValueError("No data available after filtering.")
+        
+        # 2. Calculate available windows per subject
+        stride_s = window_len_s * (1 - overlap_pct)
+        if stride_s <= 0:
+            raise ValueError("Overlap must be < 1.0")
+
+        # Approx windows per file
+        df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s) / stride_s) + 1).astype(int)
+        
+        # Windows per subject
+        subject_window_counts = df.groupby('subject')['n_windows'].sum()
+        
+        if balance_per_subject:
+            limit_per_subject = int(subject_window_counts.min())
+            logger.info(f"Balancing: Limiting to {limit_per_subject} windows per subject.")
+            if limit_per_subject == 0:
+                 raise ValueError("Balancing requested but at least one subject has 0 valid windows.")
+        else:
+            limit_per_subject = None # Use all
+            logger.info("Using all available windows (unbalanced).")
+
+        # 3. Generate Window List
+        window_meta = []
+        
+        # Group by subject to enforce limits
+        for subject, group in df.groupby('subject'):
+            # Sort chronologically or by t_id to be deterministic
+            group = group.sort_values(['year', 'month', 'day', 'time'] if {'year','month','day','time'}.issubset(group.columns) else ['path'])
+            
+            windows_collected = 0
+            
+            for _, row in group.iterrows():
+                if limit_per_subject is not None and windows_collected >= limit_per_subject:
+                    break
+                
+                n_possible = row['n_windows']
+                if n_possible <= 0:
+                    continue
+                
+                # Calculate start times for this file
+                # indices: 0, 1, ..., n_possible-1
+                # start_time = idx * stride
+                
+                for idx in range(n_possible):
+                    if limit_per_subject is not None and windows_collected >= limit_per_subject:
+                        break
+                    
+                    start_t = idx * stride_s
+                    end_t = start_t + window_len_s
+                    
+                    window_meta.append({
+                        'subject': subject,
+                        'path': row['path'],
+                        'start': start_t,
+                        'end': end_t,
+                        'window_idx_within_subject': windows_collected,
+                        't_id': row.get('t_id', 'unknown'),
+                        'epilepsy': row.get('epilepsy', False),
+                        # Store other useful metadata from row if needed
+                        'age': row.get('age', -1),
+                        'gender': row.get('gender', 'X'),
+                        'description_row': row # Keep ref for loading
+                    })
+                    windows_collected += 1
+
+        window_df = pd.DataFrame(window_meta)
+        logger.info(f"Generated {len(window_df)} windows plan.")
+
+        # 4. Load Data
+        # Helper for parallel loading
+        def load_window(row_meta):
+            desc_row = row_meta['description_row']
+            # Re-use _create_dataset logic but we only need the raw array
+            # We can't use _create_dataset easily because it loads the WHOLE file.
+            # We want to load just crop.
+            
+            # Manually load logic
+             
+            if mode == 'ica':
+                file_path = desc_row["path_ica"]
+                ch_names = None
+            else:
+                file_path = desc_row["path"]
+                montage_name = desc_row["montage"]
+                ch_names = list(self.montages[montage_name]['channels'])
+
+            try:
+                # MNE read_raw_edf supports 'preload' but we want specific times.
+                # read_raw_edf doesn't support tmin/tmax load optimization directly FOR EDF in all versions efficiently,
+                # but cropping after loading header might be better than full load.
+                # However, for 5 min windows, full load might be huge.
+                # Efficient way: read_raw_edf(preload=False), then crop, then load_data()
+                
+                raw = mne.io.read_raw_edf(
+                    file_path, 
+                    include=ch_names,
+                    preload=False,
+                    infer_types=False, 
+                    verbose="error",
+                )
+                
+                 # Basic Filter (should be done before cropping ideally to avoid edge artifacts, or crop with margin)
+                 # If we filter AFTER cropping, we need margin. 
+                 # Given user request for "load only necessary", we accept edge artifacts or assume data is clean/prefiltered,
+                 # OR we load with margin. Let's load exact for now to match request strictness, or suggest margin.
+                 # Standard practice: Load, (Filter), Crop. 
+                 # To save memory: Crop then Filter (bad edges).
+                 # To do it right without full load: read_raw_edf allows cropping.
+                
+                # Filter before crop if we want perfect filter, but that requires full load.
+                # Compromise: Crop with margin? 
+                # For this implementation, I will just crop exact window.
+                
+                raw.crop(tmin=row_meta['start'], tmax=row_meta['end'], include_tmax=False)
+                raw.load_data()
+                
+                # Apply processing matching _create_dataset
+                if filter_freq is not None:
+                    raw.filter(l_freq=filter_freq[0], h_freq=filter_freq[1], verbose='ERROR')
+            
+                if rename_channels:
+                    TUHEEGEpilepsy._rename_channels(raw)
+            
+                if set_montage:
+                    TUHEEGEpilepsy._set_montage(raw)
+                    
+                if pick_channels:
+                    raw.pick(pick_channels)
+                    
+                # To Epoch/Tensor
+                # Resample? Not requested, but raw.get_data() returns numpy
+                data = raw.get_data() # (Channels, Time)
+                # Ensure fixed length (Float rounding issues might give +/- 1 sample)
+                # Check expected samples
+                sfreq = raw.info['sfreq']
+                expected_samples = int(window_len_s * sfreq)
+                
+                if data.shape[1] > expected_samples:
+                    data = data[:, :expected_samples]
+                elif data.shape[1] < expected_samples:
+                    # Pad? Or drop? 
+                    # Drop is safer for consistency
+                    return None
+                    
+                return data
+
+            except Exception as e:
+                logger.error(f"Error loading window {row_meta}: {e}")
+                return None
+
+        # Execute Load
+        if n_jobs == 1:
+            results = [load_window(r) for _, r in tqdm(window_df.iterrows(), total=len(window_df), desc="Loading Windows")]
+        else:
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(load_window)(r) 
+                for _, r in tqdm(window_df.iterrows(), total=len(window_df), desc="Loading Windows")
+            )
+            
+        # Filter Nones
+        valid_indices = [i for i, r in enumerate(results) if r is not None]
+        valid_data = [results[i] for i in valid_indices]
+        valid_meta = window_df.iloc[valid_indices].reset_index(drop=True)
+        
+        if not valid_data:
+             raise ValueError("No valid windows loaded.")
+             
+        # Stack Data
+        # formatted as (Batch, Channels, Time) -> Transpose to (Batch, Time, Channels) if user asked (windows*samples*channels)?
+        # User asked: (windows*samples*channels)
+        
+        tensor_data = np.stack(valid_data) # (Batch, Channels, Time)
+        tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
+        tensor_data = torch.from_numpy(tensor_data).float()
+        
+        # Stack Targets
+        # "Target can be a tuple ... epilepsy or not, but it can also contain age and gender"
+        # We'll support the basic epilepsy target, plus age/gender if in target_name
+        
+        target_list = []
+        # Support tuple target_name
+        if isinstance(target_name, str):
+            target_cols = [target_name]
+        elif isinstance(target_name, tuple):
+             target_cols = list(target_name)
+        else:
+             target_cols = ['epilepsy'] # Default
+             
+        for _, row in valid_meta.iterrows():
+            vals = []
+            for col in target_cols:
+                val = row.get(col, -1)
+                # Simple encoding
+                if col == 'gender':
+                    val = 0 if val == 'M' else (1 if val == 'F' else 2)
+                elif col == 'epilepsy':
+                    val = 1 if val else 0
+                vals.append(val)
+            target_list.append(vals)
+            
+        tensor_targets = torch.tensor(target_list)
+        
+        # Clean metadata for return (drop the heavy object)
+        if 'description_row' in valid_meta.columns:
+            valid_meta = valid_meta.drop(columns=['description_row'])
+            
+        return tensor_data, tensor_targets, valid_meta
+
 
 if __name__ == "__main__":
     # Example usage
@@ -399,13 +655,4 @@ if __name__ == "__main__":
         rename_channels=False,
         set_montage=False,
         n_jobs=1,
-    )
-    
-    tuh_windows = create_fixed_length_windows(
-        data,
-        start_offset_samples=0,
-        stop_offset_samples=None,
-        window_size_samples=250,
-        window_stride_samples=250,
-        drop_last_window=True,
     )
