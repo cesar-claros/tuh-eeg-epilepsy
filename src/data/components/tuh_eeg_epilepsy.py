@@ -194,6 +194,7 @@ class TUHEEGEpilepsy:
         overlap_pct: float = 0.0,
         balance_per_subject: bool = False,
         include_seizures: bool = True,
+        fix_length_mode: Optional[str] = 'resample', # 'resample', 'pad', or None
     ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]:
         
         # If window_len_s is provided, use the optimized balanced loader
@@ -203,6 +204,7 @@ class TUHEEGEpilepsy:
                 overlap_pct=overlap_pct,
                 balance_per_subject=balance_per_subject,
                 include_seizures=include_seizures,
+                fix_length_mode=fix_length_mode,
                 mode=mode,
                 filter_freq=filter_freq,
                 target_name=target_name,
@@ -411,6 +413,7 @@ class TUHEEGEpilepsy:
         overlap_pct: float,
         balance_per_subject: bool,
         include_seizures: bool,
+        fix_length_mode: Optional[str],
         mode: str,
         filter_freq: Optional[List[float]],
         target_name: Optional[Union[str, Tuple[str, ...]]],
@@ -571,13 +574,15 @@ class TUHEEGEpilepsy:
                 expected_samples = int(window_len_s * sfreq)
                 
                 if data.shape[1] > expected_samples:
-                    data = data[:, :expected_samples]
+                    # If strictly cropping, we might do it here, but wait for global check
+                    # data = data[:, :expected_samples]
+                    pass
                 elif data.shape[1] < expected_samples:
-                    # Pad? Or drop? 
-                    # Drop is safer for consistency
-                    return None
+                    # If padding is allowed, we keep it. If strict mode (None), we might drop?
+                    # For now keep it and let post-process handle it
+                    pass
                     
-                return data
+                return data, sfreq
 
             except Exception as e:
                 logger.error(f"Error loading window {row_meta}: {e}")
@@ -594,12 +599,104 @@ class TUHEEGEpilepsy:
             
         # Filter Nones
         valid_indices = [i for i, r in enumerate(results) if r is not None]
-        valid_data = [results[i] for i in valid_indices]
+        # Unzip data and sfreqs
+        valid_data_raw = [results[i][0] for i in valid_indices] # List[np.ndarray (Ch, Time)]
+        valid_sfreqs = [results[i][1] for i in valid_indices]   # List[float]
         valid_meta = window_df.iloc[valid_indices].reset_index(drop=True)
         
-        if not valid_data:
+        if not valid_data_raw:
              raise ValueError("No valid windows loaded.")
-             
+
+        # 5. Handle variable sampling rates / lengths
+        # Determine target parameters
+        unique_sfreqs = np.unique(valid_sfreqs)
+        
+        if len(unique_sfreqs) > 1:
+            logger.warning(f"Found multiple sampling frequencies: {unique_sfreqs}")
+            
+            if fix_length_mode == 'resample':
+                target_sfreq = float(np.min(unique_sfreqs))
+                logger.info(f"Resampling all windows to {target_sfreq} Hz")
+                
+                # Resample items that need it
+                for i in range(len(valid_data_raw)):
+                    d = valid_data_raw[i]
+                    sf = valid_sfreqs[i]
+                    
+                    if not np.isclose(sf, target_sfreq):
+                        # Calculate resampling factor
+                        # up/down = sf_target / sf_current
+                        # mne.filter.resample operates on last axis by default (Time)
+                        # data shape (Channels, Time)
+                        resampled_d = mne.filter.resample(d, up=target_sfreq, down=sf, axis=-1)
+                        valid_data_raw[i] = resampled_d
+                        valid_sfreqs[i] = target_sfreq
+                        
+            elif fix_length_mode == 'pad':
+               # Padding doesn't fix sampling rate, it just fixes shape.
+               # If sampling rates are different, padding makes them same size but different time duration.
+               # The user request said: "If pad is chosen, then we will pad the signals with zeros to the largest number of samples."
+               # This implies we accept different time durations in the same tensor (Time dimension), 
+               # but usually tensors represent fixed time.
+               # If SF is different, samples=100 @ 10Hz = 10s, samples=100 @ 100Hz = 1s.
+               # We just follow instructions to pad to largest SAMPLE count.
+               pass 
+            
+            else: 
+                raise ValueError(f"Function found multiple sampling frequencies {unique_sfreqs} but fix_length_mode is {fix_length_mode}.")
+
+        # Now ensure sample lengths are identical
+        lengths = [d.shape[1] for d in valid_data_raw]
+        max_len =  max(lengths)
+        min_len = min(lengths)
+        
+        target_len = max_len if fix_length_mode == 'pad' else int(window_len_s * min(valid_sfreqs)) # Approx target
+        
+        # Refine target_len:
+        # If 'pad', target is max_len.
+        # If 'resample', target should ideally be window_len_s * target_sfreq
+        if fix_length_mode == 'resample':
+             # We forced sfreq to min. Expected samples = window_len * min_sfreq
+             target_sfreq = min(valid_sfreqs)
+             target_len = int(window_len_s * target_sfreq)
+        
+        final_data_list = []
+        
+        for i, d in enumerate(valid_data_raw):
+            current_len = d.shape[1]
+            diff = target_len - current_len
+            
+            if diff == 0:
+                final_data_list.append(d)
+            elif diff > 0:
+                # Need to pad
+                if fix_length_mode in ['pad', 'resample']: 
+                    # Pad right with zeros
+                    # shape (Channels, Time)
+                    padding = np.zeros((d.shape[0], diff), dtype=d.dtype)
+                    padded_d = np.concatenate([d, padding], axis=1)
+                    final_data_list.append(padded_d)
+                else:
+                    # Mismatch and no fix mode
+                     # If diff is small (rounding error), maybe we allow it?
+                     # For now, strict.
+                     logger.warning(f"Window {i} has {current_len} samples, expected {target_len}. Skipping.")
+                     final_data_list.append(None) 
+            elif diff < 0:
+                # Need to trim
+                # Usually happens in resample mode due to rounding or if data was slightly longer
+                trimmed_d = d[:, :target_len]
+                final_data_list.append(trimmed_d)
+
+        # Filter dropped items
+        # Re-sync metadata
+        valid_final_indices = [i for i, d in enumerate(final_data_list) if d is not None]
+        final_valid_data = [final_data_list[i] for i in valid_final_indices]
+        valid_meta = valid_meta.iloc[valid_final_indices].reset_index(drop=True)
+
+        if not final_valid_data:
+            raise ValueError("All windows filtered out due to length mismatch.")
+
         # Stack Data
         # formatted as (Batch, Channels, Time) -> Transpose to (Batch, Time, Channels) if user asked (windows*samples*channels)?
         # User asked: (windows*samples*channels)
