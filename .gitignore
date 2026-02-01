@@ -146,7 +146,10 @@ dmypy.json
 
 # Lightning-Hydra-Template
 configs/local/default.yaml
-/data/
+/data/v3.0.0/00_epilepsy/
+/data/v3.0.0/01_no_epilepsy/
+/data/v3.0.0/DOCS/
+/data/MNIST/
 /logs/
 .env
 

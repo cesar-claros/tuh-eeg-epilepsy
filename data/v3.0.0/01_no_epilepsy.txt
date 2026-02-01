@@ -1,0 +1,2130 @@
+01_no_epilepsy
+├── aaaaaebo
+│   ├── s001_2006
+│   │   └── 02_tcp_le
+│   │       ├── aaaaaebo_s001_t000.csv
+│   │       ├── aaaaaebo_s001_t000.csv_bi
+│   │       └── aaaaaebo_s001_t000.edf
+│   ├── s002_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaebo_s002_t001.csv
+│   │       ├── aaaaaebo_s002_t001.csv_bi
+│   │       ├── aaaaaebo_s002_t001.edf
+│   │       ├── aaaaaebo_s002_t002.csv
+│   │       ├── aaaaaebo_s002_t002.csv_bi
+│   │       └── aaaaaebo_s002_t002.edf
+│   └── s003_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaebo_s003_t000.csv
+│           ├── aaaaaebo_s003_t000.csv_bi
+│           ├── aaaaaebo_s003_t000.edf
+│           ├── aaaaaebo_s003_t001.csv
+│           ├── aaaaaebo_s003_t001.csv_bi
+│           └── aaaaaebo_s003_t001.edf
+├── aaaaafiy
+│   ├── s001_2006
+│   │   └── 02_tcp_le
+│   │       ├── aaaaafiy_s001_t000.csv
+│   │       ├── aaaaafiy_s001_t000.csv_bi
+│   │       └── aaaaafiy_s001_t000.edf
+│   └── s002_2010
+│       └── 01_tcp_ar
+│           ├── aaaaafiy_s002_t001.csv
+│           ├── aaaaafiy_s002_t001.csv_bi
+│           └── aaaaafiy_s002_t001.edf
+├── aaaaaibz
+│   ├── s001_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaibz_s001_t000.csv
+│   │       ├── aaaaaibz_s001_t000.csv_bi
+│   │       └── aaaaaibz_s001_t000.edf
+│   └── s002_2011
+│       └── 01_tcp_ar
+│           ├── aaaaaibz_s002_t001.csv
+│           ├── aaaaaibz_s002_t001.csv_bi
+│           └── aaaaaibz_s002_t001.edf
+├── aaaaaigj
+│   ├── s001_2009
+│   │   └── 02_tcp_le
+│   │       ├── aaaaaigj_s001_t000.csv
+│   │       ├── aaaaaigj_s001_t000.csv_bi
+│   │       └── aaaaaigj_s001_t000.edf
+│   ├── s002_2009
+│   │   └── 02_tcp_le
+│   │       ├── aaaaaigj_s002_t001.csv
+│   │       ├── aaaaaigj_s002_t001.csv_bi
+│   │       └── aaaaaigj_s002_t001.edf
+│   ├── s003_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaigj_s003_t000.csv
+│   │       ├── aaaaaigj_s003_t000.csv_bi
+│   │       └── aaaaaigj_s003_t000.edf
+│   ├── s004_2016
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaigj_s004_t000.csv
+│   │       ├── aaaaaigj_s004_t000.csv_bi
+│   │       ├── aaaaaigj_s004_t000.edf
+│   │       ├── aaaaaigj_s004_t001.csv
+│   │       ├── aaaaaigj_s004_t001.csv_bi
+│   │       └── aaaaaigj_s004_t001.edf
+│   └── s005_2016
+│       └── 01_tcp_ar
+│           ├── aaaaaigj_s005_t000.csv
+│           ├── aaaaaigj_s005_t000.csv_bi
+│           ├── aaaaaigj_s005_t000.edf
+│           ├── aaaaaigj_s005_t001.csv
+│           ├── aaaaaigj_s005_t001.csv_bi
+│           └── aaaaaigj_s005_t001.edf
+├── aaaaajgj
+│   ├── s001_2009
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaajgj_s001_t000.csv
+│   │       ├── aaaaajgj_s001_t000.csv_bi
+│   │       └── aaaaajgj_s001_t000.edf
+│   ├── s002_2010
+│   │   └── 02_tcp_le
+│   │       ├── aaaaajgj_s002_t001.csv
+│   │       ├── aaaaajgj_s002_t001.csv_bi
+│   │       ├── aaaaajgj_s002_t001.edf
+│   │       ├── aaaaajgj_s002_t002.csv
+│   │       ├── aaaaajgj_s002_t002.csv_bi
+│   │       └── aaaaajgj_s002_t002.edf
+│   ├── s003_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaajgj_s003_t000.csv
+│   │       ├── aaaaajgj_s003_t000.csv_bi
+│   │       └── aaaaajgj_s003_t000.edf
+│   ├── s004_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaajgj_s004_t000.csv
+│   │       ├── aaaaajgj_s004_t000.csv_bi
+│   │       └── aaaaajgj_s004_t000.edf
+│   └── s005_2014
+│       └── 01_tcp_ar
+│           ├── aaaaajgj_s005_t000.csv
+│           ├── aaaaajgj_s005_t000.csv_bi
+│           └── aaaaajgj_s005_t000.edf
+├── aaaaajgn
+│   ├── s001_2009
+│   │   └── 02_tcp_le
+│   │       ├── aaaaajgn_s001_t000.csv
+│   │       ├── aaaaajgn_s001_t000.csv_bi
+│   │       └── aaaaajgn_s001_t000.edf
+│   ├── s002_2009
+│   │   └── 02_tcp_le
+│   │       ├── aaaaajgn_s002_t000.csv
+│   │       ├── aaaaajgn_s002_t000.csv_bi
+│   │       └── aaaaajgn_s002_t000.edf
+│   ├── s003_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaajgn_s003_t000.csv
+│   │       ├── aaaaajgn_s003_t000.csv_bi
+│   │       └── aaaaajgn_s003_t000.edf
+│   └── s004_2015
+│       └── 01_tcp_ar
+│           ├── aaaaajgn_s004_t000.csv
+│           ├── aaaaajgn_s004_t000.csv_bi
+│           └── aaaaajgn_s004_t000.edf
+├── aaaaajoz
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaajoz_s001_t000.csv
+│           ├── aaaaajoz_s001_t000.csv_bi
+│           └── aaaaajoz_s001_t000.edf
+├── aaaaajpt
+│   └── s001_2010
+│       └── 02_tcp_le
+│           ├── aaaaajpt_s001_t000.csv
+│           ├── aaaaajpt_s001_t000.csv_bi
+│           ├── aaaaajpt_s001_t000.edf
+│           ├── aaaaajpt_s001_t001.csv
+│           ├── aaaaajpt_s001_t001.csv_bi
+│           └── aaaaajpt_s001_t001.edf
+├── aaaaajrh
+│   ├── s001_2010
+│   │   └── 02_tcp_le
+│   │       ├── aaaaajrh_s001_t001.csv
+│   │       ├── aaaaajrh_s001_t001.csv_bi
+│   │       ├── aaaaajrh_s001_t001.edf
+│   │       ├── aaaaajrh_s001_t002.csv
+│   │       ├── aaaaajrh_s001_t002.csv_bi
+│   │       └── aaaaajrh_s001_t002.edf
+│   └── s002_2010
+│       └── 02_tcp_le
+│           ├── aaaaajrh_s002_t000.csv
+│           ├── aaaaajrh_s002_t000.csv_bi
+│           └── aaaaajrh_s002_t000.edf
+├── aaaaajrm
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaajrm_s001_t000.csv
+│           ├── aaaaajrm_s001_t000.csv_bi
+│           └── aaaaajrm_s001_t000.edf
+├── aaaaajsp
+│   └── s001_2010
+│       └── 02_tcp_le
+│           ├── aaaaajsp_s001_t001.csv
+│           ├── aaaaajsp_s001_t001.csv_bi
+│           └── aaaaajsp_s001_t001.edf
+├── aaaaajxf
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaajxf_s001_t000.csv
+│           ├── aaaaajxf_s001_t000.csv_bi
+│           └── aaaaajxf_s001_t000.edf
+├── aaaaajxm
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaajxm_s001_t001.csv
+│           ├── aaaaajxm_s001_t001.csv_bi
+│           └── aaaaajxm_s001_t001.edf
+├── aaaaakbp
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaakbp_s001_t001.csv
+│           ├── aaaaakbp_s001_t001.csv_bi
+│           └── aaaaakbp_s001_t001.edf
+├── aaaaakcd
+│   └── s001_2010
+│       └── 02_tcp_le
+│           ├── aaaaakcd_s001_t000.csv
+│           ├── aaaaakcd_s001_t000.csv_bi
+│           └── aaaaakcd_s001_t000.edf
+├── aaaaakfq
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaakfq_s001_t001.csv
+│           ├── aaaaakfq_s001_t001.csv_bi
+│           └── aaaaakfq_s001_t001.edf
+├── aaaaakgb
+│   └── s001_2010
+│       └── 02_tcp_le
+│           ├── aaaaakgb_s001_t000.csv
+│           ├── aaaaakgb_s001_t000.csv_bi
+│           └── aaaaakgb_s001_t000.edf
+├── aaaaakim
+│   ├── s001_2010
+│   │   └── 02_tcp_le
+│   │       ├── aaaaakim_s001_t002.csv
+│   │       ├── aaaaakim_s001_t002.csv_bi
+│   │       └── aaaaakim_s001_t002.edf
+│   └── s002_2010
+│       └── 02_tcp_le
+│           ├── aaaaakim_s002_t001.csv
+│           ├── aaaaakim_s002_t001.csv_bi
+│           └── aaaaakim_s002_t001.edf
+├── aaaaakkb
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaakkb_s001_t000.csv
+│           ├── aaaaakkb_s001_t000.csv_bi
+│           └── aaaaakkb_s001_t000.edf
+├── aaaaakkg
+│   ├── s001_2009
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaakkg_s001_t000.csv
+│   │       ├── aaaaakkg_s001_t000.csv_bi
+│   │       └── aaaaakkg_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaakkg_s002_t000.csv
+│           ├── aaaaakkg_s002_t000.csv_bi
+│           ├── aaaaakkg_s002_t000.edf
+│           ├── aaaaakkg_s002_t001.csv
+│           ├── aaaaakkg_s002_t001.csv_bi
+│           └── aaaaakkg_s002_t001.edf
+├── aaaaakmb
+│   └── s001_2010
+│       └── 02_tcp_le
+│           ├── aaaaakmb_s001_t000.csv
+│           ├── aaaaakmb_s001_t000.csv_bi
+│           └── aaaaakmb_s001_t000.edf
+├── aaaaakpl
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaakpl_s001_t001.csv
+│           ├── aaaaakpl_s001_t001.csv_bi
+│           └── aaaaakpl_s001_t001.edf
+├── aaaaakvz
+│   └── s001_2010
+│       └── 01_tcp_ar
+│           ├── aaaaakvz_s001_t000.csv
+│           ├── aaaaakvz_s001_t000.csv_bi
+│           ├── aaaaakvz_s001_t000.edf
+│           ├── aaaaakvz_s001_t001.csv
+│           ├── aaaaakvz_s001_t001.csv_bi
+│           └── aaaaakvz_s001_t001.edf
+├── aaaaaljb
+│   ├── s001_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaljb_s001_t000.csv
+│   │       ├── aaaaaljb_s001_t000.csv_bi
+│   │       └── aaaaaljb_s001_t000.edf
+│   └── s002_2011
+│       └── 03_tcp_ar_a
+│           ├── aaaaaljb_s002_t000.csv
+│           ├── aaaaaljb_s002_t000.csv_bi
+│           ├── aaaaaljb_s002_t000.edf
+│           ├── aaaaaljb_s002_t001.csv
+│           ├── aaaaaljb_s002_t001.csv_bi
+│           ├── aaaaaljb_s002_t001.edf
+│           ├── aaaaaljb_s002_t002.csv
+│           ├── aaaaaljb_s002_t002.csv_bi
+│           ├── aaaaaljb_s002_t002.edf
+│           ├── aaaaaljb_s002_t003.csv
+│           ├── aaaaaljb_s002_t003.csv_bi
+│           ├── aaaaaljb_s002_t003.edf
+│           ├── aaaaaljb_s002_t004.csv
+│           ├── aaaaaljb_s002_t004.csv_bi
+│           └── aaaaaljb_s002_t004.edf
+├── aaaaallk
+│   ├── s001_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaallk_s001_t000.csv
+│   │       ├── aaaaallk_s001_t000.csv_bi
+│   │       └── aaaaallk_s001_t000.edf
+│   └── s002_2015
+│       └── 01_tcp_ar
+│           ├── aaaaallk_s002_t000.csv
+│           ├── aaaaallk_s002_t000.csv_bi
+│           └── aaaaallk_s002_t000.edf
+├── aaaaalpi
+│   ├── s001_2011
+│   │   └── 02_tcp_le
+│   │       ├── aaaaalpi_s001_t000.csv
+│   │       ├── aaaaalpi_s001_t000.csv_bi
+│   │       ├── aaaaalpi_s001_t000.edf
+│   │       ├── aaaaalpi_s001_t001.csv
+│   │       ├── aaaaalpi_s001_t001.csv_bi
+│   │       ├── aaaaalpi_s001_t001.edf
+│   │       ├── aaaaalpi_s001_t002.csv
+│   │       ├── aaaaalpi_s001_t002.csv_bi
+│   │       ├── aaaaalpi_s001_t002.edf
+│   │       ├── aaaaalpi_s001_t003.csv
+│   │       ├── aaaaalpi_s001_t003.csv_bi
+│   │       ├── aaaaalpi_s001_t003.edf
+│   │       ├── aaaaalpi_s001_t004.csv
+│   │       ├── aaaaalpi_s001_t004.csv_bi
+│   │       └── aaaaalpi_s001_t004.edf
+│   └── s002_2011
+│       └── 02_tcp_le
+│           ├── aaaaalpi_s002_t000.csv
+│           ├── aaaaalpi_s002_t000.csv_bi
+│           ├── aaaaalpi_s002_t000.edf
+│           ├── aaaaalpi_s002_t001.csv
+│           ├── aaaaalpi_s002_t001.csv_bi
+│           ├── aaaaalpi_s002_t001.edf
+│           ├── aaaaalpi_s002_t002.csv
+│           ├── aaaaalpi_s002_t002.csv_bi
+│           ├── aaaaalpi_s002_t002.edf
+│           ├── aaaaalpi_s002_t003.csv
+│           ├── aaaaalpi_s002_t003.csv_bi
+│           ├── aaaaalpi_s002_t003.edf
+│           ├── aaaaalpi_s002_t004.csv
+│           ├── aaaaalpi_s002_t004.csv_bi
+│           ├── aaaaalpi_s002_t004.edf
+│           ├── aaaaalpi_s002_t005.csv
+│           ├── aaaaalpi_s002_t005.csv_bi
+│           └── aaaaalpi_s002_t005.edf
+├── aaaaalpw
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaalpw_s001_t001.csv
+│           ├── aaaaalpw_s001_t001.csv_bi
+│           └── aaaaalpw_s001_t001.edf
+├── aaaaalqk
+│   ├── s001_2011
+│   │   └── 02_tcp_le
+│   │       ├── aaaaalqk_s001_t001.csv
+│   │       ├── aaaaalqk_s001_t001.csv_bi
+│   │       └── aaaaalqk_s001_t001.edf
+│   └── s002_2015
+│       └── 03_tcp_ar_a
+│           ├── aaaaalqk_s002_t000.csv
+│           ├── aaaaalqk_s002_t000.csv_bi
+│           └── aaaaalqk_s002_t000.edf
+├── aaaaalsc
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaalsc_s001_t000.csv
+│           ├── aaaaalsc_s001_t000.csv_bi
+│           └── aaaaalsc_s001_t000.edf
+├── aaaaalxd
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaalxd_s001_t000.csv
+│           ├── aaaaalxd_s001_t000.csv_bi
+│           └── aaaaalxd_s001_t000.edf
+├── aaaaalyg
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaalyg_s001_t000.csv
+│           ├── aaaaalyg_s001_t000.csv_bi
+│           ├── aaaaalyg_s001_t000.edf
+│           ├── aaaaalyg_s001_t001.csv
+│           ├── aaaaalyg_s001_t001.csv_bi
+│           └── aaaaalyg_s001_t001.edf
+├── aaaaalze
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaalze_s001_t000.csv
+│           ├── aaaaalze_s001_t000.csv_bi
+│           ├── aaaaalze_s001_t000.edf
+│           ├── aaaaalze_s001_t001.csv
+│           ├── aaaaalze_s001_t001.csv_bi
+│           └── aaaaalze_s001_t001.edf
+├── aaaaamas
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaamas_s001_t000.csv
+│           ├── aaaaamas_s001_t000.csv_bi
+│           └── aaaaamas_s001_t000.edf
+├── aaaaamaw
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaamaw_s001_t001.csv
+│           ├── aaaaamaw_s001_t001.csv_bi
+│           ├── aaaaamaw_s001_t001.edf
+│           ├── aaaaamaw_s001_t002.csv
+│           ├── aaaaamaw_s001_t002.csv_bi
+│           └── aaaaamaw_s001_t002.edf
+├── aaaaamba
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaamba_s001_t000.csv
+│           ├── aaaaamba_s001_t000.csv_bi
+│           └── aaaaamba_s001_t000.edf
+├── aaaaamey
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaamey_s001_t000.csv
+│           ├── aaaaamey_s001_t000.csv_bi
+│           └── aaaaamey_s001_t000.edf
+├── aaaaamfh
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaamfh_s001_t000.csv
+│           ├── aaaaamfh_s001_t000.csv_bi
+│           └── aaaaamfh_s001_t000.edf
+├── aaaaamhx
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaamhx_s001_t000.csv
+│           ├── aaaaamhx_s001_t000.csv_bi
+│           ├── aaaaamhx_s001_t000.edf
+│           ├── aaaaamhx_s001_t001.csv
+│           ├── aaaaamhx_s001_t001.csv_bi
+│           └── aaaaamhx_s001_t001.edf
+├── aaaaamlk
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaamlk_s001_t001.csv
+│           ├── aaaaamlk_s001_t001.csv_bi
+│           └── aaaaamlk_s001_t001.edf
+├── aaaaammn
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaammn_s001_t000.csv
+│           ├── aaaaammn_s001_t000.csv_bi
+│           └── aaaaammn_s001_t000.edf
+├── aaaaammt
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaammt_s001_t000.csv
+│           ├── aaaaammt_s001_t000.csv_bi
+│           ├── aaaaammt_s001_t000.edf
+│           ├── aaaaammt_s001_t001.csv
+│           ├── aaaaammt_s001_t001.csv_bi
+│           └── aaaaammt_s001_t001.edf
+├── aaaaammw
+│   └── s001_2011
+│       └── 01_tcp_ar
+│           ├── aaaaammw_s001_t000.csv
+│           ├── aaaaammw_s001_t000.csv_bi
+│           └── aaaaammw_s001_t000.edf
+├── aaaaamnf
+│   └── s001_2011
+│       └── 02_tcp_le
+│           ├── aaaaamnf_s001_t000.csv
+│           ├── aaaaamnf_s001_t000.csv_bi
+│           └── aaaaamnf_s001_t000.edf
+├── aaaaamrw
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaamrw_s001_t000.csv
+│           ├── aaaaamrw_s001_t000.csv_bi
+│           └── aaaaamrw_s001_t000.edf
+├── aaaaamum
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaamum_s001_t000.csv
+│   │       ├── aaaaamum_s001_t000.csv_bi
+│   │       └── aaaaamum_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaamum_s002_t000.csv
+│           ├── aaaaamum_s002_t000.csv_bi
+│           ├── aaaaamum_s002_t000.edf
+│           ├── aaaaamum_s002_t001.csv
+│           ├── aaaaamum_s002_t001.csv_bi
+│           ├── aaaaamum_s002_t001.edf
+│           ├── aaaaamum_s002_t002.csv
+│           ├── aaaaamum_s002_t002.csv_bi
+│           ├── aaaaamum_s002_t002.edf
+│           ├── aaaaamum_s002_t003.csv
+│           ├── aaaaamum_s002_t003.csv_bi
+│           ├── aaaaamum_s002_t003.edf
+│           ├── aaaaamum_s002_t004.csv
+│           ├── aaaaamum_s002_t004.csv_bi
+│           ├── aaaaamum_s002_t004.edf
+│           ├── aaaaamum_s002_t005.csv
+│           ├── aaaaamum_s002_t005.csv_bi
+│           ├── aaaaamum_s002_t005.edf
+│           ├── aaaaamum_s002_t006.csv
+│           ├── aaaaamum_s002_t006.csv_bi
+│           ├── aaaaamum_s002_t006.edf
+│           ├── aaaaamum_s002_t007.csv
+│           ├── aaaaamum_s002_t007.csv_bi
+│           ├── aaaaamum_s002_t007.edf
+│           ├── aaaaamum_s002_t008.csv
+│           ├── aaaaamum_s002_t008.csv_bi
+│           ├── aaaaamum_s002_t008.edf
+│           ├── aaaaamum_s002_t009.csv
+│           ├── aaaaamum_s002_t009.csv_bi
+│           ├── aaaaamum_s002_t009.edf
+│           ├── aaaaamum_s002_t010.csv
+│           ├── aaaaamum_s002_t010.csv_bi
+│           ├── aaaaamum_s002_t010.edf
+│           ├── aaaaamum_s002_t011.csv
+│           ├── aaaaamum_s002_t011.csv_bi
+│           ├── aaaaamum_s002_t011.edf
+│           ├── aaaaamum_s002_t012.csv
+│           ├── aaaaamum_s002_t012.csv_bi
+│           ├── aaaaamum_s002_t012.edf
+│           ├── aaaaamum_s002_t013.csv
+│           ├── aaaaamum_s002_t013.csv_bi
+│           ├── aaaaamum_s002_t013.edf
+│           ├── aaaaamum_s002_t014.csv
+│           ├── aaaaamum_s002_t014.csv_bi
+│           ├── aaaaamum_s002_t014.edf
+│           ├── aaaaamum_s002_t015.csv
+│           ├── aaaaamum_s002_t015.csv_bi
+│           ├── aaaaamum_s002_t015.edf
+│           ├── aaaaamum_s002_t016.csv
+│           ├── aaaaamum_s002_t016.csv_bi
+│           ├── aaaaamum_s002_t016.edf
+│           ├── aaaaamum_s002_t017.csv
+│           ├── aaaaamum_s002_t017.csv_bi
+│           ├── aaaaamum_s002_t017.edf
+│           ├── aaaaamum_s002_t018.csv
+│           ├── aaaaamum_s002_t018.csv_bi
+│           ├── aaaaamum_s002_t018.edf
+│           ├── aaaaamum_s002_t019.csv
+│           ├── aaaaamum_s002_t019.csv_bi
+│           ├── aaaaamum_s002_t019.edf
+│           ├── aaaaamum_s002_t020.csv
+│           ├── aaaaamum_s002_t020.csv_bi
+│           ├── aaaaamum_s002_t020.edf
+│           ├── aaaaamum_s002_t021.csv
+│           ├── aaaaamum_s002_t021.csv_bi
+│           ├── aaaaamum_s002_t021.edf
+│           ├── aaaaamum_s002_t022.csv
+│           ├── aaaaamum_s002_t022.csv_bi
+│           ├── aaaaamum_s002_t022.edf
+│           ├── aaaaamum_s002_t023.csv
+│           ├── aaaaamum_s002_t023.csv_bi
+│           ├── aaaaamum_s002_t023.edf
+│           ├── aaaaamum_s002_t024.csv
+│           ├── aaaaamum_s002_t024.csv_bi
+│           ├── aaaaamum_s002_t024.edf
+│           ├── aaaaamum_s002_t025.csv
+│           ├── aaaaamum_s002_t025.csv_bi
+│           ├── aaaaamum_s002_t025.edf
+│           ├── aaaaamum_s002_t026.csv
+│           ├── aaaaamum_s002_t026.csv_bi
+│           ├── aaaaamum_s002_t026.edf
+│           ├── aaaaamum_s002_t027.csv
+│           ├── aaaaamum_s002_t027.csv_bi
+│           ├── aaaaamum_s002_t027.edf
+│           ├── aaaaamum_s002_t028.csv
+│           ├── aaaaamum_s002_t028.csv_bi
+│           ├── aaaaamum_s002_t028.edf
+│           ├── aaaaamum_s002_t029.csv
+│           ├── aaaaamum_s002_t029.csv_bi
+│           ├── aaaaamum_s002_t029.edf
+│           ├── aaaaamum_s002_t030.csv
+│           ├── aaaaamum_s002_t030.csv_bi
+│           ├── aaaaamum_s002_t030.edf
+│           ├── aaaaamum_s002_t031.csv
+│           ├── aaaaamum_s002_t031.csv_bi
+│           ├── aaaaamum_s002_t031.edf
+│           ├── aaaaamum_s002_t032.csv
+│           ├── aaaaamum_s002_t032.csv_bi
+│           ├── aaaaamum_s002_t032.edf
+│           ├── aaaaamum_s002_t033.csv
+│           ├── aaaaamum_s002_t033.csv_bi
+│           ├── aaaaamum_s002_t033.edf
+│           ├── aaaaamum_s002_t034.csv
+│           ├── aaaaamum_s002_t034.csv_bi
+│           ├── aaaaamum_s002_t034.edf
+│           ├── aaaaamum_s002_t035.csv
+│           ├── aaaaamum_s002_t035.csv_bi
+│           ├── aaaaamum_s002_t035.edf
+│           ├── aaaaamum_s002_t036.csv
+│           ├── aaaaamum_s002_t036.csv_bi
+│           ├── aaaaamum_s002_t036.edf
+│           ├── aaaaamum_s002_t037.csv
+│           ├── aaaaamum_s002_t037.csv_bi
+│           ├── aaaaamum_s002_t037.edf
+│           ├── aaaaamum_s002_t038.csv
+│           ├── aaaaamum_s002_t038.csv_bi
+│           ├── aaaaamum_s002_t038.edf
+│           ├── aaaaamum_s002_t039.csv
+│           ├── aaaaamum_s002_t039.csv_bi
+│           ├── aaaaamum_s002_t039.edf
+│           ├── aaaaamum_s002_t040.csv
+│           ├── aaaaamum_s002_t040.csv_bi
+│           ├── aaaaamum_s002_t040.edf
+│           ├── aaaaamum_s002_t041.csv
+│           ├── aaaaamum_s002_t041.csv_bi
+│           ├── aaaaamum_s002_t041.edf
+│           ├── aaaaamum_s002_t042.csv
+│           ├── aaaaamum_s002_t042.csv_bi
+│           ├── aaaaamum_s002_t042.edf
+│           ├── aaaaamum_s002_t043.csv
+│           ├── aaaaamum_s002_t043.csv_bi
+│           └── aaaaamum_s002_t043.edf
+├── aaaaamwa
+│   ├── s001_2011
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaamwa_s001_t000.csv
+│   │       ├── aaaaamwa_s001_t000.csv_bi
+│   │       └── aaaaamwa_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaamwa_s002_t000.csv
+│           ├── aaaaamwa_s002_t000.csv_bi
+│           └── aaaaamwa_s002_t000.edf
+├── aaaaamwl
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaamwl_s001_t000.csv
+│           ├── aaaaamwl_s001_t000.csv_bi
+│           └── aaaaamwl_s001_t000.edf
+├── aaaaanca
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanca_s001_t000.csv
+│   │       ├── aaaaanca_s001_t000.csv_bi
+│   │       └── aaaaanca_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanca_s002_t000.csv
+│           ├── aaaaanca_s002_t000.csv_bi
+│           └── aaaaanca_s002_t000.edf
+├── aaaaandb
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaandb_s001_t000.csv
+│   │       ├── aaaaandb_s001_t000.csv_bi
+│   │       └── aaaaandb_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaandb_s002_t000.csv
+│           ├── aaaaandb_s002_t000.csv_bi
+│           ├── aaaaandb_s002_t000.edf
+│           ├── aaaaandb_s002_t001.csv
+│           ├── aaaaandb_s002_t001.csv_bi
+│           ├── aaaaandb_s002_t001.edf
+│           ├── aaaaandb_s002_t002.csv
+│           ├── aaaaandb_s002_t002.csv_bi
+│           ├── aaaaandb_s002_t002.edf
+│           ├── aaaaandb_s002_t003.csv
+│           ├── aaaaandb_s002_t003.csv_bi
+│           ├── aaaaandb_s002_t003.edf
+│           ├── aaaaandb_s002_t004.csv
+│           ├── aaaaandb_s002_t004.csv_bi
+│           ├── aaaaandb_s002_t004.edf
+│           ├── aaaaandb_s002_t005.csv
+│           ├── aaaaandb_s002_t005.csv_bi
+│           ├── aaaaandb_s002_t005.edf
+│           ├── aaaaandb_s002_t006.csv
+│           ├── aaaaandb_s002_t006.csv_bi
+│           ├── aaaaandb_s002_t006.edf
+│           ├── aaaaandb_s002_t007.csv
+│           ├── aaaaandb_s002_t007.csv_bi
+│           ├── aaaaandb_s002_t007.edf
+│           ├── aaaaandb_s002_t008.csv
+│           ├── aaaaandb_s002_t008.csv_bi
+│           ├── aaaaandb_s002_t008.edf
+│           ├── aaaaandb_s002_t009.csv
+│           ├── aaaaandb_s002_t009.csv_bi
+│           ├── aaaaandb_s002_t009.edf
+│           ├── aaaaandb_s002_t010.csv
+│           ├── aaaaandb_s002_t010.csv_bi
+│           └── aaaaandb_s002_t010.edf
+├── aaaaangg
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaangg_s001_t000.csv
+│   │       ├── aaaaangg_s001_t000.csv_bi
+│   │       ├── aaaaangg_s001_t000.edf
+│   │       ├── aaaaangg_s001_t001.csv
+│   │       ├── aaaaangg_s001_t001.csv_bi
+│   │       └── aaaaangg_s001_t001.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaangg_s002_t000.csv
+│           ├── aaaaangg_s002_t000.csv_bi
+│           ├── aaaaangg_s002_t000.edf
+│           ├── aaaaangg_s002_t001.csv
+│           ├── aaaaangg_s002_t001.csv_bi
+│           ├── aaaaangg_s002_t001.edf
+│           ├── aaaaangg_s002_t002.csv
+│           ├── aaaaangg_s002_t002.csv_bi
+│           ├── aaaaangg_s002_t002.edf
+│           ├── aaaaangg_s002_t003.csv
+│           ├── aaaaangg_s002_t003.csv_bi
+│           ├── aaaaangg_s002_t003.edf
+│           ├── aaaaangg_s002_t004.csv
+│           ├── aaaaangg_s002_t004.csv_bi
+│           ├── aaaaangg_s002_t004.edf
+│           ├── aaaaangg_s002_t005.csv
+│           ├── aaaaangg_s002_t005.csv_bi
+│           ├── aaaaangg_s002_t005.edf
+│           ├── aaaaangg_s002_t006.csv
+│           ├── aaaaangg_s002_t006.csv_bi
+│           ├── aaaaangg_s002_t006.edf
+│           ├── aaaaangg_s002_t007.csv
+│           ├── aaaaangg_s002_t007.csv_bi
+│           ├── aaaaangg_s002_t007.edf
+│           ├── aaaaangg_s002_t008.csv
+│           ├── aaaaangg_s002_t008.csv_bi
+│           ├── aaaaangg_s002_t008.edf
+│           ├── aaaaangg_s002_t009.csv
+│           ├── aaaaangg_s002_t009.csv_bi
+│           ├── aaaaangg_s002_t009.edf
+│           ├── aaaaangg_s002_t010.csv
+│           ├── aaaaangg_s002_t010.csv_bi
+│           ├── aaaaangg_s002_t010.edf
+│           ├── aaaaangg_s002_t011.csv
+│           ├── aaaaangg_s002_t011.csv_bi
+│           ├── aaaaangg_s002_t011.edf
+│           ├── aaaaangg_s002_t012.csv
+│           ├── aaaaangg_s002_t012.csv_bi
+│           ├── aaaaangg_s002_t012.edf
+│           ├── aaaaangg_s002_t013.csv
+│           ├── aaaaangg_s002_t013.csv_bi
+│           ├── aaaaangg_s002_t013.edf
+│           ├── aaaaangg_s002_t014.csv
+│           ├── aaaaangg_s002_t014.csv_bi
+│           ├── aaaaangg_s002_t014.edf
+│           ├── aaaaangg_s002_t015.csv
+│           ├── aaaaangg_s002_t015.csv_bi
+│           ├── aaaaangg_s002_t015.edf
+│           ├── aaaaangg_s002_t016.csv
+│           ├── aaaaangg_s002_t016.csv_bi
+│           ├── aaaaangg_s002_t016.edf
+│           ├── aaaaangg_s002_t017.csv
+│           ├── aaaaangg_s002_t017.csv_bi
+│           └── aaaaangg_s002_t017.edf
+├── aaaaanig
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s001_t000.csv
+│   │       ├── aaaaanig_s001_t000.csv_bi
+│   │       └── aaaaanig_s001_t000.edf
+│   ├── s002_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s002_t000.csv
+│   │       ├── aaaaanig_s002_t000.csv_bi
+│   │       ├── aaaaanig_s002_t000.edf
+│   │       ├── aaaaanig_s002_t001.csv
+│   │       ├── aaaaanig_s002_t001.csv_bi
+│   │       └── aaaaanig_s002_t001.edf
+│   ├── s003_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s003_t000.csv
+│   │       ├── aaaaanig_s003_t000.csv_bi
+│   │       └── aaaaanig_s003_t000.edf
+│   ├── s005_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s005_t000.csv
+│   │       ├── aaaaanig_s005_t000.csv_bi
+│   │       ├── aaaaanig_s005_t000.edf
+│   │       ├── aaaaanig_s005_t001.csv
+│   │       ├── aaaaanig_s005_t001.csv_bi
+│   │       ├── aaaaanig_s005_t001.edf
+│   │       ├── aaaaanig_s005_t002.csv
+│   │       ├── aaaaanig_s005_t002.csv_bi
+│   │       ├── aaaaanig_s005_t002.edf
+│   │       ├── aaaaanig_s005_t003.csv
+│   │       ├── aaaaanig_s005_t003.csv_bi
+│   │       ├── aaaaanig_s005_t003.edf
+│   │       ├── aaaaanig_s005_t004.csv
+│   │       ├── aaaaanig_s005_t004.csv_bi
+│   │       ├── aaaaanig_s005_t004.edf
+│   │       ├── aaaaanig_s005_t005.csv
+│   │       ├── aaaaanig_s005_t005.csv_bi
+│   │       ├── aaaaanig_s005_t005.edf
+│   │       ├── aaaaanig_s005_t006.csv
+│   │       ├── aaaaanig_s005_t006.csv_bi
+│   │       ├── aaaaanig_s005_t006.edf
+│   │       ├── aaaaanig_s005_t007.csv
+│   │       ├── aaaaanig_s005_t007.csv_bi
+│   │       ├── aaaaanig_s005_t007.edf
+│   │       ├── aaaaanig_s005_t008.csv
+│   │       ├── aaaaanig_s005_t008.csv_bi
+│   │       ├── aaaaanig_s005_t008.edf
+│   │       ├── aaaaanig_s005_t009.csv
+│   │       ├── aaaaanig_s005_t009.csv_bi
+│   │       ├── aaaaanig_s005_t009.edf
+│   │       ├── aaaaanig_s005_t010.csv
+│   │       ├── aaaaanig_s005_t010.csv_bi
+│   │       ├── aaaaanig_s005_t010.edf
+│   │       ├── aaaaanig_s005_t011.csv
+│   │       ├── aaaaanig_s005_t011.csv_bi
+│   │       ├── aaaaanig_s005_t011.edf
+│   │       ├── aaaaanig_s005_t012.csv
+│   │       ├── aaaaanig_s005_t012.csv_bi
+│   │       ├── aaaaanig_s005_t012.edf
+│   │       ├── aaaaanig_s005_t013.csv
+│   │       ├── aaaaanig_s005_t013.csv_bi
+│   │       ├── aaaaanig_s005_t013.edf
+│   │       ├── aaaaanig_s005_t014.csv
+│   │       ├── aaaaanig_s005_t014.csv_bi
+│   │       ├── aaaaanig_s005_t014.edf
+│   │       ├── aaaaanig_s005_t015.csv
+│   │       ├── aaaaanig_s005_t015.csv_bi
+│   │       └── aaaaanig_s005_t015.edf
+│   ├── s006_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s006_t000.csv
+│   │       ├── aaaaanig_s006_t000.csv_bi
+│   │       ├── aaaaanig_s006_t000.edf
+│   │       ├── aaaaanig_s006_t001.csv
+│   │       ├── aaaaanig_s006_t001.csv_bi
+│   │       ├── aaaaanig_s006_t001.edf
+│   │       ├── aaaaanig_s006_t002.csv
+│   │       ├── aaaaanig_s006_t002.csv_bi
+│   │       ├── aaaaanig_s006_t002.edf
+│   │       ├── aaaaanig_s006_t003.csv
+│   │       ├── aaaaanig_s006_t003.csv_bi
+│   │       ├── aaaaanig_s006_t003.edf
+│   │       ├── aaaaanig_s006_t004.csv
+│   │       ├── aaaaanig_s006_t004.csv_bi
+│   │       ├── aaaaanig_s006_t004.edf
+│   │       ├── aaaaanig_s006_t005.csv
+│   │       ├── aaaaanig_s006_t005.csv_bi
+│   │       ├── aaaaanig_s006_t005.edf
+│   │       ├── aaaaanig_s006_t006.csv
+│   │       ├── aaaaanig_s006_t006.csv_bi
+│   │       ├── aaaaanig_s006_t006.edf
+│   │       ├── aaaaanig_s006_t007.csv
+│   │       ├── aaaaanig_s006_t007.csv_bi
+│   │       ├── aaaaanig_s006_t007.edf
+│   │       ├── aaaaanig_s006_t008.csv
+│   │       ├── aaaaanig_s006_t008.csv_bi
+│   │       ├── aaaaanig_s006_t008.edf
+│   │       ├── aaaaanig_s006_t009.csv
+│   │       ├── aaaaanig_s006_t009.csv_bi
+│   │       ├── aaaaanig_s006_t009.edf
+│   │       ├── aaaaanig_s006_t010.csv
+│   │       ├── aaaaanig_s006_t010.csv_bi
+│   │       ├── aaaaanig_s006_t010.edf
+│   │       ├── aaaaanig_s006_t011.csv
+│   │       ├── aaaaanig_s006_t011.csv_bi
+│   │       ├── aaaaanig_s006_t011.edf
+│   │       ├── aaaaanig_s006_t012.csv
+│   │       ├── aaaaanig_s006_t012.csv_bi
+│   │       └── aaaaanig_s006_t012.edf
+│   ├── s007_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s007_t000.csv
+│   │       ├── aaaaanig_s007_t000.csv_bi
+│   │       ├── aaaaanig_s007_t000.edf
+│   │       ├── aaaaanig_s007_t001.csv
+│   │       ├── aaaaanig_s007_t001.csv_bi
+│   │       ├── aaaaanig_s007_t001.edf
+│   │       ├── aaaaanig_s007_t002.csv
+│   │       ├── aaaaanig_s007_t002.csv_bi
+│   │       ├── aaaaanig_s007_t002.edf
+│   │       ├── aaaaanig_s007_t003.csv
+│   │       ├── aaaaanig_s007_t003.csv_bi
+│   │       ├── aaaaanig_s007_t003.edf
+│   │       ├── aaaaanig_s007_t004.csv
+│   │       ├── aaaaanig_s007_t004.csv_bi
+│   │       ├── aaaaanig_s007_t004.edf
+│   │       ├── aaaaanig_s007_t005.csv
+│   │       ├── aaaaanig_s007_t005.csv_bi
+│   │       ├── aaaaanig_s007_t005.edf
+│   │       ├── aaaaanig_s007_t006.csv
+│   │       ├── aaaaanig_s007_t006.csv_bi
+│   │       ├── aaaaanig_s007_t006.edf
+│   │       ├── aaaaanig_s007_t007.csv
+│   │       ├── aaaaanig_s007_t007.csv_bi
+│   │       ├── aaaaanig_s007_t007.edf
+│   │       ├── aaaaanig_s007_t008.csv
+│   │       ├── aaaaanig_s007_t008.csv_bi
+│   │       ├── aaaaanig_s007_t008.edf
+│   │       ├── aaaaanig_s007_t009.csv
+│   │       ├── aaaaanig_s007_t009.csv_bi
+│   │       ├── aaaaanig_s007_t009.edf
+│   │       ├── aaaaanig_s007_t010.csv
+│   │       ├── aaaaanig_s007_t010.csv_bi
+│   │       ├── aaaaanig_s007_t010.edf
+│   │       ├── aaaaanig_s007_t011.csv
+│   │       ├── aaaaanig_s007_t011.csv_bi
+│   │       ├── aaaaanig_s007_t011.edf
+│   │       ├── aaaaanig_s007_t012.csv
+│   │       ├── aaaaanig_s007_t012.csv_bi
+│   │       ├── aaaaanig_s007_t012.edf
+│   │       ├── aaaaanig_s007_t013.csv
+│   │       ├── aaaaanig_s007_t013.csv_bi
+│   │       └── aaaaanig_s007_t013.edf
+│   ├── s008_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s008_t000.csv
+│   │       ├── aaaaanig_s008_t000.csv_bi
+│   │       ├── aaaaanig_s008_t000.edf
+│   │       ├── aaaaanig_s008_t001.csv
+│   │       ├── aaaaanig_s008_t001.csv_bi
+│   │       ├── aaaaanig_s008_t001.edf
+│   │       ├── aaaaanig_s008_t002.csv
+│   │       ├── aaaaanig_s008_t002.csv_bi
+│   │       ├── aaaaanig_s008_t002.edf
+│   │       ├── aaaaanig_s008_t003.csv
+│   │       ├── aaaaanig_s008_t003.csv_bi
+│   │       ├── aaaaanig_s008_t003.edf
+│   │       ├── aaaaanig_s008_t004.csv
+│   │       ├── aaaaanig_s008_t004.csv_bi
+│   │       ├── aaaaanig_s008_t004.edf
+│   │       ├── aaaaanig_s008_t005.csv
+│   │       ├── aaaaanig_s008_t005.csv_bi
+│   │       ├── aaaaanig_s008_t005.edf
+│   │       ├── aaaaanig_s008_t006.csv
+│   │       ├── aaaaanig_s008_t006.csv_bi
+│   │       ├── aaaaanig_s008_t006.edf
+│   │       ├── aaaaanig_s008_t007.csv
+│   │       ├── aaaaanig_s008_t007.csv_bi
+│   │       ├── aaaaanig_s008_t007.edf
+│   │       ├── aaaaanig_s008_t008.csv
+│   │       ├── aaaaanig_s008_t008.csv_bi
+│   │       ├── aaaaanig_s008_t008.edf
+│   │       ├── aaaaanig_s008_t009.csv
+│   │       ├── aaaaanig_s008_t009.csv_bi
+│   │       ├── aaaaanig_s008_t009.edf
+│   │       ├── aaaaanig_s008_t010.csv
+│   │       ├── aaaaanig_s008_t010.csv_bi
+│   │       └── aaaaanig_s008_t010.edf
+│   ├── s009_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s009_t000.csv
+│   │       ├── aaaaanig_s009_t000.csv_bi
+│   │       ├── aaaaanig_s009_t000.edf
+│   │       ├── aaaaanig_s009_t001.csv
+│   │       ├── aaaaanig_s009_t001.csv_bi
+│   │       ├── aaaaanig_s009_t001.edf
+│   │       ├── aaaaanig_s009_t002.csv
+│   │       ├── aaaaanig_s009_t002.csv_bi
+│   │       ├── aaaaanig_s009_t002.edf
+│   │       ├── aaaaanig_s009_t003.csv
+│   │       ├── aaaaanig_s009_t003.csv_bi
+│   │       ├── aaaaanig_s009_t003.edf
+│   │       ├── aaaaanig_s009_t004.csv
+│   │       ├── aaaaanig_s009_t004.csv_bi
+│   │       ├── aaaaanig_s009_t004.edf
+│   │       ├── aaaaanig_s009_t005.csv
+│   │       ├── aaaaanig_s009_t005.csv_bi
+│   │       ├── aaaaanig_s009_t005.edf
+│   │       ├── aaaaanig_s009_t006.csv
+│   │       ├── aaaaanig_s009_t006.csv_bi
+│   │       ├── aaaaanig_s009_t006.edf
+│   │       ├── aaaaanig_s009_t007.csv
+│   │       ├── aaaaanig_s009_t007.csv_bi
+│   │       ├── aaaaanig_s009_t007.edf
+│   │       ├── aaaaanig_s009_t008.csv
+│   │       ├── aaaaanig_s009_t008.csv_bi
+│   │       ├── aaaaanig_s009_t008.edf
+│   │       ├── aaaaanig_s009_t009.csv
+│   │       ├── aaaaanig_s009_t009.csv_bi
+│   │       ├── aaaaanig_s009_t009.edf
+│   │       ├── aaaaanig_s009_t010.csv
+│   │       ├── aaaaanig_s009_t010.csv_bi
+│   │       ├── aaaaanig_s009_t010.edf
+│   │       ├── aaaaanig_s009_t011.csv
+│   │       ├── aaaaanig_s009_t011.csv_bi
+│   │       ├── aaaaanig_s009_t011.edf
+│   │       ├── aaaaanig_s009_t012.csv
+│   │       ├── aaaaanig_s009_t012.csv_bi
+│   │       ├── aaaaanig_s009_t012.edf
+│   │       ├── aaaaanig_s009_t013.csv
+│   │       ├── aaaaanig_s009_t013.csv_bi
+│   │       ├── aaaaanig_s009_t013.edf
+│   │       ├── aaaaanig_s009_t014.csv
+│   │       ├── aaaaanig_s009_t014.csv_bi
+│   │       ├── aaaaanig_s009_t014.edf
+│   │       ├── aaaaanig_s009_t015.csv
+│   │       ├── aaaaanig_s009_t015.csv_bi
+│   │       ├── aaaaanig_s009_t015.edf
+│   │       ├── aaaaanig_s009_t016.csv
+│   │       ├── aaaaanig_s009_t016.csv_bi
+│   │       └── aaaaanig_s009_t016.edf
+│   ├── s010_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s010_t000.csv
+│   │       ├── aaaaanig_s010_t000.csv_bi
+│   │       ├── aaaaanig_s010_t000.edf
+│   │       ├── aaaaanig_s010_t001.csv
+│   │       ├── aaaaanig_s010_t001.csv_bi
+│   │       ├── aaaaanig_s010_t001.edf
+│   │       ├── aaaaanig_s010_t002.csv
+│   │       ├── aaaaanig_s010_t002.csv_bi
+│   │       ├── aaaaanig_s010_t002.edf
+│   │       ├── aaaaanig_s010_t003.csv
+│   │       ├── aaaaanig_s010_t003.csv_bi
+│   │       ├── aaaaanig_s010_t003.edf
+│   │       ├── aaaaanig_s010_t004.csv
+│   │       ├── aaaaanig_s010_t004.csv_bi
+│   │       ├── aaaaanig_s010_t004.edf
+│   │       ├── aaaaanig_s010_t005.csv
+│   │       ├── aaaaanig_s010_t005.csv_bi
+│   │       ├── aaaaanig_s010_t005.edf
+│   │       ├── aaaaanig_s010_t006.csv
+│   │       ├── aaaaanig_s010_t006.csv_bi
+│   │       ├── aaaaanig_s010_t006.edf
+│   │       ├── aaaaanig_s010_t007.csv
+│   │       ├── aaaaanig_s010_t007.csv_bi
+│   │       ├── aaaaanig_s010_t007.edf
+│   │       ├── aaaaanig_s010_t008.csv
+│   │       ├── aaaaanig_s010_t008.csv_bi
+│   │       ├── aaaaanig_s010_t008.edf
+│   │       ├── aaaaanig_s010_t009.csv
+│   │       ├── aaaaanig_s010_t009.csv_bi
+│   │       └── aaaaanig_s010_t009.edf
+│   ├── s011_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s011_t000.csv
+│   │       ├── aaaaanig_s011_t000.csv_bi
+│   │       ├── aaaaanig_s011_t000.edf
+│   │       ├── aaaaanig_s011_t001.csv
+│   │       ├── aaaaanig_s011_t001.csv_bi
+│   │       ├── aaaaanig_s011_t001.edf
+│   │       ├── aaaaanig_s011_t002.csv
+│   │       ├── aaaaanig_s011_t002.csv_bi
+│   │       ├── aaaaanig_s011_t002.edf
+│   │       ├── aaaaanig_s011_t003.csv
+│   │       ├── aaaaanig_s011_t003.csv_bi
+│   │       ├── aaaaanig_s011_t003.edf
+│   │       ├── aaaaanig_s011_t004.csv
+│   │       ├── aaaaanig_s011_t004.csv_bi
+│   │       ├── aaaaanig_s011_t004.edf
+│   │       ├── aaaaanig_s011_t005.csv
+│   │       ├── aaaaanig_s011_t005.csv_bi
+│   │       ├── aaaaanig_s011_t005.edf
+│   │       ├── aaaaanig_s011_t006.csv
+│   │       ├── aaaaanig_s011_t006.csv_bi
+│   │       ├── aaaaanig_s011_t006.edf
+│   │       ├── aaaaanig_s011_t007.csv
+│   │       ├── aaaaanig_s011_t007.csv_bi
+│   │       ├── aaaaanig_s011_t007.edf
+│   │       ├── aaaaanig_s011_t008.csv
+│   │       ├── aaaaanig_s011_t008.csv_bi
+│   │       ├── aaaaanig_s011_t008.edf
+│   │       ├── aaaaanig_s011_t009.csv
+│   │       ├── aaaaanig_s011_t009.csv_bi
+│   │       ├── aaaaanig_s011_t009.edf
+│   │       ├── aaaaanig_s011_t010.csv
+│   │       ├── aaaaanig_s011_t010.csv_bi
+│   │       ├── aaaaanig_s011_t010.edf
+│   │       ├── aaaaanig_s011_t011.csv
+│   │       ├── aaaaanig_s011_t011.csv_bi
+│   │       ├── aaaaanig_s011_t011.edf
+│   │       ├── aaaaanig_s011_t012.csv
+│   │       ├── aaaaanig_s011_t012.csv_bi
+│   │       ├── aaaaanig_s011_t012.edf
+│   │       ├── aaaaanig_s011_t013.csv
+│   │       ├── aaaaanig_s011_t013.csv_bi
+│   │       └── aaaaanig_s011_t013.edf
+│   ├── s012_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s012_t000.csv
+│   │       ├── aaaaanig_s012_t000.csv_bi
+│   │       ├── aaaaanig_s012_t000.edf
+│   │       ├── aaaaanig_s012_t001.csv
+│   │       ├── aaaaanig_s012_t001.csv_bi
+│   │       ├── aaaaanig_s012_t001.edf
+│   │       ├── aaaaanig_s012_t002.csv
+│   │       ├── aaaaanig_s012_t002.csv_bi
+│   │       ├── aaaaanig_s012_t002.edf
+│   │       ├── aaaaanig_s012_t003.csv
+│   │       ├── aaaaanig_s012_t003.csv_bi
+│   │       ├── aaaaanig_s012_t003.edf
+│   │       ├── aaaaanig_s012_t004.csv
+│   │       ├── aaaaanig_s012_t004.csv_bi
+│   │       ├── aaaaanig_s012_t004.edf
+│   │       ├── aaaaanig_s012_t005.csv
+│   │       ├── aaaaanig_s012_t005.csv_bi
+│   │       ├── aaaaanig_s012_t005.edf
+│   │       ├── aaaaanig_s012_t006.csv
+│   │       ├── aaaaanig_s012_t006.csv_bi
+│   │       ├── aaaaanig_s012_t006.edf
+│   │       ├── aaaaanig_s012_t007.csv
+│   │       ├── aaaaanig_s012_t007.csv_bi
+│   │       ├── aaaaanig_s012_t007.edf
+│   │       ├── aaaaanig_s012_t008.csv
+│   │       ├── aaaaanig_s012_t008.csv_bi
+│   │       ├── aaaaanig_s012_t008.edf
+│   │       ├── aaaaanig_s012_t009.csv
+│   │       ├── aaaaanig_s012_t009.csv_bi
+│   │       ├── aaaaanig_s012_t009.edf
+│   │       ├── aaaaanig_s012_t010.csv
+│   │       ├── aaaaanig_s012_t010.csv_bi
+│   │       ├── aaaaanig_s012_t010.edf
+│   │       ├── aaaaanig_s012_t011.csv
+│   │       ├── aaaaanig_s012_t011.csv_bi
+│   │       └── aaaaanig_s012_t011.edf
+│   ├── s013_2017
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanig_s013_t000.csv
+│   │       ├── aaaaanig_s013_t000.csv_bi
+│   │       ├── aaaaanig_s013_t000.edf
+│   │       ├── aaaaanig_s013_t001.csv
+│   │       ├── aaaaanig_s013_t001.csv_bi
+│   │       ├── aaaaanig_s013_t001.edf
+│   │       ├── aaaaanig_s013_t002.csv
+│   │       ├── aaaaanig_s013_t002.csv_bi
+│   │       ├── aaaaanig_s013_t002.edf
+│   │       ├── aaaaanig_s013_t003.csv
+│   │       ├── aaaaanig_s013_t003.csv_bi
+│   │       ├── aaaaanig_s013_t003.edf
+│   │       ├── aaaaanig_s013_t004.csv
+│   │       ├── aaaaanig_s013_t004.csv_bi
+│   │       ├── aaaaanig_s013_t004.edf
+│   │       ├── aaaaanig_s013_t005.csv
+│   │       ├── aaaaanig_s013_t005.csv_bi
+│   │       ├── aaaaanig_s013_t005.edf
+│   │       ├── aaaaanig_s013_t006.csv
+│   │       ├── aaaaanig_s013_t006.csv_bi
+│   │       ├── aaaaanig_s013_t006.edf
+│   │       ├── aaaaanig_s013_t007.csv
+│   │       ├── aaaaanig_s013_t007.csv_bi
+│   │       ├── aaaaanig_s013_t007.edf
+│   │       ├── aaaaanig_s013_t008.csv
+│   │       ├── aaaaanig_s013_t008.csv_bi
+│   │       ├── aaaaanig_s013_t008.edf
+│   │       ├── aaaaanig_s013_t009.csv
+│   │       ├── aaaaanig_s013_t009.csv_bi
+│   │       ├── aaaaanig_s013_t009.edf
+│   │       ├── aaaaanig_s013_t010.csv
+│   │       ├── aaaaanig_s013_t010.csv_bi
+│   │       ├── aaaaanig_s013_t010.edf
+│   │       ├── aaaaanig_s013_t011.csv
+│   │       ├── aaaaanig_s013_t011.csv_bi
+│   │       ├── aaaaanig_s013_t011.edf
+│   │       ├── aaaaanig_s013_t012.csv
+│   │       ├── aaaaanig_s013_t012.csv_bi
+│   │       ├── aaaaanig_s013_t012.edf
+│   │       ├── aaaaanig_s013_t013.csv
+│   │       ├── aaaaanig_s013_t013.csv_bi
+│   │       ├── aaaaanig_s013_t013.edf
+│   │       ├── aaaaanig_s013_t014.csv
+│   │       ├── aaaaanig_s013_t014.csv_bi
+│   │       └── aaaaanig_s013_t014.edf
+│   └── s014_2017
+│       └── 01_tcp_ar
+│           ├── aaaaanig_s014_t000.csv
+│           ├── aaaaanig_s014_t000.csv_bi
+│           ├── aaaaanig_s014_t000.edf
+│           ├── aaaaanig_s014_t001.csv
+│           ├── aaaaanig_s014_t001.csv_bi
+│           ├── aaaaanig_s014_t001.edf
+│           ├── aaaaanig_s014_t002.csv
+│           ├── aaaaanig_s014_t002.csv_bi
+│           ├── aaaaanig_s014_t002.edf
+│           ├── aaaaanig_s014_t003.csv
+│           ├── aaaaanig_s014_t003.csv_bi
+│           ├── aaaaanig_s014_t003.edf
+│           ├── aaaaanig_s014_t004.csv
+│           ├── aaaaanig_s014_t004.csv_bi
+│           ├── aaaaanig_s014_t004.edf
+│           ├── aaaaanig_s014_t005.csv
+│           ├── aaaaanig_s014_t005.csv_bi
+│           ├── aaaaanig_s014_t005.edf
+│           ├── aaaaanig_s014_t006.csv
+│           ├── aaaaanig_s014_t006.csv_bi
+│           ├── aaaaanig_s014_t006.edf
+│           ├── aaaaanig_s014_t007.csv
+│           ├── aaaaanig_s014_t007.csv_bi
+│           ├── aaaaanig_s014_t007.edf
+│           ├── aaaaanig_s014_t008.csv
+│           ├── aaaaanig_s014_t008.csv_bi
+│           ├── aaaaanig_s014_t008.edf
+│           ├── aaaaanig_s014_t009.csv
+│           ├── aaaaanig_s014_t009.csv_bi
+│           ├── aaaaanig_s014_t009.edf
+│           ├── aaaaanig_s014_t010.csv
+│           ├── aaaaanig_s014_t010.csv_bi
+│           ├── aaaaanig_s014_t010.edf
+│           ├── aaaaanig_s014_t011.csv
+│           ├── aaaaanig_s014_t011.csv_bi
+│           └── aaaaanig_s014_t011.edf
+├── aaaaankd
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaankd_s001_t000.csv
+│   │       ├── aaaaankd_s001_t000.csv_bi
+│   │       └── aaaaankd_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaankd_s002_t000.csv
+│           ├── aaaaankd_s002_t000.csv_bi
+│           ├── aaaaankd_s002_t000.edf
+│           ├── aaaaankd_s002_t001.csv
+│           ├── aaaaankd_s002_t001.csv_bi
+│           ├── aaaaankd_s002_t001.edf
+│           ├── aaaaankd_s002_t002.csv
+│           ├── aaaaankd_s002_t002.csv_bi
+│           ├── aaaaankd_s002_t002.edf
+│           ├── aaaaankd_s002_t003.csv
+│           ├── aaaaankd_s002_t003.csv_bi
+│           ├── aaaaankd_s002_t003.edf
+│           ├── aaaaankd_s002_t004.csv
+│           ├── aaaaankd_s002_t004.csv_bi
+│           ├── aaaaankd_s002_t004.edf
+│           ├── aaaaankd_s002_t005.csv
+│           ├── aaaaankd_s002_t005.csv_bi
+│           ├── aaaaankd_s002_t005.edf
+│           ├── aaaaankd_s002_t006.csv
+│           ├── aaaaankd_s002_t006.csv_bi
+│           ├── aaaaankd_s002_t006.edf
+│           ├── aaaaankd_s002_t007.csv
+│           ├── aaaaankd_s002_t007.csv_bi
+│           └── aaaaankd_s002_t007.edf
+├── aaaaanky
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanky_s001_t000.csv
+│   │       ├── aaaaanky_s001_t000.csv_bi
+│   │       ├── aaaaanky_s001_t000.edf
+│   │       ├── aaaaanky_s001_t001.csv
+│   │       ├── aaaaanky_s001_t001.csv_bi
+│   │       ├── aaaaanky_s001_t001.edf
+│   │       ├── aaaaanky_s001_t002.csv
+│   │       ├── aaaaanky_s001_t002.csv_bi
+│   │       ├── aaaaanky_s001_t002.edf
+│   │       ├── aaaaanky_s001_t003.csv
+│   │       ├── aaaaanky_s001_t003.csv_bi
+│   │       └── aaaaanky_s001_t003.edf
+│   ├── s002_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanky_s002_t000.csv
+│   │       ├── aaaaanky_s002_t000.csv_bi
+│   │       └── aaaaanky_s002_t000.edf
+│   └── s003_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanky_s003_t000.csv
+│           ├── aaaaanky_s003_t000.csv_bi
+│           ├── aaaaanky_s003_t000.edf
+│           ├── aaaaanky_s003_t001.csv
+│           ├── aaaaanky_s003_t001.csv_bi
+│           └── aaaaanky_s003_t001.edf
+├── aaaaanla
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaanla_s001_t000.csv
+│   │       ├── aaaaanla_s001_t000.csv_bi
+│   │       └── aaaaanla_s001_t000.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanla_s002_t000.csv
+│           ├── aaaaanla_s002_t000.csv_bi
+│           └── aaaaanla_s002_t000.edf
+├── aaaaannv
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaannv_s001_t000.csv
+│   │       ├── aaaaannv_s001_t000.csv_bi
+│   │       └── aaaaannv_s001_t000.edf
+│   ├── s002_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaannv_s002_t000.csv
+│   │       ├── aaaaannv_s002_t000.csv_bi
+│   │       ├── aaaaannv_s002_t000.edf
+│   │       ├── aaaaannv_s002_t001.csv
+│   │       ├── aaaaannv_s002_t001.csv_bi
+│   │       ├── aaaaannv_s002_t001.edf
+│   │       ├── aaaaannv_s002_t002.csv
+│   │       ├── aaaaannv_s002_t002.csv_bi
+│   │       ├── aaaaannv_s002_t002.edf
+│   │       ├── aaaaannv_s002_t003.csv
+│   │       ├── aaaaannv_s002_t003.csv_bi
+│   │       ├── aaaaannv_s002_t003.edf
+│   │       ├── aaaaannv_s002_t004.csv
+│   │       ├── aaaaannv_s002_t004.csv_bi
+│   │       ├── aaaaannv_s002_t004.edf
+│   │       ├── aaaaannv_s002_t005.csv
+│   │       ├── aaaaannv_s002_t005.csv_bi
+│   │       ├── aaaaannv_s002_t005.edf
+│   │       ├── aaaaannv_s002_t006.csv
+│   │       ├── aaaaannv_s002_t006.csv_bi
+│   │       ├── aaaaannv_s002_t006.edf
+│   │       ├── aaaaannv_s002_t007.csv
+│   │       ├── aaaaannv_s002_t007.csv_bi
+│   │       ├── aaaaannv_s002_t007.edf
+│   │       ├── aaaaannv_s002_t008.csv
+│   │       ├── aaaaannv_s002_t008.csv_bi
+│   │       ├── aaaaannv_s002_t008.edf
+│   │       ├── aaaaannv_s002_t009.csv
+│   │       ├── aaaaannv_s002_t009.csv_bi
+│   │       ├── aaaaannv_s002_t009.edf
+│   │       ├── aaaaannv_s002_t010.csv
+│   │       ├── aaaaannv_s002_t010.csv_bi
+│   │       ├── aaaaannv_s002_t010.edf
+│   │       ├── aaaaannv_s002_t011.csv
+│   │       ├── aaaaannv_s002_t011.csv_bi
+│   │       ├── aaaaannv_s002_t011.edf
+│   │       ├── aaaaannv_s002_t012.csv
+│   │       ├── aaaaannv_s002_t012.csv_bi
+│   │       └── aaaaannv_s002_t012.edf
+│   └── s003_2014
+│       └── 01_tcp_ar
+│           ├── aaaaannv_s003_t000.csv
+│           ├── aaaaannv_s003_t000.csv_bi
+│           ├── aaaaannv_s003_t000.edf
+│           ├── aaaaannv_s003_t001.csv
+│           ├── aaaaannv_s003_t001.csv_bi
+│           ├── aaaaannv_s003_t001.edf
+│           ├── aaaaannv_s003_t002.csv
+│           ├── aaaaannv_s003_t002.csv_bi
+│           ├── aaaaannv_s003_t002.edf
+│           ├── aaaaannv_s003_t003.csv
+│           ├── aaaaannv_s003_t003.csv_bi
+│           ├── aaaaannv_s003_t003.edf
+│           ├── aaaaannv_s003_t004.csv
+│           ├── aaaaannv_s003_t004.csv_bi
+│           ├── aaaaannv_s003_t004.edf
+│           ├── aaaaannv_s003_t005.csv
+│           ├── aaaaannv_s003_t005.csv_bi
+│           ├── aaaaannv_s003_t005.edf
+│           ├── aaaaannv_s003_t006.csv
+│           ├── aaaaannv_s003_t006.csv_bi
+│           ├── aaaaannv_s003_t006.edf
+│           ├── aaaaannv_s003_t007.csv
+│           ├── aaaaannv_s003_t007.csv_bi
+│           └── aaaaannv_s003_t007.edf
+├── aaaaanon
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanon_s001_t000.csv
+│           ├── aaaaanon_s001_t000.csv_bi
+│           └── aaaaanon_s001_t000.edf
+├── aaaaanuz
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanuz_s001_t000.csv
+│           ├── aaaaanuz_s001_t000.csv_bi
+│           └── aaaaanuz_s001_t000.edf
+├── aaaaanvy
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanvy_s001_t000.csv
+│           ├── aaaaanvy_s001_t000.csv_bi
+│           ├── aaaaanvy_s001_t000.edf
+│           ├── aaaaanvy_s001_t001.csv
+│           ├── aaaaanvy_s001_t001.csv_bi
+│           └── aaaaanvy_s001_t001.edf
+├── aaaaanwp
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaanwp_s001_t000.csv
+│           ├── aaaaanwp_s001_t000.csv_bi
+│           └── aaaaanwp_s001_t000.edf
+├── aaaaaoay
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaoay_s001_t000.csv
+│           ├── aaaaaoay_s001_t000.csv_bi
+│           └── aaaaaoay_s001_t000.edf
+├── aaaaaocx
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaocx_s001_t000.csv
+│           ├── aaaaaocx_s001_t000.csv_bi
+│           └── aaaaaocx_s001_t000.edf
+├── aaaaaods
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaods_s001_t000.csv
+│           ├── aaaaaods_s001_t000.csv_bi
+│           └── aaaaaods_s001_t000.edf
+├── aaaaaoep
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaoep_s001_t000.csv
+│           ├── aaaaaoep_s001_t000.csv_bi
+│           └── aaaaaoep_s001_t000.edf
+├── aaaaaofk
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaofk_s001_t000.csv
+│           ├── aaaaaofk_s001_t000.csv_bi
+│           └── aaaaaofk_s001_t000.edf
+├── aaaaaohu
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaohu_s001_t000.csv
+│           ├── aaaaaohu_s001_t000.csv_bi
+│           └── aaaaaohu_s001_t000.edf
+├── aaaaaoie
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaoie_s001_t000.csv
+│   │       ├── aaaaaoie_s001_t000.csv_bi
+│   │       ├── aaaaaoie_s001_t000.edf
+│   │       ├── aaaaaoie_s001_t001.csv
+│   │       ├── aaaaaoie_s001_t001.csv_bi
+│   │       └── aaaaaoie_s001_t001.edf
+│   ├── s002_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaoie_s002_t000.csv
+│   │       ├── aaaaaoie_s002_t000.csv_bi
+│   │       ├── aaaaaoie_s002_t000.edf
+│   │       ├── aaaaaoie_s002_t001.csv
+│   │       ├── aaaaaoie_s002_t001.csv_bi
+│   │       ├── aaaaaoie_s002_t001.edf
+│   │       ├── aaaaaoie_s002_t002.csv
+│   │       ├── aaaaaoie_s002_t002.csv_bi
+│   │       ├── aaaaaoie_s002_t002.edf
+│   │       ├── aaaaaoie_s002_t003.csv
+│   │       ├── aaaaaoie_s002_t003.csv_bi
+│   │       ├── aaaaaoie_s002_t003.edf
+│   │       ├── aaaaaoie_s002_t004.csv
+│   │       ├── aaaaaoie_s002_t004.csv_bi
+│   │       ├── aaaaaoie_s002_t004.edf
+│   │       ├── aaaaaoie_s002_t005.csv
+│   │       ├── aaaaaoie_s002_t005.csv_bi
+│   │       ├── aaaaaoie_s002_t005.edf
+│   │       ├── aaaaaoie_s002_t006.csv
+│   │       ├── aaaaaoie_s002_t006.csv_bi
+│   │       ├── aaaaaoie_s002_t006.edf
+│   │       ├── aaaaaoie_s002_t007.csv
+│   │       ├── aaaaaoie_s002_t007.csv_bi
+│   │       ├── aaaaaoie_s002_t007.edf
+│   │       ├── aaaaaoie_s002_t008.csv
+│   │       ├── aaaaaoie_s002_t008.csv_bi
+│   │       ├── aaaaaoie_s002_t008.edf
+│   │       ├── aaaaaoie_s002_t009.csv
+│   │       ├── aaaaaoie_s002_t009.csv_bi
+│   │       ├── aaaaaoie_s002_t009.edf
+│   │       ├── aaaaaoie_s002_t010.csv
+│   │       ├── aaaaaoie_s002_t010.csv_bi
+│   │       ├── aaaaaoie_s002_t010.edf
+│   │       ├── aaaaaoie_s002_t011.csv
+│   │       ├── aaaaaoie_s002_t011.csv_bi
+│   │       ├── aaaaaoie_s002_t011.edf
+│   │       ├── aaaaaoie_s002_t012.csv
+│   │       ├── aaaaaoie_s002_t012.csv_bi
+│   │       ├── aaaaaoie_s002_t012.edf
+│   │       ├── aaaaaoie_s002_t013.csv
+│   │       ├── aaaaaoie_s002_t013.csv_bi
+│   │       ├── aaaaaoie_s002_t013.edf
+│   │       ├── aaaaaoie_s002_t014.csv
+│   │       ├── aaaaaoie_s002_t014.csv_bi
+│   │       ├── aaaaaoie_s002_t014.edf
+│   │       ├── aaaaaoie_s002_t015.csv
+│   │       ├── aaaaaoie_s002_t015.csv_bi
+│   │       ├── aaaaaoie_s002_t015.edf
+│   │       ├── aaaaaoie_s002_t016.csv
+│   │       ├── aaaaaoie_s002_t016.csv_bi
+│   │       ├── aaaaaoie_s002_t016.edf
+│   │       ├── aaaaaoie_s002_t017.csv
+│   │       ├── aaaaaoie_s002_t017.csv_bi
+│   │       ├── aaaaaoie_s002_t017.edf
+│   │       ├── aaaaaoie_s002_t018.csv
+│   │       ├── aaaaaoie_s002_t018.csv_bi
+│   │       ├── aaaaaoie_s002_t018.edf
+│   │       ├── aaaaaoie_s002_t019.csv
+│   │       ├── aaaaaoie_s002_t019.csv_bi
+│   │       ├── aaaaaoie_s002_t019.edf
+│   │       ├── aaaaaoie_s002_t020.csv
+│   │       ├── aaaaaoie_s002_t020.csv_bi
+│   │       ├── aaaaaoie_s002_t020.edf
+│   │       ├── aaaaaoie_s002_t021.csv
+│   │       ├── aaaaaoie_s002_t021.csv_bi
+│   │       ├── aaaaaoie_s002_t021.edf
+│   │       ├── aaaaaoie_s002_t022.csv
+│   │       ├── aaaaaoie_s002_t022.csv_bi
+│   │       └── aaaaaoie_s002_t022.edf
+│   └── s003_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaoie_s003_t000.csv
+│           ├── aaaaaoie_s003_t000.csv_bi
+│           └── aaaaaoie_s003_t000.edf
+├── aaaaaojm
+│   └── s001_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaojm_s001_t000.csv
+│           ├── aaaaaojm_s001_t000.csv_bi
+│           └── aaaaaojm_s001_t000.edf
+├── aaaaaokb
+│   ├── s001_2012
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaokb_s001_t000.csv
+│   │       ├── aaaaaokb_s001_t000.csv_bi
+│   │       ├── aaaaaokb_s001_t000.edf
+│   │       ├── aaaaaokb_s001_t001.csv
+│   │       ├── aaaaaokb_s001_t001.csv_bi
+│   │       └── aaaaaokb_s001_t001.edf
+│   └── s002_2012
+│       └── 01_tcp_ar
+│           ├── aaaaaokb_s002_t000.csv
+│           ├── aaaaaokb_s002_t000.csv_bi
+│           └── aaaaaokb_s002_t000.edf
+├── aaaaaooz
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaooz_s001_t000.csv
+│           ├── aaaaaooz_s001_t000.csv_bi
+│           └── aaaaaooz_s001_t000.edf
+├── aaaaaore
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaore_s001_t000.csv
+│           ├── aaaaaore_s001_t000.csv_bi
+│           └── aaaaaore_s001_t000.edf
+├── aaaaaosn
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaosn_s001_t000.csv
+│           ├── aaaaaosn_s001_t000.csv_bi
+│           └── aaaaaosn_s001_t000.edf
+├── aaaaaoti
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoti_s001_t000.csv
+│           ├── aaaaaoti_s001_t000.csv_bi
+│           ├── aaaaaoti_s001_t000.edf
+│           ├── aaaaaoti_s001_t001.csv
+│           ├── aaaaaoti_s001_t001.csv_bi
+│           ├── aaaaaoti_s001_t001.edf
+│           ├── aaaaaoti_s001_t002.csv
+│           ├── aaaaaoti_s001_t002.csv_bi
+│           └── aaaaaoti_s001_t002.edf
+├── aaaaaott
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaott_s001_t000.csv
+│   │       ├── aaaaaott_s001_t000.csv_bi
+│   │       ├── aaaaaott_s001_t000.edf
+│   │       ├── aaaaaott_s001_t001.csv
+│   │       ├── aaaaaott_s001_t001.csv_bi
+│   │       └── aaaaaott_s001_t001.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaott_s002_t000.csv
+│           ├── aaaaaott_s002_t000.csv_bi
+│           ├── aaaaaott_s002_t000.edf
+│           ├── aaaaaott_s002_t001.csv
+│           ├── aaaaaott_s002_t001.csv_bi
+│           └── aaaaaott_s002_t001.edf
+├── aaaaaovh
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaovh_s001_t000.csv
+│           ├── aaaaaovh_s001_t000.csv_bi
+│           └── aaaaaovh_s001_t000.edf
+├── aaaaaoxn
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaaoxn_s001_t000.csv
+│   │       ├── aaaaaoxn_s001_t000.csv_bi
+│   │       ├── aaaaaoxn_s001_t000.edf
+│   │       ├── aaaaaoxn_s001_t001.csv
+│   │       ├── aaaaaoxn_s001_t001.csv_bi
+│   │       └── aaaaaoxn_s001_t001.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoxn_s002_t000.csv
+│           ├── aaaaaoxn_s002_t000.csv_bi
+│           └── aaaaaoxn_s002_t000.edf
+├── aaaaaoxx
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoxx_s001_t000.csv
+│           ├── aaaaaoxx_s001_t000.csv_bi
+│           ├── aaaaaoxx_s001_t000.edf
+│           ├── aaaaaoxx_s001_t001.csv
+│           ├── aaaaaoxx_s001_t001.csv_bi
+│           └── aaaaaoxx_s001_t001.edf
+├── aaaaaoyh
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoyh_s001_t000.csv
+│           ├── aaaaaoyh_s001_t000.csv_bi
+│           └── aaaaaoyh_s001_t000.edf
+├── aaaaaoyn
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoyn_s001_t000.csv
+│           ├── aaaaaoyn_s001_t000.csv_bi
+│           └── aaaaaoyn_s001_t000.edf
+├── aaaaaoyt
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaoyt_s001_t000.csv
+│           ├── aaaaaoyt_s001_t000.csv_bi
+│           ├── aaaaaoyt_s001_t000.edf
+│           ├── aaaaaoyt_s001_t001.csv
+│           ├── aaaaaoyt_s001_t001.csv_bi
+│           ├── aaaaaoyt_s001_t001.edf
+│           ├── aaaaaoyt_s001_t002.csv
+│           ├── aaaaaoyt_s001_t002.csv_bi
+│           └── aaaaaoyt_s001_t002.edf
+├── aaaaapap
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapap_s001_t000.csv
+│           ├── aaaaapap_s001_t000.csv_bi
+│           └── aaaaapap_s001_t000.edf
+├── aaaaapfw
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapfw_s001_t000.csv
+│   │       ├── aaaaapfw_s001_t000.csv_bi
+│   │       └── aaaaapfw_s001_t000.edf
+│   ├── s002_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapfw_s002_t000.csv
+│   │       ├── aaaaapfw_s002_t000.csv_bi
+│   │       ├── aaaaapfw_s002_t000.edf
+│   │       ├── aaaaapfw_s002_t001.csv
+│   │       ├── aaaaapfw_s002_t001.csv_bi
+│   │       ├── aaaaapfw_s002_t001.edf
+│   │       ├── aaaaapfw_s002_t002.csv
+│   │       ├── aaaaapfw_s002_t002.csv_bi
+│   │       └── aaaaapfw_s002_t002.edf
+│   └── s003_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapfw_s003_t000.csv
+│           ├── aaaaapfw_s003_t000.csv_bi
+│           ├── aaaaapfw_s003_t000.edf
+│           ├── aaaaapfw_s003_t001.csv
+│           ├── aaaaapfw_s003_t001.csv_bi
+│           ├── aaaaapfw_s003_t001.edf
+│           ├── aaaaapfw_s003_t002.csv
+│           ├── aaaaapfw_s003_t002.csv_bi
+│           ├── aaaaapfw_s003_t002.edf
+│           ├── aaaaapfw_s003_t003.csv
+│           ├── aaaaapfw_s003_t003.csv_bi
+│           ├── aaaaapfw_s003_t003.edf
+│           ├── aaaaapfw_s003_t004.csv
+│           ├── aaaaapfw_s003_t004.csv_bi
+│           ├── aaaaapfw_s003_t004.edf
+│           ├── aaaaapfw_s003_t005.csv
+│           ├── aaaaapfw_s003_t005.csv_bi
+│           ├── aaaaapfw_s003_t005.edf
+│           ├── aaaaapfw_s003_t006.csv
+│           ├── aaaaapfw_s003_t006.csv_bi
+│           ├── aaaaapfw_s003_t006.edf
+│           ├── aaaaapfw_s003_t007.csv
+│           ├── aaaaapfw_s003_t007.csv_bi
+│           └── aaaaapfw_s003_t007.edf
+├── aaaaapgp
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapgp_s001_t000.csv
+│           ├── aaaaapgp_s001_t000.csv_bi
+│           └── aaaaapgp_s001_t000.edf
+├── aaaaapkt
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapkt_s001_t000.csv
+│           ├── aaaaapkt_s001_t000.csv_bi
+│           ├── aaaaapkt_s001_t000.edf
+│           ├── aaaaapkt_s001_t001.csv
+│           ├── aaaaapkt_s001_t001.csv_bi
+│           └── aaaaapkt_s001_t001.edf
+├── aaaaapkw
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapkw_s001_t000.csv
+│   │       ├── aaaaapkw_s001_t000.csv_bi
+│   │       ├── aaaaapkw_s001_t000.edf
+│   │       ├── aaaaapkw_s001_t001.csv
+│   │       ├── aaaaapkw_s001_t001.csv_bi
+│   │       ├── aaaaapkw_s001_t001.edf
+│   │       ├── aaaaapkw_s001_t002.csv
+│   │       ├── aaaaapkw_s001_t002.csv_bi
+│   │       └── aaaaapkw_s001_t002.edf
+│   ├── s002_2015
+│   │   └── 03_tcp_ar_a
+│   │       ├── aaaaapkw_s002_t000.csv
+│   │       ├── aaaaapkw_s002_t000.csv_bi
+│   │       ├── aaaaapkw_s002_t000.edf
+│   │       ├── aaaaapkw_s002_t001.csv
+│   │       ├── aaaaapkw_s002_t001.csv_bi
+│   │       ├── aaaaapkw_s002_t001.edf
+│   │       ├── aaaaapkw_s002_t002.csv
+│   │       ├── aaaaapkw_s002_t002.csv_bi
+│   │       ├── aaaaapkw_s002_t002.edf
+│   │       ├── aaaaapkw_s002_t003.csv
+│   │       ├── aaaaapkw_s002_t003.csv_bi
+│   │       ├── aaaaapkw_s002_t003.edf
+│   │       ├── aaaaapkw_s002_t004.csv
+│   │       ├── aaaaapkw_s002_t004.csv_bi
+│   │       ├── aaaaapkw_s002_t004.edf
+│   │       ├── aaaaapkw_s002_t005.csv
+│   │       ├── aaaaapkw_s002_t005.csv_bi
+│   │       ├── aaaaapkw_s002_t005.edf
+│   │       ├── aaaaapkw_s002_t006.csv
+│   │       ├── aaaaapkw_s002_t006.csv_bi
+│   │       ├── aaaaapkw_s002_t006.edf
+│   │       ├── aaaaapkw_s002_t007.csv
+│   │       ├── aaaaapkw_s002_t007.csv_bi
+│   │       ├── aaaaapkw_s002_t007.edf
+│   │       ├── aaaaapkw_s002_t008.csv
+│   │       ├── aaaaapkw_s002_t008.csv_bi
+│   │       ├── aaaaapkw_s002_t008.edf
+│   │       ├── aaaaapkw_s002_t009.csv
+│   │       ├── aaaaapkw_s002_t009.csv_bi
+│   │       └── aaaaapkw_s002_t009.edf
+│   └── s003_2015
+│       └── 01_tcp_ar
+│           ├── aaaaapkw_s003_t001.csv
+│           ├── aaaaapkw_s003_t001.csv_bi
+│           ├── aaaaapkw_s003_t001.edf
+│           ├── aaaaapkw_s003_t002.csv
+│           ├── aaaaapkw_s003_t002.csv_bi
+│           ├── aaaaapkw_s003_t002.edf
+│           ├── aaaaapkw_s003_t003.csv
+│           ├── aaaaapkw_s003_t003.csv_bi
+│           ├── aaaaapkw_s003_t003.edf
+│           ├── aaaaapkw_s003_t004.csv
+│           ├── aaaaapkw_s003_t004.csv_bi
+│           ├── aaaaapkw_s003_t004.edf
+│           ├── aaaaapkw_s003_t005.csv
+│           ├── aaaaapkw_s003_t005.csv_bi
+│           ├── aaaaapkw_s003_t005.edf
+│           ├── aaaaapkw_s003_t006.csv
+│           ├── aaaaapkw_s003_t006.csv_bi
+│           ├── aaaaapkw_s003_t006.edf
+│           ├── aaaaapkw_s003_t007.csv
+│           ├── aaaaapkw_s003_t007.csv_bi
+│           ├── aaaaapkw_s003_t007.edf
+│           ├── aaaaapkw_s003_t008.csv
+│           ├── aaaaapkw_s003_t008.csv_bi
+│           ├── aaaaapkw_s003_t008.edf
+│           ├── aaaaapkw_s003_t009.csv
+│           ├── aaaaapkw_s003_t009.csv_bi
+│           └── aaaaapkw_s003_t009.edf
+├── aaaaapld
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapld_s001_t000.csv
+│           ├── aaaaapld_s001_t000.csv_bi
+│           └── aaaaapld_s001_t000.edf
+├── aaaaaplq
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaaplq_s001_t000.csv
+│           ├── aaaaaplq_s001_t000.csv_bi
+│           └── aaaaaplq_s001_t000.edf
+├── aaaaapls
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapls_s001_t000.csv
+│           ├── aaaaapls_s001_t000.csv_bi
+│           └── aaaaapls_s001_t000.edf
+├── aaaaapmi
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapmi_s001_t000.csv
+│           ├── aaaaapmi_s001_t000.csv_bi
+│           ├── aaaaapmi_s001_t000.edf
+│           ├── aaaaapmi_s001_t001.csv
+│           ├── aaaaapmi_s001_t001.csv_bi
+│           ├── aaaaapmi_s001_t001.edf
+│           ├── aaaaapmi_s001_t002.csv
+│           ├── aaaaapmi_s001_t002.csv_bi
+│           └── aaaaapmi_s001_t002.edf
+├── aaaaapmu
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapmu_s001_t000.csv
+│   │       ├── aaaaapmu_s001_t000.csv_bi
+│   │       └── aaaaapmu_s001_t000.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapmu_s002_t000.csv
+│           ├── aaaaapmu_s002_t000.csv_bi
+│           ├── aaaaapmu_s002_t000.edf
+│           ├── aaaaapmu_s002_t001.csv
+│           ├── aaaaapmu_s002_t001.csv_bi
+│           ├── aaaaapmu_s002_t001.edf
+│           ├── aaaaapmu_s002_t002.csv
+│           ├── aaaaapmu_s002_t002.csv_bi
+│           ├── aaaaapmu_s002_t002.edf
+│           ├── aaaaapmu_s002_t003.csv
+│           ├── aaaaapmu_s002_t003.csv_bi
+│           ├── aaaaapmu_s002_t003.edf
+│           ├── aaaaapmu_s002_t004.csv
+│           ├── aaaaapmu_s002_t004.csv_bi
+│           ├── aaaaapmu_s002_t004.edf
+│           ├── aaaaapmu_s002_t005.csv
+│           ├── aaaaapmu_s002_t005.csv_bi
+│           ├── aaaaapmu_s002_t005.edf
+│           ├── aaaaapmu_s002_t006.csv
+│           ├── aaaaapmu_s002_t006.csv_bi
+│           ├── aaaaapmu_s002_t006.edf
+│           ├── aaaaapmu_s002_t007.csv
+│           ├── aaaaapmu_s002_t007.csv_bi
+│           ├── aaaaapmu_s002_t007.edf
+│           ├── aaaaapmu_s002_t008.csv
+│           ├── aaaaapmu_s002_t008.csv_bi
+│           ├── aaaaapmu_s002_t008.edf
+│           ├── aaaaapmu_s002_t009.csv
+│           ├── aaaaapmu_s002_t009.csv_bi
+│           ├── aaaaapmu_s002_t009.edf
+│           ├── aaaaapmu_s002_t010.csv
+│           ├── aaaaapmu_s002_t010.csv_bi
+│           ├── aaaaapmu_s002_t010.edf
+│           ├── aaaaapmu_s002_t011.csv
+│           ├── aaaaapmu_s002_t011.csv_bi
+│           ├── aaaaapmu_s002_t011.edf
+│           ├── aaaaapmu_s002_t012.csv
+│           ├── aaaaapmu_s002_t012.csv_bi
+│           ├── aaaaapmu_s002_t012.edf
+│           ├── aaaaapmu_s002_t013.csv
+│           ├── aaaaapmu_s002_t013.csv_bi
+│           ├── aaaaapmu_s002_t013.edf
+│           ├── aaaaapmu_s002_t014.csv
+│           ├── aaaaapmu_s002_t014.csv_bi
+│           ├── aaaaapmu_s002_t014.edf
+│           ├── aaaaapmu_s002_t015.csv
+│           ├── aaaaapmu_s002_t015.csv_bi
+│           ├── aaaaapmu_s002_t015.edf
+│           ├── aaaaapmu_s002_t016.csv
+│           ├── aaaaapmu_s002_t016.csv_bi
+│           ├── aaaaapmu_s002_t016.edf
+│           ├── aaaaapmu_s002_t017.csv
+│           ├── aaaaapmu_s002_t017.csv_bi
+│           ├── aaaaapmu_s002_t017.edf
+│           ├── aaaaapmu_s002_t018.csv
+│           ├── aaaaapmu_s002_t018.csv_bi
+│           ├── aaaaapmu_s002_t018.edf
+│           ├── aaaaapmu_s002_t019.csv
+│           ├── aaaaapmu_s002_t019.csv_bi
+│           ├── aaaaapmu_s002_t019.edf
+│           ├── aaaaapmu_s002_t020.csv
+│           ├── aaaaapmu_s002_t020.csv_bi
+│           ├── aaaaapmu_s002_t020.edf
+│           ├── aaaaapmu_s002_t021.csv
+│           ├── aaaaapmu_s002_t021.csv_bi
+│           └── aaaaapmu_s002_t021.edf
+├── aaaaapnx
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapnx_s001_t001.csv
+│   │       ├── aaaaapnx_s001_t001.csv_bi
+│   │       └── aaaaapnx_s001_t001.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapnx_s002_t000.csv
+│           ├── aaaaapnx_s002_t000.csv_bi
+│           └── aaaaapnx_s002_t000.edf
+├── aaaaappj
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaappj_s001_t001.csv
+│   │       ├── aaaaappj_s001_t001.csv_bi
+│   │       ├── aaaaappj_s001_t001.edf
+│   │       ├── aaaaappj_s001_t002.csv
+│   │       ├── aaaaappj_s001_t002.csv_bi
+│   │       └── aaaaappj_s001_t002.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaappj_s002_t000.csv
+│           ├── aaaaappj_s002_t000.csv_bi
+│           ├── aaaaappj_s002_t000.edf
+│           ├── aaaaappj_s002_t001.csv
+│           ├── aaaaappj_s002_t001.csv_bi
+│           ├── aaaaappj_s002_t001.edf
+│           ├── aaaaappj_s002_t002.csv
+│           ├── aaaaappj_s002_t002.csv_bi
+│           ├── aaaaappj_s002_t002.edf
+│           ├── aaaaappj_s002_t003.csv
+│           ├── aaaaappj_s002_t003.csv_bi
+│           ├── aaaaappj_s002_t003.edf
+│           ├── aaaaappj_s002_t004.csv
+│           ├── aaaaappj_s002_t004.csv_bi
+│           ├── aaaaappj_s002_t004.edf
+│           ├── aaaaappj_s002_t005.csv
+│           ├── aaaaappj_s002_t005.csv_bi
+│           ├── aaaaappj_s002_t005.edf
+│           ├── aaaaappj_s002_t006.csv
+│           ├── aaaaappj_s002_t006.csv_bi
+│           ├── aaaaappj_s002_t006.edf
+│           ├── aaaaappj_s002_t007.csv
+│           ├── aaaaappj_s002_t007.csv_bi
+│           ├── aaaaappj_s002_t007.edf
+│           ├── aaaaappj_s002_t008.csv
+│           ├── aaaaappj_s002_t008.csv_bi
+│           └── aaaaappj_s002_t008.edf
+├── aaaaappo
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaappo_s001_t001.csv
+│   │       ├── aaaaappo_s001_t001.csv_bi
+│   │       ├── aaaaappo_s001_t001.edf
+│   │       ├── aaaaappo_s001_t002.csv
+│   │       ├── aaaaappo_s001_t002.csv_bi
+│   │       └── aaaaappo_s001_t002.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaappo_s002_t000.csv
+│           ├── aaaaappo_s002_t000.csv_bi
+│           ├── aaaaappo_s002_t000.edf
+│           ├── aaaaappo_s002_t001.csv
+│           ├── aaaaappo_s002_t001.csv_bi
+│           └── aaaaappo_s002_t001.edf
+├── aaaaapre
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapre_s001_t002.csv
+│   │       ├── aaaaapre_s001_t002.csv_bi
+│   │       └── aaaaapre_s001_t002.edf
+│   └── s002_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapre_s002_t000.csv
+│           ├── aaaaapre_s002_t000.csv_bi
+│           ├── aaaaapre_s002_t000.edf
+│           ├── aaaaapre_s002_t001.csv
+│           ├── aaaaapre_s002_t001.csv_bi
+│           ├── aaaaapre_s002_t001.edf
+│           ├── aaaaapre_s002_t002.csv
+│           ├── aaaaapre_s002_t002.csv_bi
+│           └── aaaaapre_s002_t002.edf
+├── aaaaapsj
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapsj_s001_t000.csv
+│           ├── aaaaapsj_s001_t000.csv_bi
+│           ├── aaaaapsj_s001_t000.edf
+│           ├── aaaaapsj_s001_t001.csv
+│           ├── aaaaapsj_s001_t001.csv_bi
+│           ├── aaaaapsj_s001_t001.edf
+│           ├── aaaaapsj_s001_t002.csv
+│           ├── aaaaapsj_s001_t002.csv_bi
+│           └── aaaaapsj_s001_t002.edf
+├── aaaaapsm
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapsm_s001_t000.csv
+│   │       ├── aaaaapsm_s001_t000.csv_bi
+│   │       └── aaaaapsm_s001_t000.edf
+│   ├── s002_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapsm_s002_t000.csv
+│   │       ├── aaaaapsm_s002_t000.csv_bi
+│   │       └── aaaaapsm_s002_t000.edf
+│   └── s003_2014
+│       └── 01_tcp_ar
+│           ├── aaaaapsm_s003_t001.csv
+│           ├── aaaaapsm_s003_t001.csv_bi
+│           ├── aaaaapsm_s003_t001.edf
+│           ├── aaaaapsm_s003_t002.csv
+│           ├── aaaaapsm_s003_t002.csv_bi
+│           └── aaaaapsm_s003_t002.edf
+├── aaaaapsq
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapsq_s001_t000.csv
+│           ├── aaaaapsq_s001_t000.csv_bi
+│           └── aaaaapsq_s001_t000.edf
+├── aaaaapuc
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapuc_s001_t001.csv
+│           ├── aaaaapuc_s001_t001.csv_bi
+│           └── aaaaapuc_s001_t001.edf
+├── aaaaapuo
+│   └── s001_2013
+│       └── 01_tcp_ar
+│           ├── aaaaapuo_s001_t000.csv
+│           ├── aaaaapuo_s001_t000.csv_bi
+│           └── aaaaapuo_s001_t000.edf
+├── aaaaapwy
+│   ├── s001_2013
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s001_t000.csv
+│   │       ├── aaaaapwy_s001_t000.csv_bi
+│   │       ├── aaaaapwy_s001_t000.edf
+│   │       ├── aaaaapwy_s001_t001.csv
+│   │       ├── aaaaapwy_s001_t001.csv_bi
+│   │       └── aaaaapwy_s001_t001.edf
+│   ├── s002_2014
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s002_t000.csv
+│   │       ├── aaaaapwy_s002_t000.csv_bi
+│   │       ├── aaaaapwy_s002_t000.edf
+│   │       ├── aaaaapwy_s002_t001.csv
+│   │       ├── aaaaapwy_s002_t001.csv_bi
+│   │       ├── aaaaapwy_s002_t001.edf
+│   │       ├── aaaaapwy_s002_t002.csv
+│   │       ├── aaaaapwy_s002_t002.csv_bi
+│   │       └── aaaaapwy_s002_t002.edf
+│   ├── s003_2014
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s003_t000.csv
+│   │       ├── aaaaapwy_s003_t000.csv_bi
+│   │       └── aaaaapwy_s003_t000.edf
+│   ├── s004_2014
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s004_t000.csv
+│   │       ├── aaaaapwy_s004_t000.csv_bi
+│   │       └── aaaaapwy_s004_t000.edf
+│   ├── s005_2014
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s005_t000.csv
+│   │       ├── aaaaapwy_s005_t000.csv_bi
+│   │       ├── aaaaapwy_s005_t000.edf
+│   │       ├── aaaaapwy_s005_t001.csv
+│   │       ├── aaaaapwy_s005_t001.csv_bi
+│   │       ├── aaaaapwy_s005_t001.edf
+│   │       ├── aaaaapwy_s005_t002.csv
+│   │       ├── aaaaapwy_s005_t002.csv_bi
+│   │       ├── aaaaapwy_s005_t002.edf
+│   │       ├── aaaaapwy_s005_t003.csv
+│   │       ├── aaaaapwy_s005_t003.csv_bi
+│   │       ├── aaaaapwy_s005_t003.edf
+│   │       ├── aaaaapwy_s005_t004.csv
+│   │       ├── aaaaapwy_s005_t004.csv_bi
+│   │       ├── aaaaapwy_s005_t004.edf
+│   │       ├── aaaaapwy_s005_t005.csv
+│   │       ├── aaaaapwy_s005_t005.csv_bi
+│   │       ├── aaaaapwy_s005_t005.edf
+│   │       └── x.list
+│   ├── s006_2014
+│   │   └── 01_tcp_ar
+│   │       ├── aaaaapwy_s006_t000.csv
+│   │       ├── aaaaapwy_s006_t000.csv_bi
+│   │       ├── aaaaapwy_s006_t000.edf
+│   │       ├── aaaaapwy_s006_t001.csv
+│   │       ├── aaaaapwy_s006_t001.csv_bi
+│   │       ├── aaaaapwy_s006_t001.edf
+│   │       ├── aaaaapwy_s006_t002.csv
+│   │       ├── aaaaapwy_s006_t002.csv_bi
+│   │       ├── aaaaapwy_s006_t002.edf
+│   │       ├── aaaaapwy_s006_t003.csv
+│   │       ├── aaaaapwy_s006_t003.csv_bi
+│   │       ├── aaaaapwy_s006_t003.edf
+│   │       ├── aaaaapwy_s006_t004.csv
+│   │       ├── aaaaapwy_s006_t004.csv_bi
+│   │       ├── aaaaapwy_s006_t004.edf
+│   │       ├── aaaaapwy_s006_t005.csv
+│   │       ├── aaaaapwy_s006_t005.csv_bi
+│   │       ├── aaaaapwy_s006_t005.edf
+│   │       ├── aaaaapwy_s006_t006.csv
+│   │       ├── aaaaapwy_s006_t006.csv_bi
+│   │       ├── aaaaapwy_s006_t006.edf
+│   │       ├── aaaaapwy_s006_t007.csv
+│   │       ├── aaaaapwy_s006_t007.csv_bi
+│   │       ├── aaaaapwy_s006_t007.edf
+│   │       ├── aaaaapwy_s006_t008.csv
+│   │       ├── aaaaapwy_s006_t008.csv_bi
+│   │       ├── aaaaapwy_s006_t008.edf
+│   │       ├── aaaaapwy_s006_t009.csv
+│   │       ├── aaaaapwy_s006_t009.csv_bi
+│   │       ├── aaaaapwy_s006_t009.edf
+│   │       ├── aaaaapwy_s006_t010.csv
+│   │       ├── aaaaapwy_s006_t010.csv_bi
+│   │       ├── aaaaapwy_s006_t010.edf
+│   │       ├── aaaaapwy_s006_t011.csv
+│   │       ├── aaaaapwy_s006_t011.csv_bi
+│   │       ├── aaaaapwy_s006_t011.edf
+│   │       ├── aaaaapwy_s006_t012.csv
+│   │       ├── aaaaapwy_s006_t012.csv_bi
+│   │       ├── aaaaapwy_s006_t012.edf
+│   │       ├── aaaaapwy_s006_t013.csv
+│   │       ├── aaaaapwy_s006_t013.csv_bi
+│   │       ├── aaaaapwy_s006_t013.edf
+│   │       ├── aaaaapwy_s006_t014.csv
+│   │       ├── aaaaapwy_s006_t014.csv_bi
+│   │       ├── aaaaapwy_s006_t014.edf
+│   │       ├── aaaaapwy_s006_t015.csv
+│   │       ├── aaaaapwy_s006_t015.csv_bi
+│   │       ├── aaaaapwy_s006_t015.edf
+│   │       ├── aaaaapwy_s006_t016.csv
+│   │       ├── aaaaapwy_s006_t016.csv_bi
+│   │       ├── aaaaapwy_s006_t016.edf
+│   │       ├── aaaaapwy_s006_t017.csv
+│   │       ├── aaaaapwy_s006_t017.csv_bi
+│   │       └── aaaaapwy_s006_t017.edf
+│   └── s007_2014
+│       └── 01_tcp_ar
+│           ├── aaaaapwy_s007_t000.csv
+│           ├── aaaaapwy_s007_t000.csv_bi
+│           ├── aaaaapwy_s007_t000.edf
+│           ├── aaaaapwy_s007_t001.csv
+│           ├── aaaaapwy_s007_t001.csv_bi
+│           ├── aaaaapwy_s007_t001.edf
+│           ├── aaaaapwy_s007_t002.csv
+│           ├── aaaaapwy_s007_t002.csv_bi
+│           ├── aaaaapwy_s007_t002.edf
+│           ├── aaaaapwy_s007_t003.csv
+│           ├── aaaaapwy_s007_t003.csv_bi
+│           ├── aaaaapwy_s007_t003.edf
+│           ├── aaaaapwy_s007_t004.csv
+│           ├── aaaaapwy_s007_t004.csv_bi
+│           ├── aaaaapwy_s007_t004.edf
+│           ├── aaaaapwy_s007_t005.csv
+│           ├── aaaaapwy_s007_t005.csv_bi
+│           ├── aaaaapwy_s007_t005.edf
+│           ├── aaaaapwy_s007_t006.csv
+│           ├── aaaaapwy_s007_t006.csv_bi
+│           ├── aaaaapwy_s007_t006.edf
+│           ├── aaaaapwy_s007_t007.csv
+│           ├── aaaaapwy_s007_t007.csv_bi
+│           ├── aaaaapwy_s007_t007.edf
+│           ├── aaaaapwy_s007_t008.csv
+│           ├── aaaaapwy_s007_t008.csv_bi
+│           ├── aaaaapwy_s007_t008.edf
+│           ├── aaaaapwy_s007_t009.csv
+│           ├── aaaaapwy_s007_t009.csv_bi
+│           ├── aaaaapwy_s007_t009.edf
+│           ├── aaaaapwy_s007_t010.csv
+│           ├── aaaaapwy_s007_t010.csv_bi
+│           ├── aaaaapwy_s007_t010.edf
+│           ├── aaaaapwy_s007_t011.csv
+│           ├── aaaaapwy_s007_t011.csv_bi
+│           ├── aaaaapwy_s007_t011.edf
+│           ├── aaaaapwy_s007_t012.csv
+│           ├── aaaaapwy_s007_t012.csv_bi
+│           ├── aaaaapwy_s007_t012.edf
+│           ├── aaaaapwy_s007_t013.csv
+│           ├── aaaaapwy_s007_t013.csv_bi
+│           ├── aaaaapwy_s007_t013.edf
+│           ├── aaaaapwy_s007_t014.csv
+│           ├── aaaaapwy_s007_t014.csv_bi
+│           ├── aaaaapwy_s007_t014.edf
+│           ├── aaaaapwy_s007_t015.csv
+│           ├── aaaaapwy_s007_t015.csv_bi
+│           ├── aaaaapwy_s007_t015.edf
+│           ├── aaaaapwy_s007_t016.csv
+│           ├── aaaaapwy_s007_t016.csv_bi
+│           ├── aaaaapwy_s007_t016.edf
+│           ├── aaaaapwy_s007_t017.csv
+│           ├── aaaaapwy_s007_t017.csv_bi
+│           └── aaaaapwy_s007_t017.edf
+└── aaaaaqaw
+    ├── s001_2013
+    │   └── 01_tcp_ar
+    │       ├── aaaaaqaw_s001_t000.csv
+    │       ├── aaaaaqaw_s001_t000.csv_bi
+    │       └── aaaaaqaw_s001_t000.edf
+    └── s002_2013
+        └── 01_tcp_ar
+            ├── aaaaaqaw_s002_t000.csv
+            ├── aaaaaqaw_s002_t000.csv_bi
+            └── aaaaaqaw_s002_t000.edf
