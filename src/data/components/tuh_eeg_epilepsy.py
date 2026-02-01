@@ -582,7 +582,9 @@ class TUHEEGEpilepsy:
                     # For now keep it and let post-process handle it
                     pass
                     
-                return data, sfreq
+                # Return data and channel names for harmonization
+                # Note: raw.ch_names might have been renamed or picked.
+                return data, sfreq, raw.ch_names
 
             except Exception as e:
                 logger.error(f"Error loading window {row_meta}: {e}")
@@ -599,15 +601,61 @@ class TUHEEGEpilepsy:
             
         # Filter Nones
         valid_indices = [i for i, r in enumerate(results) if r is not None]
-        # Unzip data and sfreqs
+        # Unzip data, sfreqs, and channel names
         valid_data_raw = [results[i][0] for i in valid_indices] # List[np.ndarray (Ch, Time)]
         valid_sfreqs = [results[i][1] for i in valid_indices]   # List[float]
+        valid_channels = [results[i][2] for i in valid_indices] # List[List[str]]
         valid_meta = window_df.iloc[valid_indices].reset_index(drop=True)
         
         if not valid_data_raw:
              raise ValueError("No valid windows loaded.")
 
-        # 5. Handle variable sampling rates / lengths
+        # 5a. Harmonize Channels
+        # Find intersection of all channel lists
+        if not valid_channels:
+            raise ValueError("No channel information available.")
+            
+        common_channels = set(valid_channels[0])
+        for ch_list in valid_channels[1:]:
+            common_channels.intersection_update(ch_list)
+            
+        if not common_channels:
+             raise ValueError("No common channels found across the loaded set.")
+             
+        # Sort for deterministic order (e.g. alphabetical)
+        # Or standard_1020 if possible, but alphabetical is safe default
+        common_channels = sorted(list(common_channels))
+        logger.info(f"Harmonizing to {len(common_channels)} common channels: {common_channels}")
+        
+        # Reorder/Submit data
+        # data shape: (Channels, Time). We need to select rows corresponding to common_channels.
+        for i in range(len(valid_data_raw)):
+            d = valid_data_raw[i]
+            ch_names = valid_channels[i]
+            
+            # Map channel name to index
+            ch_idx_map = {name: idx for idx, name in enumerate(ch_names)}
+            
+            # Find indices for common channels in correct order
+            try:
+                indices = [ch_idx_map[name] for name in common_channels]
+            except KeyError as e:
+                # Should not happen since we took intersection, but good for safety
+                logger.error(f"Logic error: Channel {e} missing in file despite intersection check.")
+                valid_data_raw[i] = None # Drop this one
+                continue
+                
+            # Slice
+            valid_data_raw[i] = d[indices, :]
+            
+        # Filter dropped items from harmonization
+        # (Technically shouldn't be any unless logic error above)
+        valid_indices_2 = [i for i, d in enumerate(valid_data_raw) if d is not None]
+        valid_data_raw = [valid_data_raw[i] for i in valid_indices_2]
+        valid_sfreqs = [valid_sfreqs[i] for i in valid_indices_2]
+        valid_meta = valid_meta.iloc[valid_indices_2].reset_index(drop=True)
+
+        # 5b. Handle variable sampling rates / lengths
         # Determine target parameters
         unique_sfreqs = np.unique(valid_sfreqs)
         
