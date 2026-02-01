@@ -1,3 +1,4 @@
+#%%
 """
 Dataset class for the Temple University Hospital (TUH) EEG Epilipsy Corpus.
 """
@@ -478,7 +479,8 @@ class TUHEEGEpilepsy:
                     
                     start_t = idx * stride_s
                     end_t = start_t + window_len_s
-                    
+                    # parse age and gender information from EDF header
+                    age, gender = utils.parse_age_and_gender_from_edf_header(row['path'])
                     window_meta.append({
                         'subject': subject,
                         'path': row['path'],
@@ -488,13 +490,14 @@ class TUHEEGEpilepsy:
                         't_id': row.get('t_id', 'unknown'),
                         'epilepsy': row.get('epilepsy', False),
                         # Store other useful metadata from row if needed
-                        'age': row.get('age', -1),
-                        'gender': row.get('gender', 'X'),
+                        'age': age,
+                        'gender': gender,
                         'description_row': row # Keep ref for loading
                     })
                     windows_collected += 1
 
         window_df = pd.DataFrame(window_meta)
+        logger.info(f"Found {len(window_df['subject'].unique())} subjects.")
         logger.info(f"Generated {len(window_df)} windows plan.")
 
         # 4. Load Data
@@ -564,6 +567,7 @@ class TUHEEGEpilepsy:
                 # Ensure fixed length (Float rounding issues might give +/- 1 sample)
                 # Check expected samples
                 sfreq = raw.info['sfreq']
+                logger.info(f"Loading window: {row_meta['path'].name}, start: {row_meta['start']}, end: {row_meta['end']}, sfreq: {sfreq}")
                 expected_samples = int(window_len_s * sfreq)
                 
                 if data.shape[1] > expected_samples:
@@ -599,7 +603,8 @@ class TUHEEGEpilepsy:
         # Stack Data
         # formatted as (Batch, Channels, Time) -> Transpose to (Batch, Time, Channels) if user asked (windows*samples*channels)?
         # User asked: (windows*samples*channels)
-        
+        logger.info(f"Loaded {len(valid_data)} valid windows.")
+        logger.info(f"Each window shape (Channels, Time): {[v.shape for v in valid_data]}")
         tensor_data = np.stack(valid_data) # (Batch, Channels, Time)
         tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
         tensor_data = torch.from_numpy(tensor_data).float()
@@ -636,7 +641,7 @@ class TUHEEGEpilepsy:
             valid_meta = valid_meta.drop(columns=['description_row'])
             
         return tensor_data, tensor_targets, valid_meta
-
+#%%
 
 if __name__ == "__main__":
     # Example usage
@@ -655,4 +660,8 @@ if __name__ == "__main__":
         rename_channels=False,
         set_montage=False,
         n_jobs=1,
+        window_len_s=5*60,  # 5 minutes
+        overlap_pct=0.0,
+        balance_per_subject=True,
+        include_seizures=False,
     )
