@@ -700,9 +700,9 @@ class TUHEEGEpilepsy:
         # Stack Data
         # formatted as (Batch, Channels, Time) -> Transpose to (Batch, Time, Channels) if user asked (windows*samples*channels)?
         # User asked: (windows*samples*channels)
-        logger.info(f"Loaded {len(valid_data)} valid windows.")
-        logger.info(f"Each window shape (Channels, Time): {[v.shape for v in valid_data]}")
-        tensor_data = np.stack(valid_data) # (Batch, Channels, Time)
+        logger.info(f"Loaded {len(final_valid_data)} valid windows.")
+        logger.info(f"Each window shape (Channels, Time): {[v.shape for v in final_valid_data]}")
+        tensor_data = np.stack(final_valid_data) # (Batch, Channels, Time)
         tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
         tensor_data = torch.from_numpy(tensor_data).float()
         
