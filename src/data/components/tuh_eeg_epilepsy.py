@@ -198,6 +198,7 @@ class TUHEEGEpilepsy:
         shuffle_windows: bool = False,
         seed: int = 42,
         splits: Optional[Dict[str, float]] = None,
+        stratify_by: str = 'epilepsy',
     ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
         
         # If window_len_s is provided, use the optimized balanced loader
@@ -211,6 +212,7 @@ class TUHEEGEpilepsy:
                 shuffle_windows=shuffle_windows,
                 seed=seed,
                 splits=splits,
+                stratify_by=stratify_by,
                 mode=mode,
                 filter_freq=filter_freq,
                 target_name=target_name,
@@ -423,6 +425,7 @@ class TUHEEGEpilepsy:
         shuffle_windows: bool,
         seed: int,
         splits: Optional[Dict[str, float]],
+        stratify_by: str,
         mode: str,
         filter_freq: Optional[List[float]],
         target_name: Optional[Union[str, Tuple[str, ...]]],
@@ -526,39 +529,84 @@ class TUHEEGEpilepsy:
         
         unique_subjects = window_df['subject'].unique()
         
-        if splits is not None:
+        if splits is not None: 
             # Check sum
             total_ratio = sum(splits.values())
             if not np.isclose(total_ratio, 1.0):
                 logger.warning(f"Split ratios sum to {total_ratio}, not 1.0. This might leave some subjects unused or cause overlap issues if > 1.")
+
+            # Stratification Logic
+            # Get label per subject
+            # We need to look back at original or window_df to find the stratify_by value for each subject
             
-            # Shuffle unique subjects for random split
-            # Use same seed for consistency
-            rng.shuffle(unique_subjects)
+            # Simple aggregation: take max value (works for boolean/binary epilepsy) or mode
+            # window_df has the columns.
+            if stratify_by not in window_df.columns:
+                 logger.warning(f"Stratification column '{stratify_by}' not found. Falling back to random splitting.")
+                 subject_labels = None
+            else:
+                 # Group by subject and take the first value (assuming constant per subject) or max
+                 # For epilepsy: if any window is epilepsy, subject is epilepsy? 
+                 # Usually epilepsy status is subject-level constant.
+                 # Let's use max() to be safe for binary tags.
+                 # Optimization: drop duplicates first
+                 # Get a dataframe of unique subjects and their labels
+                 subj_label_df = window_df[['subject', stratify_by]].drop_duplicates('subject')
+                 # If duplicates exist (e.g. subject has changing age?), max might be safer? 
+                 # Generally assume constant. 
+                 subject_labels = subj_label_df.set_index('subject')[stratify_by]
             
-            n_sub = len(unique_subjects)
-            current_idx = 0
-            
-            for split_name, ratio in splits.items():
-                n_split = int(np.floor(ratio * n_sub))
-                # Assign
-                split_subs = unique_subjects[current_idx : current_idx + n_split]
-                for s in split_subs:
-                    split_map[s] = split_name
+            # Divide subjects by label
+            if subject_labels is not None:
+                # Group subjects by their label
+                # label -> list of subjects
+                label_groups = {}
+                for s in unique_subjects:
+                    lbl = subject_labels.loc[s]
+                    if lbl not in label_groups:
+                        label_groups[lbl] = []
+                    label_groups[lbl].append(s)
+                    
+                logger.info(f"Stratification Groups ({stratify_by}): { {k: len(v) for k, v in label_groups.items()} }")
                 
-                current_idx += n_split
-            
-            # Assign remaining (rounding errors) to last split or warning?
-            # Or just 'test'? Let's assign strict based on ratios. 
-            # If sum < 1, some subjects map to None (unused).
-            # If sum = 1, last few might be skipped due to floor.
-            # Let's add remaining to the last defined split to be safe, or just leave them unused.
-            # Common practice: Add remainder to last split.
-            if current_idx < n_sub and np.isclose(total_ratio, 1.0):
-                 remainder = unique_subjects[current_idx:]
-                 last_split = list(splits.keys())[-1]
-                 for s in remainder:
-                     split_map[s] = last_split
+                # Split each group
+                for lbl, subjects in label_groups.items():
+                    subjects = np.array(subjects)
+                    rng.shuffle(subjects)
+                    
+                    n_sub_group = len(subjects)
+                    current_idx = 0
+                    
+                    for split_name, ratio in splits.items():
+                        n_split = int(np.floor(ratio * n_sub_group))
+                        split_subs = subjects[current_idx : current_idx + n_split]
+                        for s in split_subs:
+                            split_map[s] = split_name
+                        current_idx += n_split
+                        
+                    # Handle remainder for this group
+                    if current_idx < n_sub_group and np.isclose(total_ratio, 1.0):
+                        remainder = subjects[current_idx:]
+                        last_split = list(splits.keys())[-1]
+                        for s in remainder:
+                             split_map[s] = last_split
+            else:
+                 # No stratification, random shuffle
+                rng.shuffle(unique_subjects)
+                n_sub = len(unique_subjects)
+                current_idx = 0
+                for split_name, ratio in splits.items():
+                    n_split = int(np.floor(ratio * n_sub))
+                    split_subs = unique_subjects[current_idx : current_idx + n_split]
+                    for s in split_subs:
+                        split_map[s] = split_name
+                    current_idx += n_split
+                
+                if current_idx < n_sub and np.isclose(total_ratio, 1.0):
+                     remainder = unique_subjects[current_idx:]
+                     last_split = list(splits.keys())[-1]
+                     for s in remainder:
+                         split_map[s] = last_split
                      
             logger.info("Subject Split Assignment Complete.")
 
