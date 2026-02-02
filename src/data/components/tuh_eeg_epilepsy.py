@@ -810,5 +810,4 @@ if __name__ == "__main__":
     
     # Uncomment to compute ICA
     # tuh.compute_ica_labels(n_jobs=4)
-    
-    )
+
