@@ -195,6 +195,8 @@ class TUHEEGEpilepsy:
         balance_per_subject: bool = False,
         include_seizures: bool = True,
         fix_length_mode: Optional[str] = 'resample', # 'resample', 'pad', or None
+        shuffle_windows: bool = False,
+        seed: int = 42,
     ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]:
         
         # If window_len_s is provided, use the optimized balanced loader
@@ -205,6 +207,8 @@ class TUHEEGEpilepsy:
                 balance_per_subject=balance_per_subject,
                 include_seizures=include_seizures,
                 fix_length_mode=fix_length_mode,
+                shuffle_windows=shuffle_windows,
+                seed=seed,
                 mode=mode,
                 filter_freq=filter_freq,
                 target_name=target_name,
@@ -414,6 +418,8 @@ class TUHEEGEpilepsy:
         balance_per_subject: bool,
         include_seizures: bool,
         fix_length_mode: Optional[str],
+        shuffle_windows: bool,
+        seed: int,
         mode: str,
         filter_freq: Optional[List[float]],
         target_name: Optional[Union[str, Tuple[str, ...]]],
@@ -423,6 +429,9 @@ class TUHEEGEpilepsy:
         n_jobs: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]:
         
+        # RNG
+        rng = np.random.RandomState(seed)
+
         # 1. Filter Descriptions
         df = self.descriptions.copy()
         if not include_seizures:
@@ -458,38 +467,30 @@ class TUHEEGEpilepsy:
         window_meta = []
         
         # Group by subject to enforce limits
+        # To handle shuffle correctly with balanced limits, we must collect ALL possibilities first for a subject
+        
         for subject, group in df.groupby('subject'):
-            # Sort chronologically or by t_id to be deterministic
+            # Sort for deterministic base order
             group = group.sort_values(['year', 'month', 'day', 'time'] if {'year','month','day','time'}.issubset(group.columns) else ['path'])
             
-            windows_collected = 0
+            subject_windows = []
             
             for _, row in group.iterrows():
-                if limit_per_subject is not None and windows_collected >= limit_per_subject:
-                    break
-                
+                age, gender = utils.parse_age_and_gender_from_edf_header(row['path'])
                 n_possible = row['n_windows']
                 if n_possible <= 0:
                     continue
                 
                 # Calculate start times for this file
-                # indices: 0, 1, ..., n_possible-1
-                # start_time = idx * stride
-                
                 for idx in range(n_possible):
-                    if limit_per_subject is not None and windows_collected >= limit_per_subject:
-                        break
-                    
                     start_t = idx * stride_s
                     end_t = start_t + window_len_s
-                    # parse age and gender information from EDF header
-                    age, gender = utils.parse_age_and_gender_from_edf_header(row['path'])
-                    window_meta.append({
+                    
+                    subject_windows.append({
                         'subject': subject,
                         'path': row['path'],
                         'start': start_t,
                         'end': end_t,
-                        'window_idx_within_subject': windows_collected,
                         't_id': row.get('t_id', 'unknown'),
                         'epilepsy': row.get('epilepsy', False),
                         # Store other useful metadata from row if needed
@@ -497,7 +498,20 @@ class TUHEEGEpilepsy:
                         'gender': gender,
                         'description_row': row # Keep ref for loading
                     })
-                    windows_collected += 1
+                    
+            # After collecting all windows for this subject:
+            if shuffle_windows:
+                rng.shuffle(subject_windows)
+                
+            # Apply Limit (if balance is ON, limit is min_windows, otherwise None means take all)
+            if limit_per_subject is not None:
+                subject_windows = subject_windows[:limit_per_subject]
+            
+            # Assign final index
+            for i, w in enumerate(subject_windows):
+                w['window_idx_within_subject'] = i
+                
+            window_meta.extend(subject_windows)
 
         window_df = pd.DataFrame(window_meta)
         logger.info(f"Found {len(window_df['subject'].unique())} subjects.")
@@ -797,15 +811,4 @@ if __name__ == "__main__":
     # Uncomment to compute ICA
     # tuh.compute_ica_labels(n_jobs=4)
     
-    data = tuh.load_data(
-        mode='raw',
-        target_name=('epilepsy', 'age', 'gender'),
-        preload=True,
-        rename_channels=False,
-        set_montage=False,
-        n_jobs=1,
-        window_len_s=5*60,  # 5 minutes
-        overlap_pct=0.0,
-        balance_per_subject=True,
-        include_seizures=False,
     )
