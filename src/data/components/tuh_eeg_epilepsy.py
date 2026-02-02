@@ -614,7 +614,7 @@ class TUHEEGEpilepsy:
         # Find intersection of all channel lists
         if not valid_channels:
             raise ValueError("No channel information available.")
-            
+   
         common_channels = set(valid_channels[0])
         for ch_list in valid_channels[1:]:
             common_channels.intersection_update(ch_list)
@@ -749,7 +749,6 @@ class TUHEEGEpilepsy:
         # formatted as (Batch, Channels, Time) -> Transpose to (Batch, Time, Channels) if user asked (windows*samples*channels)?
         # User asked: (windows*samples*channels)
         logger.info(f"Loaded {len(final_valid_data)} valid windows.")
-        logger.info(f"Each window shape (Channels, Time): {[v.shape for v in final_valid_data]}")
         tensor_data = np.stack(final_valid_data) # (Batch, Channels, Time)
         tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
         tensor_data = torch.from_numpy(tensor_data).float()
