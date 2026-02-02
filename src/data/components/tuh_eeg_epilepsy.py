@@ -9,7 +9,7 @@ Dataset class for the Temple University Hospital (TUH) EEG Epilipsy Corpus.
 
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union, Dict
 from joblib import Parallel, delayed
 from loguru import logger
 from pathlib import Path
@@ -197,7 +197,8 @@ class TUHEEGEpilepsy:
         fix_length_mode: Optional[str] = 'resample', # 'resample', 'pad', or None
         shuffle_windows: bool = False,
         seed: int = 42,
-    ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]:
+        splits: Optional[Dict[str, float]] = None,
+    ) -> Union[BaseConcatDataset, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
         
         # If window_len_s is provided, use the optimized balanced loader
         if window_len_s is not None:
@@ -209,6 +210,7 @@ class TUHEEGEpilepsy:
                 fix_length_mode=fix_length_mode,
                 shuffle_windows=shuffle_windows,
                 seed=seed,
+                splits=splits,
                 mode=mode,
                 filter_freq=filter_freq,
                 target_name=target_name,
@@ -419,7 +421,9 @@ class TUHEEGEpilepsy:
         include_seizures: bool,
         fix_length_mode: Optional[str],
         shuffle_windows: bool,
+        shuffle_windows: bool,
         seed: int,
+        splits: Optional[Dict[str, float]],
         mode: str,
         filter_freq: Optional[List[float]],
         target_name: Optional[Union[str, Tuple[str, ...]]],
@@ -427,7 +431,7 @@ class TUHEEGEpilepsy:
         rename_channels: bool,
         set_montage: bool,
         n_jobs: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]:
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
         
         # RNG
         rng = np.random.RandomState(seed)
@@ -516,6 +520,48 @@ class TUHEEGEpilepsy:
         window_df = pd.DataFrame(window_meta)
         logger.info(f"Found {len(window_df['subject'].unique())} subjects.")
         logger.info(f"Generated {len(window_df)} windows plan.")
+
+        # 3.5 Handle Data Splitting (Assign splits to rows)
+        # Default split is 'all' if no splits provided
+        split_map = {} # subject -> split_name
+        
+        unique_subjects = window_df['subject'].unique()
+        
+        if splits is not None:
+            # Check sum
+            total_ratio = sum(splits.values())
+            if not np.isclose(total_ratio, 1.0):
+                logger.warning(f"Split ratios sum to {total_ratio}, not 1.0. This might leave some subjects unused or cause overlap issues if > 1.")
+            
+            # Shuffle unique subjects for random split
+            # Use same seed for consistency
+            rng.shuffle(unique_subjects)
+            
+            n_sub = len(unique_subjects)
+            current_idx = 0
+            
+            for split_name, ratio in splits.items():
+                n_split = int(np.floor(ratio * n_sub))
+                # Assign
+                split_subs = unique_subjects[current_idx : current_idx + n_split]
+                for s in split_subs:
+                    split_map[s] = split_name
+                
+                current_idx += n_split
+            
+            # Assign remaining (rounding errors) to last split or warning?
+            # Or just 'test'? Let's assign strict based on ratios. 
+            # If sum < 1, some subjects map to None (unused).
+            # If sum = 1, last few might be skipped due to floor.
+            # Let's add remaining to the last defined split to be safe, or just leave them unused.
+            # Common practice: Add remainder to last split.
+            if current_idx < n_sub and np.isclose(total_ratio, 1.0):
+                 remainder = unique_subjects[current_idx:]
+                 last_split = list(splits.keys())[-1]
+                 for s in remainder:
+                     split_map[s] = last_split
+                     
+            logger.info("Subject Split Assignment Complete.")
 
         # 4. Load Data
         # Helper for parallel loading
@@ -798,7 +844,46 @@ class TUHEEGEpilepsy:
         if 'description_row' in valid_meta.columns:
             valid_meta = valid_meta.drop(columns=['description_row'])
             
-        return tensor_data, tensor_targets, valid_meta
+        # 6. Organize Output based on Splits
+        if splits is None:
+             # Return just the valid tuple
+             return tensor_data, tensor_targets, valid_meta
+        else:
+             # Partition the tensors and metadata back into dictionary
+             output_dict = {}
+             
+             # We need to map the valid_meta rows back to their subjects
+             # Note: valid_meta is aligned with tensor_data (indices match)
+             
+             # Create a mask for each split
+             
+             distinct_split_names = set(splits.keys())
+             
+             for split_name in distinct_split_names:
+                  # Find subjects belonging to this split
+                  # Helper: get indices in valid_meta
+                  # Optimization: Add 'split' column to window_df earlier?
+                  # Yes, but we did it on subjects. 
+                  # Let's just iterate valid_meta
+                  
+                  # Which subjects are in this split?
+                  subjects_in_split = {s for s, param in split_map.items() if param == split_name}
+                  
+                  # Bool mask
+                  mask = valid_meta['subject'].isin(subjects_in_split)
+                  indices = np.where(mask)[0]
+                  
+                  if len(indices) == 0:
+                      logger.warning(f"Split '{split_name}' resulted in 0 windows.")
+                      output_dict[split_name] = (torch.tensor([]), torch.tensor([]), pd.DataFrame())
+                  else:
+                      split_data = tensor_data[indices]
+                      split_targets = tensor_targets[indices]
+                      split_meta = valid_meta.iloc[indices].reset_index(drop=True)
+                      
+                      output_dict[split_name] = (split_data, split_targets, split_meta)
+                      
+             return output_dict
 #%%
 
 if __name__ == "__main__":
