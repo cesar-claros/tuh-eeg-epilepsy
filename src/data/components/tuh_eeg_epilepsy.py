@@ -421,7 +421,6 @@ class TUHEEGEpilepsy:
         include_seizures: bool,
         fix_length_mode: Optional[str],
         shuffle_windows: bool,
-        shuffle_windows: bool,
         seed: int,
         splits: Optional[Dict[str, float]],
         mode: str,
