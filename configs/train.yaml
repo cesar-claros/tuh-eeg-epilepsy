@@ -6,6 +6,7 @@ defaults:
   - _self_
   - data: tuh_eeg_epilepsy
   - feature: hydra_transformer
+  - model_scikit: ridge_classifier
   - model: mnist
   - callbacks: default
   - logger: mlflow # set logger here or use command line (e.g. `uv run train.py logger=tensorboard`)

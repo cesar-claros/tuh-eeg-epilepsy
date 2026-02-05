@@ -1,0 +1,7 @@
+_target_: sklearn.linear_model.RidgeClassifierCV
+alphas:
+  _target_: numpy.logspace
+  start: -3
+  stop: 3
+  num: 10
+cv: 5

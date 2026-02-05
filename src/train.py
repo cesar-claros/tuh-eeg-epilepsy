@@ -21,6 +21,7 @@ from src.utils import (
 
 if TYPE_CHECKING:
     from lightning import Callback, LightningDataModule, LightningModule, Trainer
+    from sklearn.base import BaseEstimator
     from torch import nn
     from lightning.pytorch.loggers import Logger
     from aeon.transformations.collection import BaseCollectionTransformer
@@ -60,8 +61,11 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
     
-    log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
+    # log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
+    # model: LightningModule = hydra.utils.instantiate(cfg.model)
+
+    # log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
+    model_scikit: BaseEstimator = hydra.utils.instantiate(cfg.model_scikit)
 
     # log.info("Instantiating callbacks...")
     # callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
@@ -80,7 +84,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "cfg": cfg,
         # "datamodule": datamodule,
         "feature_extractor": feature_extractor,
-        "model": model,
+        # "model": model,
+        "model_scikit": model_scikit,
         # "callbacks": callbacks,
         # "logger": logger,
         # "trainer": trainer,
@@ -126,23 +131,13 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         log.info("Starting classifier training!")
         clf = make_pipeline(
             _SparseScaler(),
-            # RidgeClassifierCV(
-            #     alphas=np.logspace(-3, 3, 10),
-            # ),
-            LogisticRegressionCV(
-                Cs=np.logspace(-6, 6, 50),
-                cv=5,
-                l1_ratios=(0,),
-                scoring="neg_log_loss",
-                max_iter=1_000,
-                use_legacy_attributes=False,
-            )
+            model_scikit
         )
         clf.fit(data_transformed['train']["X"], data_transformed['train']["y"])
         log.info("Classifier training completed!")
         log.info("Starting evaluation!")
-        y_pred = clf.score(data_transformed['test']["X"], data_transformed['test']["y"])
-        log.info(f"Test accuracy: {y_pred:.4f}")
+        score = clf.score(data_transformed['test']["X"], data_transformed['test']["y"])
+        log.info(f"Test accuracy: {score:.4f}")
 
 
             # X_train_batches.append(X_transformed)
