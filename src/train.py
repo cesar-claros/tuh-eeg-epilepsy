@@ -61,11 +61,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
     
-    # log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
-    # model: LightningModule = hydra.utils.instantiate(cfg.model)
-
-    # log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
-    model_scikit: BaseEstimator = hydra.utils.instantiate(cfg.model_scikit)
+    log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
+    model: LightningModule = hydra.utils.instantiate(cfg.model)
 
     # log.info("Instantiating callbacks...")
     # callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
@@ -84,8 +81,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "cfg": cfg,
         # "datamodule": datamodule,
         "feature_extractor": feature_extractor,
-        # "model": model,
-        "model_scikit": model_scikit,
+        "model": model,
         # "callbacks": callbacks,
         # "logger": logger,
         # "trainer": trainer,
@@ -128,7 +124,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         log.info("Starting classifier training!")
         clf = make_pipeline(
             _SparseScaler(),
-            model_scikit
+            model
         )
         clf.fit(data_transformed['train']["X"], data_transformed['train']["y"])
         log.info("Classifier training completed!")

@@ -1,8 +1,0 @@
-_target_: sklearn.linear_model.LogisticRegressionCV
-  cv: 5
-  Cs:
-    _target_: numpy.logspace
-    start: -6
-    stop: 6
-    num: 10
-  verbose: 1
