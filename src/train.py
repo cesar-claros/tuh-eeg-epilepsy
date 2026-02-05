@@ -98,9 +98,6 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     if cfg.get("train"):
         from src.models.components.hydra_transformer import _SparseScaler
         import torch
-        import numpy as np
-        from sklearn.linear_model import RidgeClassifierCV
-        from sklearn.linear_model import LogisticRegressionCV
         from sklearn.pipeline import make_pipeline
 
         log.info("Starting feature extraction!")
