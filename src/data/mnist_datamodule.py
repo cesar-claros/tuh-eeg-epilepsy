@@ -1,3 +1,4 @@
+#%%
 """Contains the LightningDataModule for the MNSIT dataset."""
 
 from typing import Any
@@ -247,6 +248,6 @@ class MNISTDataModule(LightningDataModule):
 
         """  # noqa: E501
 
-
+#%%
 if __name__ == "__main__":
     _ = MNISTDataModule()

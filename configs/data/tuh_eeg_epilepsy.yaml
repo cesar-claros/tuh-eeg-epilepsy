@@ -1,0 +1,7 @@
+_target_: src.data.tuh_eeg_epilepsy_datamodule.TUHEEGDataModule
+data_dir: ${paths.data_dir}
+version: 'v3.0.0'
+train_val_test_split: [0.8, 0.1, 0.1]
+batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
+num_workers: 4
+pin_memory: False

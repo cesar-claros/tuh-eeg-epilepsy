@@ -677,7 +677,6 @@ class TUHEEGEpilepsy:
                 # Ensure fixed length (Float rounding issues might give +/- 1 sample)
                 # Check expected samples
                 sfreq = raw.info['sfreq']
-                logger.info(f"Loading window: {row_meta['path'].name}, start: {row_meta['start']}, end: {row_meta['end']}, sfreq: {sfreq}")
                 expected_samples = int(window_len_s * sfreq)
                 
                 if data.shape[1] > expected_samples:
@@ -857,7 +856,7 @@ class TUHEEGEpilepsy:
         # User asked: (windows*samples*channels)
         logger.info(f"Loaded {len(final_valid_data)} valid windows.")
         tensor_data = np.stack(final_valid_data) # (Batch, Channels, Time)
-        tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
+        # tensor_data = np.transpose(tensor_data, (0, 2, 1)) # (Batch, Time, Channels)
         tensor_data = torch.from_numpy(tensor_data).float()
         
         # Stack Targets
@@ -931,15 +930,3 @@ class TUHEEGEpilepsy:
                       output_dict[split_name] = (split_data, split_targets, split_meta)
                       
              return output_dict
-#%%
-
-if __name__ == "__main__":
-    # Example usage
-    tuh = TUHEEGEpilepsy(
-        recording_ids=range(30),
-        add_annotations=True,
-    )
-    
-    # Uncomment to compute ICA
-    # tuh.compute_ica_labels(n_jobs=4)
-

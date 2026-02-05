@@ -7,8 +7,8 @@ import lightning
 import rootutils
 from omegaconf import DictConfig
 
-rootutils.setup_root(__file__, pythonpath=True)
-
+root = rootutils.setup_root(__file__, pythonpath=True)
+from tqdm import tqdm
 from src.utils import (
     RankedLogger,
     extras,
@@ -21,7 +21,10 @@ from src.utils import (
 
 if TYPE_CHECKING:
     from lightning import Callback, LightningDataModule, LightningModule, Trainer
+    from torch import nn
     from lightning.pytorch.loggers import Logger
+    from aeon.transformations.collection import BaseCollectionTransformer
+    
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
@@ -54,56 +57,117 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")  # noqa: G004
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
+    log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
+    feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
+    
     log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
     model: LightningModule = hydra.utils.instantiate(cfg.model)
 
-    log.info("Instantiating callbacks...")
-    callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
+    # log.info("Instantiating callbacks...")
+    # callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
 
-    log.info("Instantiating loggers...")
-    logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
+    # log.info("Instantiating loggers...")
+    # logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
 
-    log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
-    trainer: Trainer = hydra.utils.instantiate(
-        cfg.trainer,
-        callbacks=callbacks,
-        logger=logger,
-    )
+    # log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
+    # trainer: Trainer = hydra.utils.instantiate(
+    #     cfg.trainer,
+    #     callbacks=callbacks,
+    #     logger=logger,
+    # )
 
     object_dict = {
         "cfg": cfg,
-        "datamodule": datamodule,
+        # "datamodule": datamodule,
+        "feature_extractor": feature_extractor,
         "model": model,
-        "callbacks": callbacks,
-        "logger": logger,
-        "trainer": trainer,
+        # "callbacks": callbacks,
+        # "logger": logger,
+        # "trainer": trainer,
     }
 
-    if logger:
-        log.info("Logging hyperparameters!")
-        log_hyperparameters(object_dict)
+    # if logger:
+    #     log.info("Logging hyperparameters!")
+    #     log_hyperparameters(object_dict)
 
     if cfg.get("train"):
-        log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        from src.models.components.hydra_transformer import _SparseScaler
+        import torch
+        import numpy as np
+        from sklearn.linear_model import RidgeClassifierCV
+        from sklearn.linear_model import LogisticRegressionCV
+        from sklearn.pipeline import make_pipeline
 
-    train_metrics = trainer.callback_metrics
+        log.info("Starting feature extraction!")
+        datamodule.setup()
+        data_dict = {
+            "train": datamodule.train_dataloader(),
+            "val": datamodule.val_dataloader(),
+            "test": datamodule.test_dataloader(),
+            }
+        data_transformed = {}
+        for split, dataloader in data_dict.items():
+            log.info(f"Extracting features for {split} data")
+            X_split_batches = []
+            y_split_batches = []
+            for batch in tqdm(dataloader, desc=f"Feature extraction for {split} data"):
+                X, y = batch
+                X_transformed = feature_extractor(X)
+                X_split_batches.append(X_transformed)
+                y_split_batches.append(y)
+            data_transformed[split] = {
+                "X": torch.cat(X_split_batches, dim=0), 
+                "y": torch.cat(y_split_batches, dim=0).squeeze(),
+            }
+        log.info("Feature extraction completed!")
+        log.info("Freeing up memory...")
+        del data_dict # free memory
+        del datamodule  # free memory
+        log.info("Starting classifier training!")
+        clf = make_pipeline(
+            _SparseScaler(),
+            # RidgeClassifierCV(
+            #     alphas=np.logspace(-3, 3, 10),
+            # ),
+            LogisticRegressionCV(
+                Cs=np.logspace(-6, 6, 50),
+                cv=5,
+                l1_ratios=(0,),
+                scoring="neg_log_loss",
+                max_iter=1_000,
+                use_legacy_attributes=False,
+            )
+        )
+        clf.fit(data_transformed['train']["X"], data_transformed['train']["y"])
+        log.info("Classifier training completed!")
+        log.info("Starting evaluation!")
+        y_pred = clf.score(data_transformed['test']["X"], data_transformed['test']["y"])
+        log.info(f"Test accuracy: {y_pred:.4f}")
 
-    if cfg.get("test"):
-        log.info("Starting testing!")
-        ckpt_path = trainer.checkpoint_callback.best_model_path
-        if ckpt_path == "":
-            log.warning("Best ckpt not found! Using current weights for testing...")
-            ckpt_path = None
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=False)
-        log.info(f"Best ckpt path: {ckpt_path}")  # noqa: G004
 
-    test_metrics = trainer.callback_metrics
+            # X_train_batches.append(X_transformed)
+        # X_train = torch.cat(X_train_batches, dim=0)
+
+    #     trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+
+    # train_metrics = trainer.callback_metrics
+
+    # if cfg.get("test"):
+    #     log.info("Starting testing!")
+    #     ckpt_path = trainer.checkpoint_callback.best_model_path
+    #     if ckpt_path == "":
+    #         log.warning("Best ckpt not found! Using current weights for testing...")
+    #         ckpt_path = None
+    #     trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=False)
+    #     log.info(f"Best ckpt path: {ckpt_path}")  # noqa: G004
+
+    # test_metrics = trainer.callback_metrics
 
     # merge train and test metrics
-    metric_dict = {**train_metrics, **test_metrics}
+    # metric_dict = {**train_metrics, **test_metrics}
 
-    return metric_dict, object_dict
+    # return metric_dict, object_dict
+    return object_dict
 
 
 @hydra.main(version_base="1.3", config_path="../configs", config_name="train.yaml")
@@ -126,14 +190,15 @@ def main(cfg: DictConfig) -> float | None:
     extras(cfg)
 
     # train the model
-    metric_dict, _ = train(cfg)
+    # metric_dict, _ = train(cfg)
+    _ = train(cfg)
 
     # safely retrieve metric value for hydra-based hyperparameter optimization
     # return optimized metric
-    return get_metric_value(
-        metric_dict=metric_dict,
-        metric_name=cfg.get("optimized_metric"),
-    )
+    # return get_metric_value(
+    #     metric_dict=metric_dict,
+    #     metric_name=cfg.get("optimized_metric"),
+    # )
 
 
 if __name__ == "__main__":
