@@ -1,0 +1,3 @@
+_target_: src.utils.trainer.Trainer
+
+output_path: ${paths.output_dir}

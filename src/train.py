@@ -17,6 +17,7 @@ from src.utils import (
     instantiate_loggers,
     log_hyperparameters,
     task_wrapper,
+    Trainer,
 )
 
 if TYPE_CHECKING:
@@ -27,7 +28,9 @@ if TYPE_CHECKING:
     from aeon.transformations.collection import BaseCollectionTransformer
     
 
+
 log = RankedLogger(__name__, rank_zero_only=True)
+
 
 
 @task_wrapper
@@ -61,6 +64,9 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
     
+    log.info(f"Instantiating sparse scaler <{cfg.feature._target_}>")  # noqa: G004
+    sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.feature)
+    
     log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
     model: LightningModule = hydra.utils.instantiate(cfg.model)
 
@@ -70,6 +76,9 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     # log.info("Instantiating loggers...")
     # logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
 
+    log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
+    trainer: Trainer = hydra.utils.instantiate(cfg.trainer)
+    
     # log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
     # trainer: Trainer = hydra.utils.instantiate(
     #     cfg.trainer,
@@ -79,12 +88,13 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     object_dict = {
         "cfg": cfg,
-        # "datamodule": datamodule,
+        "datamodule": datamodule,
         "feature_extractor": feature_extractor,
         "model": model,
+        "scaler": sparse_scaler,
         # "callbacks": callbacks,
         # "logger": logger,
-        # "trainer": trainer,
+        "trainer": trainer,
     }
 
     # if logger:
@@ -92,64 +102,26 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     #     log_hyperparameters(object_dict)
 
     if cfg.get("train"):
-        from src.models.components.hydra_transformer import _SparseScaler
-        import torch
-        from sklearn.pipeline import make_pipeline
-
-        log.info("Starting feature extraction!")
-        datamodule.setup()
-        data_dict = {
-            "train": datamodule.train_dataloader(),
-            "val": datamodule.val_dataloader(),
-            "test": datamodule.test_dataloader(),
-            }
-        data_transformed = {}
-        for split, dataloader in data_dict.items():
-            log.info(f"Extracting features for {split} data")
-            X_split_batches = []
-            y_split_batches = []
-            for batch in tqdm(dataloader, desc=f"Feature extraction for {split} data"):
-                X, y = batch
-                X_transformed = feature_extractor(X)
-                X_split_batches.append(X_transformed)
-                y_split_batches.append(y)
-            data_transformed[split] = {
-                "X": torch.cat(X_split_batches, dim=0), 
-                "y": torch.cat(y_split_batches, dim=0).squeeze(),
-            }
-        log.info("Feature extraction completed!")
-        log.info("Freeing up memory...")
-        del data_dict # free memory
-        del datamodule  # free memory
-        log.info("Starting classifier training!")
-        clf = make_pipeline(
-            _SparseScaler(),
-            model
+        trainer.fit(
+            model=model, 
+            feature_extractor=feature_extractor, 
+            scaler=sparse_scaler, 
+            datamodule=datamodule
+            output_path=cfg.paths.output_dir
         )
-        clf.fit(data_transformed['train']["X"], data_transformed['train']["y"])
-        log.info("Classifier training completed!")
-        log.info("Starting evaluation!")
-        score = clf.score(data_transformed['test']["X"], data_transformed['test']["y"])
-        log.info(f"Test accuracy: {score:.4f}")
 
-
-            # X_train_batches.append(X_transformed)
-        # X_train = torch.cat(X_train_batches, dim=0)
-
-    #     trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
-
-    # train_metrics = trainer.callback_metrics
-
-    # if cfg.get("test"):
-    #     log.info("Starting testing!")
-    #     ckpt_path = trainer.checkpoint_callback.best_model_path
-    #     if ckpt_path == "":
-    #         log.warning("Best ckpt not found! Using current weights for testing...")
-    #         ckpt_path = None
-    #     trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=False)
-    #     log.info(f"Best ckpt path: {ckpt_path}")  # noqa: G004
-
-    # test_metrics = trainer.callback_metrics
+    if cfg.get("test"):
+        trainer.test(
+            model=model, 
+            feature_extractor=feature_extractor, 
+            scaler=sparse_scaler, 
+            datamodule=datamodule
+        )
+    
+    # Return metrics (placeholder as we didn't capture them in a dict yet)
+    # logic could be expanded to return dict from test
+    
+    return object_dict
 
     # merge train and test metrics
     # metric_dict = {**train_metrics, **test_metrics}
