@@ -104,9 +104,6 @@ class HydraTransformer(nn.Module):
     
     def _lazy_setup(self, X:torch.Tensor) -> None:
         """Set up HydraTransform instance lazily based on input data shape."""
-        if isinstance(self.random_state, int):
-            torch.manual_seed(self.random_state)
-
         torch.set_num_threads(self._n_jobs)
         self._hydra = HydraTransform(
             n_timepoints = X.shape[2],
@@ -114,6 +111,7 @@ class HydraTransformer(nn.Module):
             k = self.n_kernels,
             g = self.n_groups,
             max_num_channels = self.max_num_channels,
+            seed = self.random_state,
         )
 
     def forward(self, X:torch.Tensor) -> torch.Tensor:

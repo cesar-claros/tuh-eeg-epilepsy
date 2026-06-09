@@ -64,8 +64,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
     
-    log.info(f"Instantiating sparse scaler <{cfg.feature._target_}>")  # noqa: G004
-    sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.feature)
+    log.info(f"Instantiating sparse scaler <{cfg.scaler._target_}>")  # noqa: G004
+    sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.scaler)
     
     log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
     model: LightningModule = hydra.utils.instantiate(cfg.model)
@@ -102,16 +102,16 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     #     log_hyperparameters(object_dict)
 
     if cfg.get("train"):
-        trainer.fit(
+        train_metrics = trainer.fit(
             model=model, 
             feature_extractor=feature_extractor, 
             scaler=sparse_scaler, 
-            datamodule=datamodule
+            datamodule=datamodule,
             output_path=cfg.paths.output_dir
         )
 
     if cfg.get("test"):
-        trainer.test(
+        test_metrics = trainer.test(
             model=model, 
             feature_extractor=feature_extractor, 
             scaler=sparse_scaler, 
@@ -121,13 +121,13 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     # Return metrics (placeholder as we didn't capture them in a dict yet)
     # logic could be expanded to return dict from test
     
-    return object_dict
+    # return object_dict
 
     # merge train and test metrics
-    # metric_dict = {**train_metrics, **test_metrics}
+    metric_dict = {**train_metrics, **test_metrics}
 
-    # return metric_dict, object_dict
-    return object_dict
+    return metric_dict, object_dict
+    # return object_dict
 
 
 @hydra.main(version_base="1.3", config_path="../configs", config_name="train.yaml")
@@ -150,15 +150,15 @@ def main(cfg: DictConfig) -> float | None:
     extras(cfg)
 
     # train the model
-    # metric_dict, _ = train(cfg)
-    _ = train(cfg)
+    metric_dict, _ = train(cfg)
+    # _ = train(cfg)
 
     # safely retrieve metric value for hydra-based hyperparameter optimization
     # return optimized metric
-    # return get_metric_value(
-    #     metric_dict=metric_dict,
-    #     metric_name=cfg.get("optimized_metric"),
-    # )
+    return get_metric_value(
+        metric_dict=metric_dict,
+        metric_name=cfg.get("optimized_metric"),
+    )
 
 
 if __name__ == "__main__":

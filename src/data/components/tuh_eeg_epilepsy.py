@@ -191,6 +191,10 @@ class TUHEEGEpilepsy:
         n_jobs: int = 1,
         # New args for balanced windowing
         window_len_s: Optional[float] = None,
+        # Args for dictionary learning
+        idx_list: Optional[List[str]] = None,
+        dictionary_learning: bool = False,
+        n_windows_per_subject: Optional[int] = None,
         overlap_pct: float = 0.0,
         balance_per_subject: bool = False,
         include_seizures: bool = True,
@@ -203,24 +207,27 @@ class TUHEEGEpilepsy:
         
         # If window_len_s is provided, use the optimized balanced loader
         if window_len_s is not None:
-             return self._load_balanced_windows(
-                window_len_s=window_len_s,
-                overlap_pct=overlap_pct,
-                balance_per_subject=balance_per_subject,
-                include_seizures=include_seizures,
-                fix_length_mode=fix_length_mode,
-                shuffle_windows=shuffle_windows,
-                seed=seed,
-                splits=splits,
-                stratify_by=stratify_by,
-                mode=mode,
-                filter_freq=filter_freq,
-                target_name=target_name,
-                pick_channels=pick_channels,
-                rename_channels=rename_channels,
-                set_montage=set_montage,
-                n_jobs=n_jobs,
-             )
+            return self._load_balanced_windows(
+                    window_len_s=window_len_s,
+                    overlap_pct=overlap_pct,
+                    balance_per_subject=balance_per_subject,
+                    include_seizures=include_seizures,
+                    fix_length_mode=fix_length_mode,
+                    shuffle_windows=shuffle_windows,
+                    seed=seed,
+                    splits=splits,
+                    idx_list=idx_list,
+                    dictionary_learning=dictionary_learning,
+                    n_windows_per_subject=n_windows_per_subject,
+                    stratify_by=stratify_by,
+                    mode=mode,
+                    filter_freq=filter_freq,
+                    target_name=target_name,
+                    pick_channels=pick_channels,
+                    rename_channels=rename_channels,
+                    set_montage=set_montage,
+                    n_jobs=n_jobs,
+                )
 
         if set_montage:
             assert rename_channels, (
@@ -414,82 +421,81 @@ class TUHEEGEpilepsy:
     def _set_montage(raw: mne.io.BaseRaw) -> None:
         montage = mne.channels.make_standard_montage("standard_1020")
         raw.set_montage(montage, on_missing="ignore")
-
-    def _load_balanced_windows(
-        self,
-        window_len_s: float,
-        overlap_pct: float,
-        balance_per_subject: bool,
-        include_seizures: bool,
-        fix_length_mode: Optional[str],
-        shuffle_windows: bool,
-        seed: int,
-        splits: Optional[Dict[str, float]],
-        stratify_by: str,
-        mode: str,
-        filter_freq: Optional[List[float]],
-        target_name: Optional[Union[str, Tuple[str, ...]]],
-        pick_channels: Optional[List[str]],
-        rename_channels: bool,
-        set_montage: bool,
-        n_jobs: int,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
-        
-        # RNG
-        rng = np.random.RandomState(seed)
-
-        # 1. Filter Descriptions
-        df = self.descriptions.copy()
-        if not include_seizures:
-            # Assumes 'n_seizure' col exists and > 0 means it contains seizure
-            # If the user meant "exclude segments with seizures", that's harder without detailed annotations
-            # Assuming here: exclude FILES that have seizures
-             df = df[df['n_seizure'] == 0]
-
-        if df.empty:
-            raise ValueError("No data available after filtering.")
-        
-        # 2. Calculate available windows per subject
-        stride_s = window_len_s * (1 - overlap_pct)
-        if stride_s <= 0:
-            raise ValueError("Overlap must be < 1.0")
-
+    
+    def _calculate_limit_per_subject(
+            self, 
+            df:pd.DataFrame, 
+            window_len_s:int, 
+            stride:float, 
+            balance_per_subject:bool,
+            unit: str = 'seconds',
+        ) -> Optional[int]:
         # Approx windows per file
-        df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s) / stride_s) + 1).astype(int)
-        
+        df = df.copy() # Avoid modifying original
+        if unit == 'seconds':
+            df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s) / stride) + 1).astype(int)        
+        elif unit == 'samples':
+            assert isinstance(stride, int), "When unit is 'samples', stride must be an integer number of samples."
+            df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s)*df['sfreq'] / stride) + 1).astype(int)
         # Windows per subject
-        subject_window_counts = df.groupby('subject')['n_windows'].sum()
+        subject_window_counts = df.groupby('subject')['n_windows'].sum().sort_index()
+        smallest_n_windows_count = subject_window_counts.nsmallest(10)
+        # logger.info(f"Subjects with the lowest number of windows:\n{smallest_n_windows_count}")
+        df_smallest = df[df["subject"].isin(smallest_n_windows_count.index)][["subject", "duration","n_windows"]].sort_values(["subject","n_windows" ])
+        logger.info(f'Durations of subjects with the lowest number of windows:\n{df_smallest}')
         
         if balance_per_subject:
             limit_per_subject = int(subject_window_counts.min())
+            idx_limit_subject = subject_window_counts.idxmin()
+            duration_limit_subject = df[df['subject'] == idx_limit_subject]['duration']
+            windows_limit_subject = df[df['subject'] == idx_limit_subject]['n_windows']
+            logger.info(f"Subject '{idx_limit_subject}' with total duration {duration_limit_subject.sum():.2f}s.")
+            logger.info(f"Subject '{idx_limit_subject}' durations: {duration_limit_subject.tolist()}")
+            logger.info(f"Subject '{idx_limit_subject}' windows: {windows_limit_subject.tolist()}")
             logger.info(f"Balancing: Limiting to {limit_per_subject} windows per subject.")
             if limit_per_subject == 0:
-                 raise ValueError("Balancing requested but at least one subject has 0 valid windows.")
+                raise ValueError("Balancing requested but at least one subject has 0 valid windows.")
         else:
             limit_per_subject = None # Use all
             logger.info("Using all available windows (unbalanced).")
+        return df, limit_per_subject
 
-        # 3. Generate Window List
+    def _generate_windows_list(
+            self, 
+            df: pd.DataFrame,
+            window_len_s: float,
+            stride: float,
+            shuffle_windows: bool,
+            limit_per_subject: Optional[int],
+            rng: np.random.RandomState,
+            unit: str = 'seconds',
+        ) -> pd.DataFrame:
         window_meta = []
         
         # Group by subject to enforce limits
         # To handle shuffle correctly with balanced limits, we must collect ALL possibilities first for a subject
         
-        for subject, group in df.groupby('subject'):
+        for subject, group in tqdm( df.groupby('subject'), desc="Generating windows list per subject"):
             # Sort for deterministic base order
             group = group.sort_values(['year', 'month', 'day', 'time'] if {'year','month','day','time'}.issubset(group.columns) else ['path'])
             
             subject_windows = []
             
             for _, row in group.iterrows():
-                age, gender = utils.parse_age_and_gender_from_edf_header(row['path'])
+                # age, gender = utils.parse_age_and_gender_from_edf_header(row['path'])
                 n_possible = row['n_windows']
                 if n_possible <= 0:
                     continue
-                
+                indices = np.arange(n_possible)
+                if unit == 'samples':
+                    if limit_per_subject is not None and limit_per_subject < n_possible:
+                        indices = rng.permutation(indices)[:limit_per_subject] 
                 # Calculate start times for this file
-                for idx in range(n_possible):
-                    start_t = idx * stride_s
+                for idx in tqdm(indices, desc=f"Windows for subject {subject}", leave=False):
+                    if unit == 'seconds':
+                        start_t = idx * stride
+                    elif unit == 'samples':
+                        start_t = (idx * stride)/row['sfreq']
                     end_t = start_t + window_len_s
                     
                     subject_windows.append({
@@ -500,8 +506,8 @@ class TUHEEGEpilepsy:
                         't_id': row.get('t_id', 'unknown'),
                         'epilepsy': row.get('epilepsy', False),
                         # Store other useful metadata from row if needed
-                        'age': age,
-                        'gender': gender,
+                        # 'age': row['age'],
+                        # 'gender': row['gender'],
                         'description_row': row # Keep ref for loading
                     })
                     
@@ -522,6 +528,69 @@ class TUHEEGEpilepsy:
         window_df = pd.DataFrame(window_meta)
         logger.info(f"Found {len(window_df['subject'].unique())} subjects.")
         logger.info(f"Generated {len(window_df)} windows plan.")
+        return window_df
+
+    def _load_balanced_windows(
+        self,
+        window_len_s: float,
+        overlap_pct: float,
+        balance_per_subject: bool,
+        include_seizures: bool,
+        fix_length_mode: Optional[str],
+        shuffle_windows: bool,
+        seed: int,
+        splits: Optional[Dict[str, float]],
+        idx_list: Optional[List[str]],
+        dictionary_learning: bool,
+        n_windows_per_subject: Optional[int],
+        stratify_by: str,
+        mode: str,
+        filter_freq: Optional[List[float]],
+        target_name: Optional[Union[str, Tuple[str, ...]]],
+        pick_channels: Optional[List[str]],
+        rename_channels: bool,
+        set_montage: bool,
+        n_jobs: int,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
+        
+        # RNG
+        rng = np.random.RandomState(seed)
+
+        # 1. Filter Descriptions
+        df = self.descriptions.copy()
+        if not include_seizures:
+            # Assumes 'n_seizure' col exists and > 0 means it contains seizure
+            # If the user meant "exclude segments with seizures", that's harder without detailed annotations
+            # Assuming here: exclude FILES that have seizures
+             df = df[df['n_seizure'] == 0]
+        # Filter by idx_list if provided (e.g. specific subjects)
+        if idx_list is not None:
+            df = df[df['subject'].isin(idx_list)]
+
+        if df.empty:
+            raise ValueError("No data available after filtering.")
+        
+        # 2. Calculate available windows per subject
+        
+        if dictionary_learning:
+            df['duration'] = df['duration']/2
+            stride = 1 # For dictionary learning, we want all possible windows with no stride (fully overlapping) to maximize data for learning. The actual windowing will be handled in the dictionary learning step, and we will generate a separate set of windows for that.
+            df, limit_per_subject = self._calculate_limit_per_subject(df, window_len_s, stride, balance_per_subject, unit='samples')
+            if n_windows_per_subject is not None and n_windows_per_subject < limit_per_subject:
+                limit_per_subject = n_windows_per_subject
+            logger.info(f"Dictionary Learning Mode: Generating fully overlapping windows with stride {stride}s. Adjusted limit per subject: {limit_per_subject} windows.")
+            # 3. Generate Window List
+            window_df = self._generate_windows_list(df, window_len_s, stride, shuffle_windows, limit_per_subject, rng, unit='samples')
+        else:
+            stride_s = window_len_s * (1 - overlap_pct)
+            if stride_s <= 0:
+                raise ValueError("Overlap must be < 1.0")
+            logger.info(f"Window length: {window_len_s}s, Overlap: {overlap_pct*100}%, Stride: {stride_s}s")
+
+            df, limit_per_subject = self._calculate_limit_per_subject(df, window_len_s, stride_s, balance_per_subject, unit='seconds')
+            
+            # 3. Generate Window List
+            window_df = self._generate_windows_list(df, window_len_s, stride_s, shuffle_windows, limit_per_subject, rng, unit='seconds')
 
         # 3.5 Handle Data Splitting (Assign splits to rows)
         # Default split is 'all' if no splits provided
@@ -832,10 +901,10 @@ class TUHEEGEpilepsy:
                     final_data_list.append(padded_d)
                 else:
                     # Mismatch and no fix mode
-                     # If diff is small (rounding error), maybe we allow it?
-                     # For now, strict.
-                     logger.warning(f"Window {i} has {current_len} samples, expected {target_len}. Skipping.")
-                     final_data_list.append(None) 
+                    # If diff is small (rounding error), maybe we allow it?
+                    # For now, strict.
+                    logger.warning(f"Window {i} has {current_len} samples, expected {target_len}. Skipping.")
+                    final_data_list.append(None) 
             elif diff < 0:
                 # Need to trim
                 # Usually happens in resample mode due to rounding or if data was slightly longer
@@ -895,38 +964,38 @@ class TUHEEGEpilepsy:
              # Return just the valid tuple
              return tensor_data, tensor_targets, valid_meta
         else:
-             # Partition the tensors and metadata back into dictionary
-             output_dict = {}
+            # Partition the tensors and metadata back into dictionary
+            output_dict = {}
              
-             # We need to map the valid_meta rows back to their subjects
-             # Note: valid_meta is aligned with tensor_data (indices match)
-             
-             # Create a mask for each split
-             
-             distinct_split_names = set(splits.keys())
-             
-             for split_name in distinct_split_names:
-                  # Find subjects belonging to this split
-                  # Helper: get indices in valid_meta
-                  # Optimization: Add 'split' column to window_df earlier?
-                  # Yes, but we did it on subjects. 
-                  # Let's just iterate valid_meta
-                  
-                  # Which subjects are in this split?
-                  subjects_in_split = {s for s, param in split_map.items() if param == split_name}
-                  
-                  # Bool mask
-                  mask = valid_meta['subject'].isin(subjects_in_split)
-                  indices = np.where(mask)[0]
-                  
-                  if len(indices) == 0:
-                      logger.warning(f"Split '{split_name}' resulted in 0 windows.")
-                      output_dict[split_name] = (torch.tensor([]), torch.tensor([]), pd.DataFrame())
-                  else:
-                      split_data = tensor_data[indices]
-                      split_targets = tensor_targets[indices]
-                      split_meta = valid_meta.iloc[indices].reset_index(drop=True)
+            # We need to map the valid_meta rows back to their subjects
+            # Note: valid_meta is aligned with tensor_data (indices match)
+            
+            # Create a mask for each split
+            
+            distinct_split_names = set(splits.keys())
+            
+            for split_name in distinct_split_names:
+                # Find subjects belonging to this split
+                # Helper: get indices in valid_meta
+                # Optimization: Add 'split' column to window_df earlier?
+                # Yes, but we did it on subjects. 
+                # Let's just iterate valid_meta
+                
+                # Which subjects are in this split?
+                subjects_in_split = {s for s, param in split_map.items() if param == split_name}
+                
+                # Bool mask
+                mask = valid_meta['subject'].isin(subjects_in_split)
+                indices = np.where(mask)[0]
+                
+                if len(indices) == 0:
+                    logger.warning(f"Split '{split_name}' resulted in 0 windows.")
+                    output_dict[split_name] = (torch.tensor([]), torch.tensor([]), pd.DataFrame())
+                else:
+                    split_data = tensor_data[indices]
+                    split_targets = tensor_targets[indices]
+                    split_meta = valid_meta.iloc[indices].reset_index(drop=True)
+                    
+                    output_dict[split_name] = (split_data, split_targets, split_meta)
                       
-                      output_dict[split_name] = (split_data, split_targets, split_meta)
-                      
-             return output_dict
+            return output_dict

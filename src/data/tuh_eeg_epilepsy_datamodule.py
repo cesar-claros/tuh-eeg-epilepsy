@@ -64,9 +64,12 @@ class TUHEEGDataModule(LightningDataModule):
         data_dir: str = "../../data/",
         version: str = 'v3.0.0',
         train_val_test_split: tuple[float, float, float] = (0.8, 0.1, 0.1),
+        window_len_min: int = 5, # 5 minutes
+        overlap_pct: float = 0.0,
         batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,  # noqa: FBT001, FBT002
+        seed: int = 42,
     ) -> None:
         """Initialize a `MNISTDataModule`.
 
@@ -89,10 +92,12 @@ class TUHEEGDataModule(LightningDataModule):
         # this line allows to access init params with 'self.hparams' attribute
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
-
+        self.seed = seed
         self.data_dir = data_dir
         self.version = version
         self.train_val_test_split = train_val_test_split
+        self.window_len_min = window_len_min
+        self.overlap_pct = overlap_pct
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -105,6 +110,10 @@ class TUHEEGDataModule(LightningDataModule):
         self.data_train: Dataset | None = None
         self.data_val: Dataset | None = None
         self.data_test: Dataset | None = None
+        
+        self.train_df:pd.DataFrame | None = None
+        self.val_df:pd.DataFrame | None = None
+        self.test_df:pd.DataFrame | None = None
 
         self.batch_size_per_device = batch_size
 
@@ -171,13 +180,13 @@ class TUHEEGDataModule(LightningDataModule):
                 set_montage = False,
                 n_jobs = 1,
                 # New args for balanced windowing
-                window_len_s = 5*60, # 5 minutes
-                overlap_pct = 0.0,
+                window_len_s = self.window_len_min*60, # 5 minutes
+                overlap_pct = self.overlap_pct,
                 balance_per_subject = True,
                 include_seizures = False,
                 fix_length_mode = 'resample', # 'resample', 'pad', or None
                 shuffle_windows = True,
-                seed = 42,
+                seed = self.seed,
                 splits = {'train': self.train_val_test_split[0],
                           'val': self.train_val_test_split[1],
                           'test': self.train_val_test_split[2]},
@@ -186,6 +195,34 @@ class TUHEEGDataModule(LightningDataModule):
             self.data_train = TensorDataset(data['train'][0], data['train'][1].squeeze())
             self.data_val = TensorDataset(data['val'][0], data['val'][1].squeeze())
             self.data_test = TensorDataset(data['test'][0], data['test'][1].squeeze())
+
+            self.train_df = data['train'][2]
+            self.val_df = data['val'][2]
+            self.test_df = data['test'][2]
+
+            # Split the dataset for dictionary learning
+            data_dictionary_learning = tuh.load_data(
+                mode = 'raw',
+                target_name = 'epilepsy',
+                preload = True,
+                rename_channels = True,
+                set_montage = False,
+                n_jobs = 1,
+                # New args for balanced windowing
+                window_len_s = 2, # 2 second windows for dictionary learning
+                dictionary_learning=True,
+                n_windows_per_subject=10, # limit to 10 windows per subject for dictionary learning to manage memory and training time. These will be randomly selected from the full set of possible windows for each subject.
+                overlap_pct = self.overlap_pct,
+                balance_per_subject = True,
+                include_seizures = False,
+                fix_length_mode = 'resample', # 'resample', 'pad', or None
+                shuffle_windows = True,
+                seed = self.seed,
+                idx_list = self.train_df['subject'].unique().tolist(), # only use training subjects for dictionary learning
+                stratify_by = 'epilepsy',
+            )
+            logger.info(f"Dictionary Learning Dataset: Generated {data_dictionary_learning[0].shape} windows for dictionary learning.")
+            logger.info(f"Example window shape for dictionary learning:\n {data_dictionary_learning[-1].head(30)}")
 
 
     def train_dataloader(self) -> DataLoader[Any]:
@@ -202,7 +239,7 @@ class TUHEEGDataModule(LightningDataModule):
             batch_size=self.batch_size_per_device,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            shuffle=True,
+            shuffle=False, # Shuffling is handled in the TUHEEGEpilepsy windowing, so we set shuffle to False here
         )
 
     def val_dataloader(self) -> DataLoader[Any]:

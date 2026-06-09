@@ -14,8 +14,8 @@ class HydraTransform(nn.Module):
                  n_channels:int = 17, 
                  k:int = 8, 
                  g:int = 64, 
-                 max_num_channels:int = 8
-                 
+                 max_num_channels:int = 8,
+                 seed:int = None,
                  ):
         super().__init__()
 
@@ -33,16 +33,32 @@ class HydraTransform(nn.Module):
 
         self.divisor = min(2, self.g)
         self.h = self.g // self.divisor
-
+        # Set random seed
+        if isinstance(seed, int):
+            # Create a custom generator and seed it
+            g = torch.Generator()
+            g.manual_seed(1024)
+            torch.manual_seed(seed)
+        # Initilize weights
         self.W = torch.randn(
-            self.num_dilations, self.divisor, self.k * self.h, 1, 9
+            self.num_dilations, 
+            self.divisor, 
+            self.k * self.h, 
+            1, 
+            9,
+            generator=g if isinstance(seed, int) else None,
         )
         self.W = self.W - self.W.mean(-1, keepdims=True)
         self.W = self.W / self.W.abs().sum(-1, keepdims=True)
 
         num_channels_per = np.clip(n_channels // 2, 2, max_num_channels)
         self.idx = [
-            torch.randint(0, n_channels, (self.divisor, self.h, num_channels_per))
+            torch.randint(
+                0, 
+                n_channels, 
+                (self.divisor, self.h, num_channels_per),
+                generator=g if isinstance(seed, int) else None,
+            )
             for _ in range(self.num_dilations)
         ]
 

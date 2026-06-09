@@ -1,8 +1,13 @@
 import torch
+import torch.nn as nn
+from pytorch_lightning import LightningDataModule
+from loguru import logger as log
+from tqdm import tqdm
 import joblib
 from pathlib import Path
 from src.models.components.hydra_transformer import _SparseScaler
 from sklearn.pipeline import make_pipeline
+import pandas as pd
 
 class Trainer:
     """
@@ -12,6 +17,24 @@ class Trainer:
     def __init__(self,  ):
         self.feature_extractor = None
         self.trained_pipeline = None
+
+    def _get_scores(self, pipeline, data, metadata_df, split_name):
+        log.info(f"Calculating scores for {split_name} data")
+        # Scores by quick window-level predictions
+        score_by_window = pipeline.score(data["X"], data["y"])
+        # Scores by subject-level predictions
+        df = metadata_df[['subject','epilepsy']].copy().set_index('subject')
+        df.loc[:, 'score'] = pipeline.decision_function(data["X"])
+        mean_scores_by_subject = df.groupby(df.index)['score'].mean()
+        epilepsy_by_subject = df.groupby(df.index)['epilepsy'].first()  # Get epilepsy label for each subject
+        accuracy_by_subject = (mean_scores_by_subject > 0).astype(bool) == epilepsy_by_subject.astype(bool)
+        log.info(f"{split_name.capitalize()} accuracy by window: {score_by_window:.4f}")
+        log.info(f"{split_name.capitalize()} accuracy by subject: {accuracy_by_subject.mean():.4f}")
+        return {
+            "accuracy_by_window": score_by_window,
+            "accuracy_by_subject": accuracy_by_subject.mean(),
+        }
+
 
     def _extract_features(
             self, 
@@ -50,15 +73,28 @@ class Trainer:
         # Extract features for train (and val if needed by model, though sklearn pipeline usually just uses train)
         train_dataloader = datamodule.train_dataloader()
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
-        
+
+        val_dataloader = datamodule.val_dataloader()
+        val_data = self._extract_features(feature_extractor, val_dataloader, "val")
+
+        # Combine train and val data for training the sklearn model, or use val for early stopping if desired (not implemented here)
+        log.info("Combining training and validation data for final training!")
+        train_data["X"] = torch.cat([train_data["X"], val_data["X"]], dim=0)
+        train_data["y"] = torch.cat([train_data["y"], val_data["y"]], dim=0)
+        log.info(f"Training data shape after combining train and val: X={train_data['X'].shape}, y={train_data['y'].shape}")
+
         log.info("Starting classifier training!")
         pipeline = make_pipeline(
             scaler,
             model
         )
         pipeline.fit(train_data["X"], train_data["y"])
+        
         log.info("Classifier training completed!")
         log.info("Saving trained pipeline!")
+        metadata_df = pd.concat([datamodule.train_df, datamodule.val_df], ignore_index=True)
+        train_scores = self._get_scores(pipeline, train_data, metadata_df, "train")
+
         # Save the model
         model_path = self.output_path / "model.joblib"
         log.info(f"Saving model to {model_path}")
@@ -71,6 +107,8 @@ class Trainer:
         scaler_path = self.output_path / "scaler.joblib"
         log.info(f"Saving scaler to {scaler_path}")
         joblib.dump(scaler, scaler_path)
+
+        return train_scores
 
     def test(
             self, 
@@ -90,6 +128,5 @@ class Trainer:
         test_dataloader = datamodule.test_dataloader()
         test_data = self._extract_features(feature_extractor, test_dataloader, "test")
         log.info("Starting evaluation!")
-        score = pipeline.score(test_data["X"], test_data["y"])
-        log.info(f"Test accuracy: {score:.4f}")
-        return score
+        test_scores = self._get_scores(pipeline, test_data, datamodule.test_df, "test")
+        return test_scores

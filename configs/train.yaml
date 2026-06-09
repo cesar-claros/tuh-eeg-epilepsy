@@ -7,7 +7,7 @@ defaults:
   - data: tuh_eeg_epilepsy
   - feature: hydra_transformer
   - scaler: sparse_scaler
-  - model: ridge_classifier
+  - model: logistic_regression
   - callbacks: default
   - logger: mlflow # set logger here or use command line (e.g. `uv run train.py logger=tensorboard`)
   - trainer: sklearn

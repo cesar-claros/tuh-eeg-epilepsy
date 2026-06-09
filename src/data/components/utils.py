@@ -269,13 +269,17 @@ def extract_info_annotations(
     # }
     dataset_dicts = {p.name:p for p in dataset_paths}
     for path in dataset_paths:
-        filename = path.name+'.txt'
-        tree_file = path.parent/filename
+        file = path.name+'.txt'
+        tree_file = path.parent/file
         for root_name, subject, session, year, montage, filename in parse_tree_file(tree_file):
+            if not filename.endswith(".edf"):
+                continue
             # Extract t### from filename
             t_match = re.search(r"_t(\d+)\.edf$", filename)
             t_id = f"t{t_match.group(1)}" if t_match else filename
             edf_path = dataset_dicts[root_name] / subject / f"{session}_{year}" / montage / filename
+            raw_edf = mne.io.read_raw_edf(edf_path, preload=False, verbose='ERROR')
+            subject_info = raw_edf.info.get('subject_info')
             records.append(
                 {
                     "root": root_name,
@@ -285,6 +289,9 @@ def extract_info_annotations(
                     "t_id" : t_id,
                     "montage": montage,
                     "epilepsy": path.name=="00_epilepsy",
+                    "age": subject_info.get('age') if subject_info else None,
+                    "gender": subject_info.get('gender') if subject_info else None,
+                    "sfreq": raw_edf.info['sfreq'],
                     "filename": filename,
                     "path": edf_path,
                 }
@@ -319,6 +326,9 @@ def extract_info_annotations(
             root_name = row["root"]
             epilepsy_flag = root_name=='00_epilepsy'
             subject = row["subject"]
+            age = row["age"]
+            gender = row['gender']
+            sfreq = row['sfreq']
             session = row["session"]
             montage = row["montage"]
             year = row["year"]
@@ -332,6 +342,7 @@ def extract_info_annotations(
             csv_bi_path = dataset_dicts[root_name] / subject / f"{session}_{row['year']}" / montage / csv_bi_name
             duration, annot = read_duration_annotations_from_csv(csv_path)
             _, annot_bi = read_duration_annotations_from_csv(csv_bi_path)
+
             annot[['root','subject','session','montage','path']] = [root_name,subject,session,montage,edf_name]
             annot_bi[['root','subject','session','montage','path']] = [root_name,subject,session,montage,edf_name]
             # Extract t### from filename
@@ -341,6 +352,9 @@ def extract_info_annotations(
             duration_entries.append(
                 {
                     "subject": subject,
+                    "age": age,
+                    "gender": gender,
+                    "sfreq": sfreq,
                     "session": session,
                     "year": year,
                     "montage": montage,
