@@ -4,3 +4,6 @@ n_groups : 64
 max_num_channels : 8
 random_state : 42
 n_jobs : 12
+# Accumulate per-kernel win counts during feature extraction so the most-used
+# kernels can be ranked and inspected (diagnostic only; does not change features).
+track_counts : false

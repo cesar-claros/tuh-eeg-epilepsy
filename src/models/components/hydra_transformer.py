@@ -11,7 +11,11 @@ import numpy as np
 from aeon.transformations.collection import BaseCollectionTransformer
 from aeon.utils.validation import check_n_jobs
 from aeon.utils.validation._dependencies import _check_soft_dependencies
-from src.models.components.hydra_transform import HydraTransform
+from src.models.components.hydra_transform import (
+    DiscriminativeKernel,
+    HydraTransform,
+    KernelInfo,
+)
 
 class HydraTransformer(nn.Module):
     """Hydra Transformer.
@@ -91,6 +95,7 @@ class HydraTransformer(nn.Module):
         max_num_channels=8,
         n_jobs=1,
         random_state=None,
+        track_counts=False,
     ):
         super().__init__()
         self.n_kernels = n_kernels
@@ -98,10 +103,11 @@ class HydraTransformer(nn.Module):
         self.max_num_channels = max_num_channels
         self.n_jobs = n_jobs
         self.random_state = random_state
+        self.track_counts = track_counts
         self._n_jobs = check_n_jobs(self.n_jobs)
         self._hydra = None
-        
-    
+
+
     def _lazy_setup(self, X:torch.Tensor) -> None:
         """Set up HydraTransform instance lazily based on input data shape."""
         torch.set_num_threads(self._n_jobs)
@@ -112,13 +118,70 @@ class HydraTransformer(nn.Module):
             g = self.n_groups,
             max_num_channels = self.max_num_channels,
             seed = self.random_state,
+            track_counts = self.track_counts,
         )
 
-    def forward(self, X:torch.Tensor) -> torch.Tensor:
+    def forward(self, X:torch.Tensor, y:torch.Tensor | None = None) -> torch.Tensor:
         if self._hydra is None:
             self._lazy_setup(X)
-        transformed = self._hydra(X)
+        # `y` (optional class labels) lets the transform bin win counts per class
+        # when track_counts is True; it never affects the returned features.
+        transformed = self._hydra(X, y)
         return transformed
+
+    def reset_counts(self) -> None:
+        """Reset the underlying global and per-class kernel win-count matrices."""
+        if self._hydra is not None:
+            self._hydra.reset_counts()
+
+    def class_labels(self) -> list:
+        """Return the class labels seen during tracking, sorted."""
+        if self._hydra is None:
+            return []
+        return self._hydra.class_labels()
+
+    def top_kernels(
+        self,
+        n_top: int,
+        by: str = "max",
+        class_label: int | None = None,
+        weighting: str = "frequency",
+    ) -> list[KernelInfo]:
+        """Return the top winning kernels from the underlying HydraTransform.
+
+        Requires this transformer to have been built with ``track_counts=True``
+        and to have processed at least one batch. Pass ``class_label`` to rank by
+        a single class's counts, and ``weighting`` to choose frequency vs
+        magnitude counts.
+        """
+        if self._hydra is None:
+            raise RuntimeError("Call the transformer on data before top_kernels().")
+        return self._hydra.top_kernels(
+            n_top, by=by, class_label=class_label, weighting=weighting
+        )
+
+    def top_discriminative_kernels(
+        self,
+        n_top: int,
+        by: str = "max",
+        classes: tuple | None = None,
+        weighting: str = "frequency",
+        metric: str = "difference",
+    ) -> list[DiscriminativeKernel]:
+        """Return the kernels whose win rate differs most between two classes.
+
+        Requires per-class tracking: the transformer must have been built with
+        ``track_counts=True`` and processed labelled batches (``forward(X, y)``).
+        ``weighting`` and ``metric`` select the count weighting and the
+        class-comparison metric (see ``HydraTransform.top_discriminative_kernels``).
+        """
+        if self._hydra is None:
+            raise RuntimeError(
+                "Call the transformer on labelled data before top_discriminative_kernels()."
+            )
+        return self._hydra.top_discriminative_kernels(
+            n_top, by=by, classes=classes, weighting=weighting, metric=metric
+        )
 
 class _SparseScaler:
     """Sparse Scaler for hydra transform."""

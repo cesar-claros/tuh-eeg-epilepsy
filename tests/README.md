@@ -48,6 +48,12 @@ uv run python tests/stage3_datamodule.py --yes-full --window-len-min 1
 # toy walk-through of one HYDRA group (C=4, T=6, h=2, k=2), prints every
 # intermediate tensor of the gather/sum/conv/argmax steps. Only needs torch.
 uv run python tests/toy_hydra_group.py
+
+# rank the most-used and the most class-discriminative HYDRA kernels (global +
+# per-class win-count matrices) and plot the top-K shapes. Variants are selectable:
+#   --weighting frequency|magnitude   --by max|min|total   --score difference|ratio|logodds
+# Only needs torch (+ matplotlib for the plot); writes to tests/outputs/.
+uv run python tests/top_kernels.py --top 12 --by max --weighting frequency --score difference
 ```
 
 Each script takes `--help`.

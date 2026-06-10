@@ -48,7 +48,9 @@ class Trainer:
         for batch in tqdm(dataloader, desc=f"Feature extraction for {split_name} data"):
             X, y = batch
             # Ensure X is on the same device as feature_extractor if needed (assuming CPU for now based on context)
-            X_transformed = feature_extractor(X)
+            # `y` is passed so the feature extractor can bin per-kernel win counts
+            # per class when track_counts is enabled; it does not change features.
+            X_transformed = feature_extractor(X, y)
             X_split_batches.append(X_transformed)
             y_split_batches.append(y)
             
