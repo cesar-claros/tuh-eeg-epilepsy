@@ -164,6 +164,7 @@ def _kernel_rows(infos: list, fractions_for: tuple | None = None) -> list[dict]:
             row[f"frac_{class_a}"] = info.fractions[class_a]
             row[f"frac_{class_b}"] = info.fractions[class_b]
         row["dilation"] = info.dilation
+        row["peak_freq_hz"] = info.peak_freq_hz
         row["representation"] = info.representation
         row["group"] = info.group
         row["kernel"] = info.kernel
@@ -173,15 +174,27 @@ def _kernel_rows(infos: list, fractions_for: tuple | None = None) -> list[dict]:
     return rows
 
 
+def _kernel_sfreq(cfg: DictConfig, feature_extractor: Any) -> float | None:
+    """Resampled sampling rate (Hz) of the windows, or None if not derivable."""
+    n_timepoints = getattr(feature_extractor, "n_timepoints", None)
+    window_len_min = cfg.data.get("window_len_min") if "data" in cfg else None
+    if n_timepoints and window_len_min:
+        return n_timepoints / (window_len_min * 60.0)
+    return None
+
+
 def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
-    """Log and save the most-used and most class-discriminative HYDRA kernels.
+    """Log, save, and plot the most-used and most class-discriminative kernels.
 
     Only meaningful when ``feature.track_counts`` is enabled (so win counts were
-    accumulated during feature extraction). Writes ``top_kernels.csv`` and, when
-    two classes were seen, ``top_discriminative_kernels.csv`` to the run output
-    directory. The variants (count, weighting, competition, metric) come from the
-    ``top_kernels`` config block.
+    accumulated during feature extraction). Writes ``top_kernels.csv`` /
+    ``top_discriminative_kernels.csv`` (with a ``peak_freq_hz`` column) and, when
+    a sampling rate is derivable, waveform-plus-spectrum plots and a peak-frequency
+    histogram split by favored class, to the run output directory. The variants
+    (n, weighting, competition, metric) come from the ``top_kernels`` config block.
     """
+    from src.models.components import kernel_viz
+
     spec = cfg.get("top_kernels") or {}
     n = spec.get("n", 20)
     by = spec.get("by", "max")
@@ -190,20 +203,28 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
 
     output_dir = Path(cfg.paths.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    sfreq = _kernel_sfreq(cfg, feature_extractor)
+    if sfreq is not None:
+        log.info(f"Kernel frequencies reported at sfreq={sfreq:.1f} Hz")  # noqa: G004
 
     log.info(f"Top {n} kernels by global '{by}/{weighting}' count:")  # noqa: G004
-    top = feature_extractor.top_kernels(n, by=by, weighting=weighting)
+    top = feature_extractor.top_kernels(n, by=by, weighting=weighting, sfreq=sfreq)
     pl.DataFrame(_kernel_rows(top)).write_csv(output_dir / "top_kernels.csv")
     for info in top[:5]:
+        freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
         log.info(  # noqa: G004
             f"  #{info.rank} d{info.dilation} {info.representation} "
-            f"g{info.group}k{info.kernel} count={info.count:.2f}"
+            f"g{info.group}k{info.kernel} count={info.count:.2f}{freq}"
+        )
+    if sfreq is not None:
+        kernel_viz.plot_kernels(
+            top, sfreq, output_dir / "top_kernels.png", "Top HYDRA kernels (global)"
         )
 
     labels = feature_extractor.class_labels()
     if len(labels) == 2:
         disc = feature_extractor.top_discriminative_kernels(
-            n, by=by, weighting=weighting, metric=metric
+            n, by=by, weighting=weighting, metric=metric, sfreq=sfreq
         )
         pl.DataFrame(_kernel_rows(disc, fractions_for=(labels[0], labels[1]))).write_csv(
             output_dir / "top_discriminative_kernels.csv"
@@ -213,9 +234,18 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
             f"(metric={metric}, classes {labels[0]} vs {labels[1]}):"
         )
         for info in disc[:5]:
+            freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
             log.info(  # noqa: G004
                 f"  #{info.rank} favors={info.favors} score={info.score:+.3f} "
-                f"d{info.dilation} {info.representation} g{info.group}k{info.kernel}"
+                f"d{info.dilation} {info.representation} g{info.group}k{info.kernel}{freq}"
+            )
+        if sfreq is not None:
+            kernel_viz.plot_kernels(
+                disc, sfreq, output_dir / "top_discriminative_kernels.png",
+                "Top discriminative HYDRA kernels",
+            )
+            kernel_viz.plot_peak_freq_hist(
+                disc, sfreq, output_dir / "discriminative_peak_freq_hist.png"
             )
     else:
         log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004

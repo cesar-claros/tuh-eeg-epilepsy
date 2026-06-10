@@ -29,6 +29,9 @@ class KernelInfo:
         The kernel index within the group.
     weight : torch.Tensor
         The length-9 kernel weights.
+    peak_freq_hz : float | None
+        Frequency (Hz) of the strongest lobe of the dilated kernel's response,
+        when a sampling rate was supplied during ranking; otherwise None.
     """
 
     rank: int
@@ -38,6 +41,7 @@ class KernelInfo:
     group: int
     kernel: int
     weight: torch.Tensor
+    peak_freq_hz: float | None = None
 
 
 @dataclass
@@ -66,6 +70,9 @@ class DiscriminativeKernel:
         The kernel index within the group.
     weight : torch.Tensor
         The length-9 kernel weights.
+    peak_freq_hz : float | None
+        Frequency (Hz) of the strongest lobe of the dilated kernel's response,
+        when a sampling rate was supplied during ranking; otherwise None.
     """
 
     rank: int
@@ -77,6 +84,7 @@ class DiscriminativeKernel:
     group: int
     kernel: int
     weight: torch.Tensor
+    peak_freq_hz: float | None = None
 
 
 class HydraTransform(nn.Module):
@@ -93,6 +101,7 @@ class HydraTransform(nn.Module):
                  ):
         super().__init__()
 
+        self.n_timepoints = n_timepoints
         self.k = k  # num kernels per group
         self.g = g  # num groups
 
@@ -277,6 +286,62 @@ class HydraTransform(nn.Module):
         """Return all kernels reshaped to (num_dilations, divisor, h, k, 9)."""
         return self.W.reshape(self.num_dilations, self.divisor, self.h, self.k, 9)
 
+    @staticmethod
+    def kernel_frequency_response(
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+    ) -> tuple:
+        """Magnitude frequency response of a dilated length-9 kernel.
+
+        The dilated kernel has taps at samples 0, d, ..., 8d, so its response at
+        physical frequency f is ``sum_j w_j exp(-i 2*pi (d f / sfreq) j)``. Because
+        the kernel is zero-mean it has no DC response, and because of the dilation
+        the response is a comb with ``d`` replicas across [0, Nyquist].
+
+        Parameters
+        ----------
+        weight : torch.Tensor
+            The length-9 kernel weights.
+        dilation : int
+            The dilation the kernel is applied with.
+        sfreq : float
+            Sampling rate in Hz (sets the frequency axis up to Nyquist).
+        n_freqs : int, default=257
+            Number of frequency points from 0 to Nyquist.
+
+        Returns
+        -------
+        tuple
+            ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``.
+        """
+        freqs = torch.linspace(0.0, sfreq / 2.0, n_freqs)
+        taps = torch.arange(weight.numel(), dtype=weight.dtype)
+        phase = (2.0 * torch.pi * dilation / sfreq) * freqs[:, None] * taps[None, :]
+        response = (weight[None, :] * torch.exp(-1j * phase)).sum(-1)
+        return freqs, response.abs()
+
+    @staticmethod
+    def peak_frequency(
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+    ) -> float:
+        """Frequency (Hz) of the strongest lobe of the dilated kernel's response."""
+        freqs, mag = HydraTransform.kernel_frequency_response(
+            weight, dilation, sfreq, n_freqs
+        )
+        return float(freqs[int(mag.argmax())].item())
+
+    @staticmethod
+    def spectral_centroid(
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+    ) -> float:
+        """Magnitude-weighted mean frequency (Hz) of the dilated kernel's response."""
+        freqs, mag = HydraTransform.kernel_frequency_response(
+            weight, dilation, sfreq, n_freqs
+        )
+        total = mag.sum()
+        if float(total) == 0.0:
+            return 0.0
+        return float((freqs * mag).sum().item() / total.item())
+
     def _count_matrix(
         self, by: str, class_label: int | None = None, weighting: str = "frequency"
     ) -> torch.Tensor:
@@ -358,12 +423,17 @@ class HydraTransform(nn.Module):
             f"`metric` must be 'difference', 'ratio', or 'logodds', got {metric!r}"
         )
 
+    def _peak_freq(self, weight: torch.Tensor, dilation: int, sfreq: float | None):
+        """Peak frequency for a kernel, or None when no sampling rate is given."""
+        return None if sfreq is None else self.peak_frequency(weight, dilation, sfreq)
+
     def top_kernels(
         self,
         n_top: int,
         by: str = "max",
         class_label: int | None = None,
         weighting: str = "frequency",
+        sfreq: float | None = None,
     ) -> list[KernelInfo]:
         """Return the top kernels by win count and their weights.
 
@@ -381,6 +451,8 @@ class HydraTransform(nn.Module):
         weighting : str, default="frequency"
             "frequency" (how often a kernel wins) or "magnitude" (summed winning
             response value).
+        sfreq : float | None, default=None
+            If given, populate each kernel's ``peak_freq_hz`` (in Hz).
 
         Returns
         -------
@@ -400,15 +472,18 @@ class HydraTransform(nn.Module):
             dilation_index, diff_index, group, kernel = self._decode_index(
                 index, divisor, h, k
             )
+            dilation = int(self.dilations[dilation_index].item())
+            weight = weights[dilation_index, diff_index, group, kernel].clone()
             infos.append(
                 KernelInfo(
                     rank=rank,
                     count=value,
-                    dilation=int(self.dilations[dilation_index].item()),
+                    dilation=dilation,
                     representation="raw" if diff_index == 0 else "diff",
                     group=group,
                     kernel=kernel,
-                    weight=weights[dilation_index, diff_index, group, kernel].clone(),
+                    weight=weight,
+                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
                 )
             )
         return infos
@@ -420,6 +495,7 @@ class HydraTransform(nn.Module):
         classes: tuple | None = None,
         weighting: str = "frequency",
         metric: str = "difference",
+        sfreq: float | None = None,
     ) -> list[DiscriminativeKernel]:
         """Return the kernels whose win rate differs most between two classes.
 
@@ -445,6 +521,8 @@ class HydraTransform(nn.Module):
             How to combine the two classes' win fractions: "difference"
             (``frac_a - frac_b``), "ratio" (``frac_a / frac_b``), or "logodds"
             (``logit(frac_a) - logit(frac_b)``).
+        sfreq : float | None, default=None
+            If given, populate each kernel's ``peak_freq_hz`` (in Hz).
 
         Returns
         -------
@@ -489,17 +567,20 @@ class HydraTransform(nn.Module):
             dilation_index, diff_index, group, kernel = self._decode_index(
                 index, divisor, h, k
             )
+            dilation = int(self.dilations[dilation_index].item())
+            weight = weights[dilation_index, diff_index, group, kernel].clone()
             results.append(
                 DiscriminativeKernel(
                     rank=rank,
                     score=flat_score[index].item(),
                     favors=class_a if bool(flat_favors[index]) else class_b,
                     fractions={class_a: flat_a[index].item(), class_b: flat_b[index].item()},
-                    dilation=int(self.dilations[dilation_index].item()),
+                    dilation=dilation,
                     representation="raw" if diff_index == 0 else "diff",
                     group=group,
                     kernel=kernel,
-                    weight=weights[dilation_index, diff_index, group, kernel].clone(),
+                    weight=weight,
+                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
                 )
             )
         return results

@@ -129,6 +129,11 @@ class HydraTransformer(nn.Module):
         transformed = self._hydra(X, y)
         return transformed
 
+    @property
+    def n_timepoints(self) -> int | None:
+        """Window length (in samples) the underlying transform was built for, or None."""
+        return None if self._hydra is None else self._hydra.n_timepoints
+
     def reset_counts(self) -> None:
         """Reset the underlying global and per-class kernel win-count matrices."""
         if self._hydra is not None:
@@ -146,18 +151,19 @@ class HydraTransformer(nn.Module):
         by: str = "max",
         class_label: int | None = None,
         weighting: str = "frequency",
+        sfreq: float | None = None,
     ) -> list[KernelInfo]:
         """Return the top winning kernels from the underlying HydraTransform.
 
         Requires this transformer to have been built with ``track_counts=True``
         and to have processed at least one batch. Pass ``class_label`` to rank by
-        a single class's counts, and ``weighting`` to choose frequency vs
-        magnitude counts.
+        a single class's counts, ``weighting`` to choose frequency vs magnitude
+        counts, and ``sfreq`` to populate each kernel's ``peak_freq_hz``.
         """
         if self._hydra is None:
             raise RuntimeError("Call the transformer on data before top_kernels().")
         return self._hydra.top_kernels(
-            n_top, by=by, class_label=class_label, weighting=weighting
+            n_top, by=by, class_label=class_label, weighting=weighting, sfreq=sfreq
         )
 
     def top_discriminative_kernels(
@@ -167,20 +173,22 @@ class HydraTransformer(nn.Module):
         classes: tuple | None = None,
         weighting: str = "frequency",
         metric: str = "difference",
+        sfreq: float | None = None,
     ) -> list[DiscriminativeKernel]:
         """Return the kernels whose win rate differs most between two classes.
 
         Requires per-class tracking: the transformer must have been built with
         ``track_counts=True`` and processed labelled batches (``forward(X, y)``).
         ``weighting`` and ``metric`` select the count weighting and the
-        class-comparison metric (see ``HydraTransform.top_discriminative_kernels``).
+        class-comparison metric; ``sfreq`` populates each kernel's
+        ``peak_freq_hz`` (see ``HydraTransform.top_discriminative_kernels``).
         """
         if self._hydra is None:
             raise RuntimeError(
                 "Call the transformer on labelled data before top_discriminative_kernels()."
             )
         return self._hydra.top_discriminative_kernels(
-            n_top, by=by, classes=classes, weighting=weighting, metric=metric
+            n_top, by=by, classes=classes, weighting=weighting, metric=metric, sfreq=sfreq
         )
 
 class _SparseScaler:

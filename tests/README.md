@@ -50,9 +50,11 @@ uv run python tests/stage3_datamodule.py --yes-full --window-len-min 1
 uv run python tests/toy_hydra_group.py
 
 # rank the most-used and the most class-discriminative HYDRA kernels (global +
-# per-class win-count matrices) and plot the top-K shapes. Variants are selectable:
-#   --weighting frequency|magnitude   --by max|min|total   --score difference|ratio|logodds
-# Only needs torch (+ matplotlib for the plot); writes to tests/outputs/.
+# per-class win-count matrices) and plot each kernel's waveform (ms) + frequency
+# response (Hz), plus a peak-frequency histogram split by favored class. Variants:
+#   --weighting frequency|magnitude  --by max|min|total  --score difference|ratio|logodds
+#   --sfreq <Hz>   (sets the frequency axis)
+# Only needs torch (+ matplotlib for the plots); writes to tests/outputs/.
 uv run python tests/top_kernels.py --top 12 --by max --weighting frequency --score difference
 ```
 
