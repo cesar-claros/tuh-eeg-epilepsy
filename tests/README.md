@@ -44,6 +44,10 @@ uv run python tests/stage6_classifier_scoring.py
 uv run python tests/stage1_metadata.py --limit 20
 uv run python tests/stage2_windowing.py --subjects-per-class 3 --window-len-s 60
 uv run python tests/stage3_datamodule.py --yes-full --window-len-min 1
+
+# toy walk-through of one HYDRA group (C=4, T=6, h=2, k=2), prints every
+# intermediate tensor of the gather/sum/conv/argmax steps. Only needs torch.
+uv run python tests/toy_hydra_group.py
 ```
 
 Each script takes `--help`.
