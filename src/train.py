@@ -8,25 +8,18 @@ import rootutils
 from omegaconf import DictConfig
 
 root = rootutils.setup_root(__file__, pythonpath=True)
-from tqdm import tqdm
 from src.utils import (
     RankedLogger,
     extras,
     get_metric_value,
-    instantiate_callbacks,
-    instantiate_loggers,
-    log_hyperparameters,
     task_wrapper,
     Trainer,
 )
 
 if TYPE_CHECKING:
-    from lightning import Callback, LightningDataModule, LightningModule, Trainer
-    from sklearn.base import BaseEstimator
+    from lightning import LightningDataModule, LightningModule
     from torch import nn
-    from lightning.pytorch.loggers import Logger
-    from aeon.transformations.collection import BaseCollectionTransformer
-    
+
 
 
 log = RankedLogger(__name__, rank_zero_only=True)
@@ -70,21 +63,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
     model: LightningModule = hydra.utils.instantiate(cfg.model)
 
-    # log.info("Instantiating callbacks...")
-    # callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
-
-    # log.info("Instantiating loggers...")
-    # logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
-
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer)
-    
-    # log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
-    # trainer: Trainer = hydra.utils.instantiate(
-    #     cfg.trainer,
-    #     callbacks=callbacks,
-    #     logger=logger,
-    # )
 
     object_dict = {
         "cfg": cfg,
@@ -92,14 +72,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "feature_extractor": feature_extractor,
         "model": model,
         "scaler": sparse_scaler,
-        # "callbacks": callbacks,
-        # "logger": logger,
         "trainer": trainer,
     }
-
-    # if logger:
-    #     log.info("Logging hyperparameters!")
-    #     log_hyperparameters(object_dict)
 
     if cfg.get("train"):
         train_metrics = trainer.fit(

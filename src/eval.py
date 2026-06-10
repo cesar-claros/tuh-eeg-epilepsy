@@ -1,8 +1,10 @@
 """Main entry point for evaluation."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import hydra
+import joblib
 import rootutils
 from omegaconf import DictConfig
 
@@ -10,25 +12,28 @@ rootutils.setup_root(__file__, pythonpath=True)
 
 from src.utils import (
     RankedLogger,
+    Trainer,
     extras,
-    instantiate_loggers,
-    log_hyperparameters,
     task_wrapper,
 )
 
 if TYPE_CHECKING:
-    from lightning import LightningDataModule, LightningModule, Trainer
-    from lightning.pytorch.loggers import Logger
+    from lightning import LightningDataModule
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
 @task_wrapper
 def evaluate(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Evaluate given checkpoint on a datamodule testset.
+    """Evaluate a trained HYDRA + sklearn pipeline on the test split.
 
-    This method is wrapped in optional @task_wrapper decorator, that controls the
-    behavior during failure. Useful for multiruns, saving info about the crash, etc.
+    Loads the artifacts saved by `Trainer.fit` (`model.joblib`, the fitted
+    scaler+classifier pipeline, and `feature_extractor.joblib`) and scores the
+    datamodule's test set, reporting window-level and subject-level accuracy.
+
+    This method is wrapped in the optional @task_wrapper decorator, that controls
+    the behavior during failure. Useful for multiruns, saving info about the
+    crash, etc.
 
     Parameters
     ----------
@@ -45,38 +50,39 @@ def evaluate(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         msg = "No checkpoint path provided!"
         raise ValueError(msg)
 
+    # Accept either the run directory or a direct path to model.joblib.
+    ckpt_dir = Path(cfg.ckpt_path)
+    if ckpt_dir.is_file():
+        ckpt_dir = ckpt_dir.parent
+
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")  # noqa: G004
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
-    log.info(f"Instantiating model <{cfg.model._target_}>")  # noqa: G004
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
-
-    log.info("Instantiating loggers...")
-    logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
-
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
-    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, logger=logger)
+    trainer: Trainer = hydra.utils.instantiate(cfg.trainer)
+
+    log.info(f"Loading trained pipeline and feature extractor from <{ckpt_dir}>")  # noqa: G004
+    pipeline = joblib.load(ckpt_dir / "model.joblib")
+    feature_extractor = joblib.load(ckpt_dir / "feature_extractor.joblib")
+    # The saved pipeline is `make_pipeline(scaler, classifier)`; recover its steps.
+    scaler, model = pipeline[0], pipeline[1]
 
     object_dict = {
         "cfg": cfg,
         "datamodule": datamodule,
+        "feature_extractor": feature_extractor,
         "model": model,
-        "logger": logger,
+        "scaler": scaler,
         "trainer": trainer,
     }
 
-    if logger:
-        log.info("Logging hyperparameters!")
-        log_hyperparameters(object_dict)
-
     log.info("Starting testing!")
-    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
-
-    # for predictions use trainer.predict(...)
-    # predictions = trainer.predict(model=model, dataloaders=dataloaders,
-    # ckpt_path=cfg.ckpt_path)
-
-    metric_dict = trainer.callback_metrics
+    metric_dict = trainer.test(
+        model=model,
+        feature_extractor=feature_extractor,
+        scaler=scaler,
+        datamodule=datamodule,
+    )
 
     return metric_dict, object_dict
 

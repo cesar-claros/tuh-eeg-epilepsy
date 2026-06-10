@@ -15,14 +15,15 @@ import pandas as pd
 
 #%%
 class TUHEEGDataModule(LightningDataModule):
-    """`LightningDataModule` for the MNIST dataset.
+    """`LightningDataModule` for the TUH EEG Epilepsy Corpus.
 
-    The MNIST database of handwritten digits has a training set of 60,000 examples, and a test set of 10,000 examples.
-    It is a subset of a larger set available from NIST. The digits have been size-normalized and centered in a
-    fixed-size image. The original black and white images from NIST were size normalized to fit in a 20x20 pixel box
-    while preserving their aspect ratio. The resulting images contain grey levels as a result of the anti-aliasing
-    technique used by the normalization algorithm. the images were centered in a 28x28 image by computing the center of
-    mass of the pixels, and translating the image so as to position this point at the center of the 28x28 field.
+    Loads the Temple University Hospital (TUH) EEG Epilepsy Corpus, slices each
+    recording into fixed-length windows (5 minutes by default), balances and
+    splits them at the subject level (so no patient leaks across train/val/test),
+    and exposes them as `TensorDataset`s of `(channels, time)` windows with a
+    binary epilepsy target. The per-split metadata DataFrames (`train_df`,
+    `val_df`, `test_df`) are retained so the custom Trainer can aggregate
+    window-level predictions into subject-level scores.
 
     A `LightningDataModule` implements 7 key methods:
 
@@ -71,20 +72,28 @@ class TUHEEGDataModule(LightningDataModule):
         pin_memory: bool = False,  # noqa: FBT001, FBT002
         seed: int = 42,
     ) -> None:
-        """Initialize a `MNISTDataModule`.
+        """Initialize a `TUHEEGDataModule`.
 
         Parameters
         ----------
-        data_dir : str, default="data/"
-            The data directory
+        data_dir : str, default="../../data/"
+            The data directory containing the dataset version folder.
+        version : str, default="v3.0.0"
+            The corpus version subdirectory to load.
         train_val_test_split : tuple[float, float, float], default=(0.8, 0.1, 0.1)
-            The train, validation and test split
+            The subject-level train, validation and test split ratios.
+        window_len_min : int, default=5
+            Window length in minutes.
+        overlap_pct : float, default=0.0
+            Fractional overlap between consecutive windows.
         batch_size : int, default=64
-            The batch size
+            The batch size.
         num_workers : int, default=0
-            The number of workers
+            The number of dataloader workers.
         pin_memory : bool, default=False
-            Whether to pin memory
+            Whether to pin memory.
+        seed : int, default=42
+            Seed for windowing, shuffling, and the subject-level split.
 
         """
         super().__init__()

@@ -2,10 +2,8 @@
 
 defaults:
   - _self_
-  - data: mnist # choose datamodule with `test_dataloader()` for evaluation
-  - model: mnist
-  - logger: null
-  - trainer: default
+  - data: tuh_eeg_epilepsy
+  - trainer: sklearn
   - paths: default
   - extras: default
   - hydra: default
@@ -14,5 +12,8 @@ task_name: "eval"
 
 tags: ["dev"]
 
-# passing checkpoint path is necessary for evaluation
+# path to a trained run directory (the Hydra output_dir of a `train` run, which
+# contains model.joblib + feature_extractor.joblib), or directly to the
+# model.joblib file. The trained feature extractor and scaler+classifier
+# pipeline are loaded from here.
 ckpt_path: ???

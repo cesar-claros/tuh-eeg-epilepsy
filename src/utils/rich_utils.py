@@ -21,9 +21,9 @@ def print_config_tree(
     cfg: DictConfig,
     print_order: Sequence[str] = (
         "data",
+        "feature",
+        "scaler",
         "model",
-        "callbacks",
-        "logger",
         "trainer",
         "paths",
         "extras",
@@ -38,7 +38,7 @@ def print_config_tree(
     ----------
     cfg : DictConfig
         A configuration composed by Hydra.
-    print_order : Sequence[str], default = ("data", "model", "callbacks", "logger", "trainer", "paths", "extras")
+    print_order : Sequence[str], default = ("data", "feature", "scaler", "model", "trainer", "paths", "extras")
         Determines in what order config components are printed.
     resolve : bool, default = False
         Whether to resolve reference fields of DictConfig. Default is ``False``.
