@@ -45,3 +45,13 @@ seed: null
 #   feature_seeds=[1,7,42] -> sweep the listed seeds
 # Writes seed_sweep_results.csv and seed_sweep_summary.csv to the run output dir.
 feature_seeds: null
+
+# When feature.track_counts is enabled, report the most-used and most
+# class-discriminative kernels after training (writes top_kernels.csv and
+# top_discriminative_kernels.csv to the run output dir, and logs the top 5).
+# Enable with `feature.track_counts=true`.
+top_kernels:
+  n: 20
+  by: max               # max | min | total
+  weighting: frequency  # frequency | magnitude
+  metric: difference    # difference | ratio | logodds  (discriminative only)

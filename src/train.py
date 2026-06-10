@@ -150,6 +150,76 @@ def _run_seed_sweep(
     return metric_dict, object_dict
 
 
+def _kernel_rows(infos: list, fractions_for: tuple | None = None) -> list[dict]:
+    """Flatten KernelInfo / DiscriminativeKernel objects into CSV-ready rows."""
+    rows: list[dict] = []
+    for info in infos:
+        row: dict[str, Any] = {"rank": info.rank}
+        if fractions_for is None:
+            row["count"] = info.count
+        else:
+            class_a, class_b = fractions_for
+            row["score"] = info.score
+            row["favors"] = info.favors
+            row[f"frac_{class_a}"] = info.fractions[class_a]
+            row[f"frac_{class_b}"] = info.fractions[class_b]
+        row["dilation"] = info.dilation
+        row["representation"] = info.representation
+        row["group"] = info.group
+        row["kernel"] = info.kernel
+        for i, w in enumerate(info.weight.tolist()):
+            row[f"w{i}"] = w
+        rows.append(row)
+    return rows
+
+
+def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
+    """Log and save the most-used and most class-discriminative HYDRA kernels.
+
+    Only meaningful when ``feature.track_counts`` is enabled (so win counts were
+    accumulated during feature extraction). Writes ``top_kernels.csv`` and, when
+    two classes were seen, ``top_discriminative_kernels.csv`` to the run output
+    directory. The variants (count, weighting, competition, metric) come from the
+    ``top_kernels`` config block.
+    """
+    spec = cfg.get("top_kernels") or {}
+    n = spec.get("n", 20)
+    by = spec.get("by", "max")
+    weighting = spec.get("weighting", "frequency")
+    metric = spec.get("metric", "difference")
+
+    output_dir = Path(cfg.paths.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(f"Top {n} kernels by global '{by}/{weighting}' count:")  # noqa: G004
+    top = feature_extractor.top_kernels(n, by=by, weighting=weighting)
+    pl.DataFrame(_kernel_rows(top)).write_csv(output_dir / "top_kernels.csv")
+    for info in top[:5]:
+        log.info(  # noqa: G004
+            f"  #{info.rank} d{info.dilation} {info.representation} "
+            f"g{info.group}k{info.kernel} count={info.count:.2f}"
+        )
+
+    labels = feature_extractor.class_labels()
+    if len(labels) == 2:
+        disc = feature_extractor.top_discriminative_kernels(
+            n, by=by, weighting=weighting, metric=metric
+        )
+        pl.DataFrame(_kernel_rows(disc, fractions_for=(labels[0], labels[1]))).write_csv(
+            output_dir / "top_discriminative_kernels.csv"
+        )
+        log.info(  # noqa: G004
+            f"Top {n} class-discriminative kernels "
+            f"(metric={metric}, classes {labels[0]} vs {labels[1]}):"
+        )
+        for info in disc[:5]:
+            log.info(  # noqa: G004
+                f"  #{info.rank} favors={info.favors} score={info.score:+.3f} "
+                f"d{info.dilation} {info.representation} g{info.group}k{info.kernel}"
+            )
+    else:
+        log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004
+
 
 @task_wrapper
 def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -223,6 +293,12 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             scaler=sparse_scaler,
             datamodule=datamodule,
         )
+
+    # Report the most-used / most discriminative HYDRA kernels when the feature
+    # extractor accumulated win counts (feature.track_counts=true). Requires
+    # training to have run, so the extractor has processed (and counted) data.
+    if cfg.get("train") and cfg.feature.get("track_counts"):
+        _report_top_kernels(cfg, feature_extractor)
 
     # merge train and test metrics
     metric_dict = {**train_metrics, **test_metrics}
