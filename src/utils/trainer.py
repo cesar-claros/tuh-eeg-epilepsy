@@ -58,18 +58,40 @@ class Trainer:
         }
 
     def fit(
-            self, 
-            model: nn.Module, 
+            self,
+            model: nn.Module,
             feature_extractor: nn.Module,
-            scaler: nn.Module, 
-            datamodule: LightningDataModule, 
-            output_path: str
+            scaler: nn.Module,
+            datamodule: LightningDataModule,
+            output_path: str,
+            save: bool = True,
         ):
-        self.output_path = Path(output_path)
-        self.output_path.mkdir(parents=True, exist_ok=True)
+        """Extract features, fit the scaler+classifier pipeline, and score on train.
+
+        Parameters
+        ----------
+        model : nn.Module
+            The (sklearn) classifier to fit.
+        feature_extractor : nn.Module
+            The HYDRA feature transform applied to each window.
+        scaler : nn.Module
+            The sparse scaler placed before the classifier in the pipeline.
+        datamodule : LightningDataModule
+            Provides the train/val dataloaders and per-split metadata.
+        output_path : str
+            Directory where the fitted artifacts are written when ``save`` is True.
+        save : bool, default=True
+            If True, dump the pipeline, feature extractor, and scaler to disk. Set
+            False for seed sweeps where the per-seed artifacts are not needed.
+
+        Returns
+        -------
+        dict
+            Window-level and subject-level training accuracy.
+        """
         log.info("Starting feature extraction for training!")
         datamodule.setup()
-        
+
         # Extract features for train (and val if needed by model, though sklearn pipeline usually just uses train)
         train_dataloader = datamodule.train_dataloader()
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
@@ -89,24 +111,27 @@ class Trainer:
             model
         )
         pipeline.fit(train_data["X"], train_data["y"])
-        
+
         log.info("Classifier training completed!")
-        log.info("Saving trained pipeline!")
         metadata_df = pd.concat([datamodule.train_df, datamodule.val_df], ignore_index=True)
         train_scores = self._get_scores(pipeline, train_data, metadata_df, "train")
 
-        # Save the model
-        model_path = self.output_path / "model.joblib"
-        log.info(f"Saving model to {model_path}")
-        joblib.dump(pipeline, model_path)
-        # Save the feature extractor
-        feature_extractor_path = self.output_path / "feature_extractor.joblib"
-        log.info(f"Saving feature extractor to {feature_extractor_path}")
-        joblib.dump(feature_extractor, feature_extractor_path)
-        # Save the scaler
-        scaler_path = self.output_path / "scaler.joblib"
-        log.info(f"Saving scaler to {scaler_path}")
-        joblib.dump(scaler, scaler_path)
+        if save:
+            self.output_path = Path(output_path)
+            self.output_path.mkdir(parents=True, exist_ok=True)
+            log.info("Saving trained pipeline!")
+            # Save the model
+            model_path = self.output_path / "model.joblib"
+            log.info(f"Saving model to {model_path}")
+            joblib.dump(pipeline, model_path)
+            # Save the feature extractor
+            feature_extractor_path = self.output_path / "feature_extractor.joblib"
+            log.info(f"Saving feature extractor to {feature_extractor_path}")
+            joblib.dump(feature_extractor, feature_extractor_path)
+            # Save the scaler
+            scaler_path = self.output_path / "scaler.joblib"
+            log.info(f"Saving scaler to {scaler_path}")
+            joblib.dump(scaler, scaler_path)
 
         return train_scores
 

@@ -36,3 +36,12 @@ ckpt_path: null
 
 # seed for random number generators in pytorch, numpy and python.random
 seed: null
+
+# multi-seed evaluation of the random HYDRA feature kernels, to quantify how much
+# accuracy varies with the kernel seed (feature.random_state) while the data split
+# is held fixed. Examples:
+#   null            -> single run (uses feature.random_state)
+#   feature_seeds=10 -> sweep seeds 0..9
+#   feature_seeds=[1,7,42] -> sweep the listed seeds
+# Writes seed_sweep_results.csv and seed_sweep_summary.csv to the run output dir.
+feature_seeds: null
