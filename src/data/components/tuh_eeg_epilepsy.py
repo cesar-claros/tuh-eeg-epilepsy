@@ -398,8 +398,14 @@ class TUHEEGEpilepsy:
         raw.rename_channels(mapping_strip)
 
         montage1020 = mne.channels.make_standard_montage("standard_1020")
+        # Map each raw channel that is a 10-20 electrode to its canonical name,
+        # matching case-insensitively so both stripped EDF names (e.g. "FP1") and
+        # already-clean names (e.g. "Fp1") are recognised as EEG.
+        upper_to_canonical = {c.upper(): c for c in montage1020.ch_names}
         mapping_eeg_names = {
-            c.upper(): c for c in montage1020.ch_names if c.upper() in raw.ch_names
+            c: upper_to_canonical[c.upper()]
+            for c in raw.ch_names
+            if c.upper() in upper_to_canonical
         }
 
         non_eeg_names = [c for c in raw.ch_names if c not in mapping_eeg_names]
@@ -409,13 +415,17 @@ class TUHEEGEpilepsy:
                 c: "misc" for c, t in zip(non_eeg_names, non_eeg_types) if t == "eeg"
             }
             if mapping_non_eeg_types:
-                raw.set_channel_types(mapping_non_eeg_types) # type: ignore
+                raw.set_channel_types(
+                    mapping_non_eeg_types, on_unit_change="ignore" # type: ignore
+                )
 
         if mapping_eeg_names:
             raw.set_channel_types(
                 {c: "eeg" for c in mapping_eeg_names}, on_unit_change="ignore" # type: ignore
             )
-            raw.rename_channels(mapping_eeg_names)
+            rename_map = {c: v for c, v in mapping_eeg_names.items() if c != v}
+            if rename_map:
+                raw.rename_channels(rename_map)
 
     @staticmethod
     def _set_montage(raw: mne.io.BaseRaw) -> None:
@@ -841,11 +851,6 @@ class TUHEEGEpilepsy:
                 if set_montage:
                     TUHEEGEpilepsy._set_montage(raw)
                     
-                if mode == 'ica_clean':
-                    # _rename_channels tags the scalp electrodes 'eeg' and the rest
-                    # 'misc'; keep only the scalp channels for harmonization.
-                    raw.pick('eeg')
-
                 if pick_channels:
                     raw.pick(pick_channels)
 
