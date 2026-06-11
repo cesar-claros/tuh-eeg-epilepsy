@@ -7,6 +7,6 @@ dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-lea
 overlap_pct: 0.0
 signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep only brain ICs, back-projected)
 batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
-num_workers: 10
+num_workers: 7
 seed: 42
 pin_memory: False
