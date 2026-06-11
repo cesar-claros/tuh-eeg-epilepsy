@@ -3,7 +3,9 @@ data_dir: ${paths.data_dir}
 version: 'v3.0.0'
 train_val_test_split: [0.8, 0.1, 0.1]
 window_len_min: 5 # 5 minutes
+dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 overlap_pct: 0.0
+signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep only brain ICs, back-projected)
 batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
 num_workers: 10
 seed: 42

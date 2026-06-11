@@ -71,6 +71,8 @@ class TUHEEGDataModule(LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = False,  # noqa: FBT001, FBT002
         seed: int = 42,
+        dict_learning_window_len_s: float = 2.0,
+        signal_mode: str = 'raw',
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -94,6 +96,12 @@ class TUHEEGDataModule(LightningDataModule):
             Whether to pin memory.
         seed : int, default=42
             Seed for windowing, shuffling, and the subject-level split.
+        dict_learning_window_len_s : float, default=2.0
+            Window length in seconds for the separate dictionary-learning load
+            pass (a short-window view, distinct from the main `window_len_min`).
+        signal_mode : str, default='raw'
+            'raw' for sensor-space EEG, or 'ica_clean' to keep only the brain ICs
+            (back-projected to sensor space using the saved ICA solution).
 
         """
         super().__init__()
@@ -110,6 +118,8 @@ class TUHEEGDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.dict_learning_window_len_s = dict_learning_window_len_s
+        self.signal_mode = signal_mode
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -182,7 +192,7 @@ class TUHEEGDataModule(LightningDataModule):
 
             # Split the dataset
             data = tuh.load_data(
-                mode = 'raw',
+                mode = self.signal_mode,
                 target_name = 'epilepsy',
                 preload = True,
                 rename_channels = True,
@@ -211,14 +221,14 @@ class TUHEEGDataModule(LightningDataModule):
 
             # Split the dataset for dictionary learning
             data_dictionary_learning = tuh.load_data(
-                mode = 'raw',
+                mode = self.signal_mode,
                 target_name = 'epilepsy',
                 preload = True,
                 rename_channels = True,
                 set_montage = False,
                 n_jobs = 1,
                 # New args for balanced windowing
-                window_len_s = 2, # 2 second windows for dictionary learning
+                window_len_s = self.dict_learning_window_len_s, # dictionary-learning window length (seconds)
                 dictionary_learning=True,
                 n_windows_per_subject=10, # limit to 10 windows per subject for dictionary learning to manage memory and training time. These will be randomly selected from the full set of possible windows for each subject.
                 overlap_pct = self.overlap_pct,
