@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
+# The datamodule encodes the epilepsy target as 1 and no-epilepsy as 0.
+EPILEPSY_CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
+
 
 def _resolve_feature_seeds(spec: int | list[int] | None) -> list[int] | None:
     """Resolve the ``feature_seeds`` config value into an explicit seed list.
@@ -197,6 +200,8 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
 
     spec = cfg.get("top_kernels") or {}
     n = spec.get("n", 20)
+    n_per_class = spec.get("n_per_class", 5)
+    n_hist = spec.get("n_hist_per_class", 100)
     by = spec.get("by", "max")
     weighting = spec.get("weighting", "frequency")
     metric = spec.get("metric", "difference")
@@ -223,29 +228,37 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
 
     labels = feature_extractor.class_labels()
     if len(labels) == 2:
-        disc = feature_extractor.top_discriminative_kernels(
-            n, by=by, weighting=weighting, metric=metric, sfreq=sfreq
+        class_a, class_b = labels[0], labels[1]
+        class_names = {c: EPILEPSY_CLASS_NAMES.get(c, str(c)) for c in labels}
+        # Balanced view: the most-favoring kernels for EACH class (the global
+        # |score| ranking is dominated by whichever class has the peakier wins).
+        per_class = feature_extractor.top_discriminative_kernels_per_class(
+            n_hist, by=by, weighting=weighting, metric=metric, sfreq=sfreq
         )
-        pl.DataFrame(_kernel_rows(disc, fractions_for=(labels[0], labels[1]))).write_csv(
+        flat = per_class[class_a] + per_class[class_b]
+        pl.DataFrame(_kernel_rows(flat, fractions_for=(class_a, class_b))).write_csv(
             output_dir / "top_discriminative_kernels.csv"
         )
         log.info(  # noqa: G004
-            f"Top {n} class-discriminative kernels "
-            f"(metric={metric}, classes {labels[0]} vs {labels[1]}):"
+            f"Top class-discriminative kernels (metric={metric}, "
+            f"{class_names[class_a]} vs {class_names[class_b]}):"
         )
-        for info in disc[:5]:
-            freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
-            log.info(  # noqa: G004
-                f"  #{info.rank} favors={info.favors} score={info.score:+.3f} "
-                f"d{info.dilation} {info.representation} g{info.group}k{info.kernel}{freq}"
-            )
+        for c in labels:
+            for info in per_class[c][:5]:
+                freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
+                log.info(  # noqa: G004
+                    f"  favors {class_names[c]} #{info.rank} score={info.score:+.3f} "
+                    f"d{info.dilation} {info.representation} g{info.group}k{info.kernel}{freq}"
+                )
         if sfreq is not None:
-            kernel_viz.plot_kernels(
-                disc, sfreq, output_dir / "top_discriminative_kernels.png",
-                "Top discriminative HYDRA kernels",
+            plot_set = {c: per_class[c][:n_per_class] for c in labels}
+            kernel_viz.plot_kernels_by_class(
+                plot_set, sfreq, output_dir / "top_discriminative_kernels.png",
+                "Top discriminative HYDRA kernels", class_names=class_names,
             )
             kernel_viz.plot_peak_freq_hist(
-                disc, sfreq, output_dir / "discriminative_peak_freq_hist.png"
+                flat, sfreq, output_dir / "discriminative_peak_freq_hist.png",
+                class_names=class_names,
             )
     else:
         log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004

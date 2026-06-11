@@ -44,6 +44,8 @@ def parse(argv):
     p.add_argument("--n-groups", type=int, default=64)
     p.add_argument("--n-kernels", type=int, default=8)
     p.add_argument("--top", type=int, default=12)
+    p.add_argument("--per-class", type=int, default=5,
+                   help="discriminative kernels to show per class (balanced view)")
     p.add_argument("--by", choices=["max", "min", "total"], default="max")
     p.add_argument("--weighting", choices=["frequency", "magnitude"], default="frequency",
                    help="count how OFTEN a kernel wins, or its summed winning magnitude")
@@ -132,31 +134,35 @@ def main(argv=None) -> int:
         print(f"  {info.rank:>4} {info.count:>14.2f} {_peak(info):>7} {info.dilation:>5} "
               f"{info.representation:>5} {info.group:>6} {info.kernel:>6}")
 
-    disc = transform.top_discriminative_kernels(
-        args.top, by=args.by, weighting=args.weighting, metric=args.score, sfreq=args.sfreq
-    )
     a, b = transform.class_labels()[0], transform.class_labels()[1]
-    print(f"\nTop {len(disc)} CLASS-DISCRIMINATIVE kernels "
-          f"(by={args.by}/{args.weighting}, metric={args.score}, classes {a} vs {b}):")
-    print(f"  {'rank':>4} {'score':>9} {'favors':>6} {'peakHz':>7} {'frac_' + str(a):>8} "
-          f"{'frac_' + str(b):>8} {'dil':>5} {'repr':>5} {'grp':>4} {'ker':>4}")
-    for info in disc:
-        print(f"  {info.rank:>4} {info.score:>+9.3f} {str(info.favors):>6} {_peak(info):>7} "
-              f"{info.fractions[a]:>8.3f} {info.fractions[b]:>8.3f} "
-              f"{info.dilation:>5} {info.representation:>5} {info.group:>4} {info.kernel:>4}")
+    per_class = transform.top_discriminative_kernels_per_class(
+        max(args.per_class, 50), by=args.by, weighting=args.weighting,
+        metric=args.score, sfreq=args.sfreq,
+    )
+    print(f"\nTop {args.per_class} CLASS-DISCRIMINATIVE kernels per class "
+          f"(by={args.by}/{args.weighting}, metric={args.score}):")
+    print(f"  {'favors':>6} {'rank':>4} {'score':>9} {'peakHz':>7} "
+          f"{'frac_' + str(a):>8} {'frac_' + str(b):>8} {'dil':>5} {'repr':>5}")
+    for c in (a, b):
+        for info in per_class[c][:args.per_class]:
+            print(f"  {str(info.favors):>6} {info.rank:>4} {info.score:>+9.3f} {_peak(info):>7} "
+                  f"{info.fractions[a]:>8.3f} {info.fractions[b]:>8.3f} "
+                  f"{info.dilation:>5} {info.representation:>5}")
 
     out = Path(args.out_dir)
     tag = f"{args.by}_{args.weighting}"
     dtag = f"{tag}_{args.score}"
+    flat = per_class[a] + per_class[b]
+    plot_set = {c: per_class[c][:args.per_class] for c in (a, b)}
     kernel_viz.plot_kernels(
         top, args.sfreq, out / f"top_kernels_{tag}.png", "Top HYDRA kernels (global)"
     )
-    kernel_viz.plot_kernels(
-        disc, args.sfreq, out / f"top_discriminative_kernels_{dtag}.png",
+    kernel_viz.plot_kernels_by_class(
+        plot_set, args.sfreq, out / f"top_discriminative_kernels_{dtag}.png",
         "Top discriminative HYDRA kernels",
     )
     kernel_viz.plot_peak_freq_hist(
-        disc, args.sfreq, out / f"discriminative_peak_freq_hist_{dtag}.png"
+        flat, args.sfreq, out / f"discriminative_peak_freq_hist_{dtag}.png"
     )
     print(f"\nSaved plots to {args.out_dir}/ (if matplotlib is available)")
     return 0

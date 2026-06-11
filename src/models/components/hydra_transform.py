@@ -98,9 +98,11 @@ class HydraTransform(nn.Module):
                  max_num_channels:int = 8,
                  seed:int = None,
                  track_counts: bool = False,
+                 device=None,
                  ):
         super().__init__()
 
+        self.device = self._resolve_device(device)
         self.n_timepoints = n_timepoints
         self.k = k  # num kernels per group
         self.g = g  # num groups
@@ -124,7 +126,8 @@ class HydraTransform(nn.Module):
         if isinstance(seed, int):
             generator = torch.Generator()
             generator.manual_seed(seed)
-        # Initialize weights
+        # Initialize weights on CPU (so the seeded RNG is device-independent),
+        # then move to the target device.
         self.W = torch.randn(
             self.num_dilations,
             self.divisor,
@@ -135,9 +138,10 @@ class HydraTransform(nn.Module):
         )
         self.W = self.W - self.W.mean(-1, keepdims=True)
         self.W = self.W / self.W.abs().sum(-1, keepdims=True)
+        self.W = self.W.to(self.device)
 
         num_channels_per = np.clip(n_channels // 2, 2, max_num_channels)
-        self.idx = [
+        self.idx = torch.stack([
             torch.randint(
                 0,
                 n_channels,
@@ -145,7 +149,7 @@ class HydraTransform(nn.Module):
                 generator=generator,
             )
             for _ in range(self.num_dilations)
-        ]
+        ]).to(self.device)
 
         # Optional per-kernel count matrices of shape (num_dilations, divisor, h,
         # k). When track_counts is True, each forward pass accumulates, per
@@ -156,22 +160,32 @@ class HydraTransform(nn.Module):
         # the returned features.
         self.track_counts = track_counts
         shape = (self.num_dilations, self.divisor, self.h, self.k)
-        self.win_counts_max = torch.zeros(shape)
-        self.win_counts_min = torch.zeros(shape)
-        self.value_counts_max = torch.zeros(shape)
-        self.value_counts_min = torch.zeros(shape)
+        self.win_counts_max = torch.zeros(shape, device=self.device)
+        self.win_counts_min = torch.zeros(shape, device=self.device)
+        self.value_counts_max = torch.zeros(shape, device=self.device)
+        self.value_counts_min = torch.zeros(shape, device=self.device)
         self.win_counts_max_by_class: dict[int, torch.Tensor] = {}
         self.win_counts_min_by_class: dict[int, torch.Tensor] = {}
         self.value_counts_max_by_class: dict[int, torch.Tensor] = {}
         self.value_counts_min_by_class: dict[int, torch.Tensor] = {}
 
+    @staticmethod
+    def _resolve_device(device):
+        """Resolve a device spec (None/"cpu"/"cuda"/"cuda:N"/"auto") to a torch.device."""
+        if device is None or device == "cpu":
+            return torch.device("cpu")
+        if device == "auto":
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(device)
+
     def forward(self, X: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
+        X = X.to(self.device, non_blocking=True)
         n_examples, n_channels, _ = X.shape
 
         # Precompute per-class example masks once (only when tracking with labels).
         class_masks = None
         if self.track_counts and y is not None:
-            labels = y.reshape(-1)
+            labels = y.reshape(-1).to(self.device, non_blocking=True)
             class_masks = {
                 int(c): (labels == c) for c in torch.unique(labels).tolist()
             }
@@ -211,10 +225,10 @@ class HydraTransform(nn.Module):
                     ).view(n_examples, self.h, self.k, -1)
 
                 max_values, max_indices = _Z.max(2)
-                count_max = torch.zeros(n_examples, self.h, self.k)
+                count_max = torch.zeros(n_examples, self.h, self.k, device=self.device)
 
                 min_values, min_indices = _Z.min(2)
-                count_min = torch.zeros(n_examples, self.h, self.k)
+                count_min = torch.zeros(n_examples, self.h, self.k, device=self.device)
 
                 count_max.scatter_add_(-1, max_indices, max_values)
                 count_min.scatter_add_(-1, min_indices, torch.ones_like(min_values))
@@ -223,9 +237,9 @@ class HydraTransform(nn.Module):
                     # count_max is the value-weighted (magnitude) max already;
                     # count_min is the hard (frequency) min already. Compute the
                     # two complements: frequency-max and magnitude-min.
-                    win_max = torch.zeros(n_examples, self.h, self.k)
+                    win_max = torch.zeros(n_examples, self.h, self.k, device=self.device)
                     win_max.scatter_add_(-1, max_indices, torch.ones_like(max_values))
-                    val_min = torch.zeros(n_examples, self.h, self.k)
+                    val_min = torch.zeros(n_examples, self.h, self.k, device=self.device)
                     val_min.scatter_add_(-1, min_indices, min_values)
                     self._accumulate(
                         dilation_index, diff_index, None,
@@ -264,10 +278,10 @@ class HydraTransform(nn.Module):
         """Lazily create the per-class count matrices for class ``c``."""
         if c not in self.win_counts_max_by_class:
             shape = (self.num_dilations, self.divisor, self.h, self.k)
-            self.win_counts_max_by_class[c] = torch.zeros(shape)
-            self.win_counts_min_by_class[c] = torch.zeros(shape)
-            self.value_counts_max_by_class[c] = torch.zeros(shape)
-            self.value_counts_min_by_class[c] = torch.zeros(shape)
+            self.win_counts_max_by_class[c] = torch.zeros(shape, device=self.device)
+            self.win_counts_min_by_class[c] = torch.zeros(shape, device=self.device)
+            self.value_counts_max_by_class[c] = torch.zeros(shape, device=self.device)
+            self.value_counts_min_by_class[c] = torch.zeros(shape, device=self.device)
 
     def reset_counts(self) -> None:
         """Zero the global and per-class count matrices."""
@@ -313,8 +327,8 @@ class HydraTransform(nn.Module):
         tuple
             ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``.
         """
-        freqs = torch.linspace(0.0, sfreq / 2.0, n_freqs)
-        taps = torch.arange(weight.numel(), dtype=weight.dtype)
+        freqs = torch.linspace(0.0, sfreq / 2.0, n_freqs, device=weight.device)
+        taps = torch.arange(weight.numel(), dtype=weight.dtype, device=weight.device)
         phase = (2.0 * torch.pi * dilation / sfreq) * freqs[:, None] * taps[None, :]
         response = (weight[None, :] * torch.exp(-1j * phase)).sum(-1)
         return freqs, response.abs()
@@ -473,7 +487,7 @@ class HydraTransform(nn.Module):
                 index, divisor, h, k
             )
             dilation = int(self.dilations[dilation_index].item())
-            weight = weights[dilation_index, diff_index, group, kernel].clone()
+            weight = weights[dilation_index, diff_index, group, kernel].clone().cpu()
             infos.append(
                 KernelInfo(
                     rank=rank,
@@ -536,6 +550,56 @@ class HydraTransform(nn.Module):
         ValueError
             If ``classes`` is not given and there are not exactly two classes.
         """
+        t = self._discriminative_tensors(by, classes, weighting, metric)
+        magnitude = t["magnitude"]
+        _, top_indices = torch.topk(magnitude, min(n_top, magnitude.numel()))
+        return [
+            self._make_disc_kernel(rank, int(index), t, sfreq)
+            for rank, index in enumerate(top_indices.tolist())
+        ]
+
+    def top_discriminative_kernels_per_class(
+        self,
+        n_per_class: int,
+        by: str = "max",
+        classes: tuple | None = None,
+        weighting: str = "frequency",
+        metric: str = "difference",
+        sfreq: float | None = None,
+    ) -> dict:
+        """Top ``n_per_class`` kernels favoring each of the two classes.
+
+        Unlike ``top_discriminative_kernels`` (which ranks by absolute score and
+        can be dominated by one class), this returns a balanced view: for each
+        class, the kernels with the most extreme score toward it. The arguments
+        mirror ``top_discriminative_kernels`` (``n_per_class`` replaces ``n_top``).
+
+        Returns
+        -------
+        dict
+            ``{class_a: [...], class_b: [...]}``, each list ordered
+            most-favoring-first.
+        """
+        t = self._discriminative_tensors(by, classes, weighting, metric)
+        score = t["score"]
+        favors_a = t["favors_a"]
+        a_idx = torch.nonzero(favors_a, as_tuple=True)[0]
+        b_idx = torch.nonzero(~favors_a, as_tuple=True)[0]
+        a_sorted = a_idx[torch.argsort(score[a_idx], descending=True)][:n_per_class]
+        b_sorted = b_idx[torch.argsort(score[b_idx], descending=False)][:n_per_class]
+        return {
+            t["class_a"]: [
+                self._make_disc_kernel(rank, int(index), t, sfreq)
+                for rank, index in enumerate(a_sorted.tolist())
+            ],
+            t["class_b"]: [
+                self._make_disc_kernel(rank, int(index), t, sfreq)
+                for rank, index in enumerate(b_sorted.tolist())
+            ],
+        }
+
+    def _discriminative_tensors(self, by, classes, weighting, metric):
+        """Precompute flat per-kernel discriminative tensors for two classes."""
         labels = self.class_labels()
         if not labels:
             raise RuntimeError(
@@ -548,42 +612,46 @@ class HydraTransform(nn.Module):
                 )
             classes = (labels[0], labels[1])
         class_a, class_b = classes
-
         frac_a = self._within_group_fraction(self._count_matrix(by, class_a, weighting))
         frac_b = self._within_group_fraction(self._count_matrix(by, class_b, weighting))
         score, magnitude, favors_a = self._discriminative_score(frac_a, frac_b, metric)
-
-        weights = self.kernel_weights()
         _, divisor, h, k = score.shape
-        flat_score = score.reshape(-1)
-        flat_mag = magnitude.reshape(-1)
-        flat_favors = favors_a.reshape(-1)
-        flat_a = frac_a.reshape(-1)
-        flat_b = frac_b.reshape(-1)
-        _, top_indices = torch.topk(flat_mag, min(n_top, flat_mag.numel()))
+        return {
+            "class_a": class_a,
+            "class_b": class_b,
+            "weights": self.kernel_weights(),
+            "divisor": divisor,
+            "h": h,
+            "k": k,
+            "score": score.reshape(-1),
+            "magnitude": magnitude.reshape(-1),
+            "frac_a": frac_a.reshape(-1),
+            "frac_b": frac_b.reshape(-1),
+            "favors_a": favors_a.reshape(-1),
+        }
 
-        results: list[DiscriminativeKernel] = []
-        for rank, index in enumerate(top_indices.tolist()):
-            dilation_index, diff_index, group, kernel = self._decode_index(
-                index, divisor, h, k
-            )
-            dilation = int(self.dilations[dilation_index].item())
-            weight = weights[dilation_index, diff_index, group, kernel].clone()
-            results.append(
-                DiscriminativeKernel(
-                    rank=rank,
-                    score=flat_score[index].item(),
-                    favors=class_a if bool(flat_favors[index]) else class_b,
-                    fractions={class_a: flat_a[index].item(), class_b: flat_b[index].item()},
-                    dilation=dilation,
-                    representation="raw" if diff_index == 0 else "diff",
-                    group=group,
-                    kernel=kernel,
-                    weight=weight,
-                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
-                )
-            )
-        return results
+    def _make_disc_kernel(self, rank, index, t, sfreq):
+        """Build one DiscriminativeKernel from a flat index and precomputed tensors."""
+        dilation_index, diff_index, group, kernel = self._decode_index(
+            index, t["divisor"], t["h"], t["k"]
+        )
+        dilation = int(self.dilations[dilation_index].item())
+        weight = t["weights"][dilation_index, diff_index, group, kernel].clone().cpu()
+        return DiscriminativeKernel(
+            rank=rank,
+            score=t["score"][index].item(),
+            favors=t["class_a"] if bool(t["favors_a"][index]) else t["class_b"],
+            fractions={
+                t["class_a"]: t["frac_a"][index].item(),
+                t["class_b"]: t["frac_b"][index].item(),
+            },
+            dilation=dilation,
+            representation="raw" if diff_index == 0 else "diff",
+            group=group,
+            kernel=kernel,
+            weight=weight,
+            peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
+        )
 
 
 if __name__ == "__main__":

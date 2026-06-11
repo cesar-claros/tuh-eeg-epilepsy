@@ -96,6 +96,7 @@ class HydraTransformer(nn.Module):
         n_jobs=1,
         random_state=None,
         track_counts=False,
+        device=None,
     ):
         super().__init__()
         self.n_kernels = n_kernels
@@ -104,6 +105,7 @@ class HydraTransformer(nn.Module):
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.track_counts = track_counts
+        self.device = device
         self._n_jobs = check_n_jobs(self.n_jobs)
         self._hydra = None
 
@@ -119,6 +121,7 @@ class HydraTransformer(nn.Module):
             max_num_channels = self.max_num_channels,
             seed = self.random_state,
             track_counts = self.track_counts,
+            device = self.device,
         )
 
     def forward(self, X:torch.Tensor, y:torch.Tensor | None = None) -> torch.Tensor:
@@ -189,6 +192,26 @@ class HydraTransformer(nn.Module):
             )
         return self._hydra.top_discriminative_kernels(
             n_top, by=by, classes=classes, weighting=weighting, metric=metric, sfreq=sfreq
+        )
+
+    def top_discriminative_kernels_per_class(
+        self,
+        n_per_class: int,
+        by: str = "max",
+        classes: tuple | None = None,
+        weighting: str = "frequency",
+        metric: str = "difference",
+        sfreq: float | None = None,
+    ) -> dict:
+        """Balanced top kernels favoring each class (see HydraTransform)."""
+        if self._hydra is None:
+            raise RuntimeError(
+                "Call the transformer on labelled data before "
+                "top_discriminative_kernels_per_class()."
+            )
+        return self._hydra.top_discriminative_kernels_per_class(
+            n_per_class, by=by, classes=classes, weighting=weighting,
+            metric=metric, sfreq=sfreq,
         )
 
 class _SparseScaler:

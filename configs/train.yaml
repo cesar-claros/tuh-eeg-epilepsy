@@ -51,7 +51,9 @@ feature_seeds: null
 # top_discriminative_kernels.csv to the run output dir, and logs the top 5).
 # Enable with `feature.track_counts=true`.
 top_kernels:
-  n: 20
+  n: 20                 # top-N by |score| for the global top_kernels.csv
+  n_per_class: 5        # kernels per class shown in the discriminative plot
+  n_hist_per_class: 100 # kernels per class for the peak-frequency histogram + CSV
   by: max               # max | min | total
   weighting: frequency  # frequency | magnitude
   metric: difference    # difference | ratio | logodds  (discriminative only)

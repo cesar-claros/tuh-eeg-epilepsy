@@ -7,3 +7,8 @@ n_jobs : 12
 # Accumulate per-kernel win counts during feature extraction so the most-used
 # kernels can be ranked and inspected (diagnostic only; does not change features).
 track_counts : false
+# Device for the HYDRA convolutions: cpu | cuda | cuda:N | auto. Use cuda to
+# accelerate feature extraction on a GPU (features are moved back to CPU for the
+# sklearn classifier). Kernels are generated on CPU first, so results are
+# reproducible across devices for a given random_state.
+device : cpu

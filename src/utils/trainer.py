@@ -45,17 +45,19 @@ class Trainer:
         log.info(f"Extracting features for {split_name} data")
         X_split_batches = []
         y_split_batches = []
-        for batch in tqdm(dataloader, desc=f"Feature extraction for {split_name} data"):
-            X, y = batch
-            # Ensure X is on the same device as feature_extractor if needed (assuming CPU for now based on context)
-            # `y` is passed so the feature extractor can bin per-kernel win counts
-            # per class when track_counts is enabled; it does not change features.
-            X_transformed = feature_extractor(X, y)
-            X_split_batches.append(X_transformed)
-            y_split_batches.append(y)
-            
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc=f"Feature extraction for {split_name} data"):
+                X, y = batch
+                # The feature extractor moves X to its device (e.g. GPU) internally.
+                # `y` is passed so it can bin per-kernel win counts per class when
+                # track_counts is enabled; it does not change the features. Features
+                # are moved back to CPU for the downstream sklearn pipeline.
+                X_transformed = feature_extractor(X, y).cpu()
+                X_split_batches.append(X_transformed)
+                y_split_batches.append(y)
+
         return {
-            "X": torch.cat(X_split_batches, dim=0), 
+            "X": torch.cat(X_split_batches, dim=0),
             "y": torch.cat(y_split_batches, dim=0).squeeze(),
         }
 
