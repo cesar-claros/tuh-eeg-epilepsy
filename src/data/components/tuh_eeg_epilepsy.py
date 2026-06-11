@@ -456,12 +456,64 @@ class TUHEEGEpilepsy:
             labels_df = pd.read_csv(labels_path, index_col=0)
             is_brain = labels_df['labels'].astype(str).str.strip().str.lower() == 'brain'
             non_brain = labels_df.index[~is_brain].tolist()
+
+            # Align the raw to exactly the channels the ICA was fitted on. Try an
+            # exact name match first, then a normalized one (strip 'EEG ', '-REF',
+            # '-LE', case) to tolerate naming differences between the raw EDF and
+            # the saved ICA solution.
+            rename = TUHEEGEpilepsy._match_ica_channels(raw.ch_names, ica.ch_names)
+            if rename is None:
+                logger.error(
+                    f"Cannot align raw to ICA channels for {raw_path.name}: "
+                    f"raw={raw.ch_names[:4]}..., ica={ica.ch_names[:4]}..."
+                )
+                return None
+            if rename:
+                raw.rename_channels(rename)
+            raw.pick(ica.ch_names)
+            # Force the EEG type so the average reference and ICA picks resolve
+            # (read_raw_edf does not always tag channels as 'eeg').
+            raw.set_channel_types({c: 'eeg' for c in raw.ch_names}, verbose='ERROR')
             raw.set_eeg_reference('average', verbose='ERROR')
             ica.apply(raw, exclude=non_brain, verbose='ERROR')
             return raw
         except Exception as e:
             logger.error(f"Failed to apply brain ICA for {raw_path.name}: {e}")
             return None
+
+    @staticmethod
+    def _match_ica_channels(raw_names: list, ica_names: list) -> Optional[dict]:
+        """Map raw channel names onto the ICA's channel names.
+
+        Returns an empty dict if the raw already contains every ICA channel
+        (no renaming needed), a ``{raw_name: ica_name}`` rename map when a
+        normalized match aligns them, or ``None`` if some ICA channel has no
+        counterpart in the raw.
+        """
+        if all(c in set(raw_names) for c in ica_names):
+            return {}
+
+        def norm(name: str) -> str:
+            return (
+                name.upper()
+                .replace("EEG ", "")
+                .replace("-REF", "")
+                .replace("-LE", "")
+                .strip()
+            )
+
+        raw_by_norm: dict = {}
+        for c in raw_names:
+            raw_by_norm.setdefault(norm(c), c)
+
+        rename: dict = {}
+        for ic in ica_names:
+            match = raw_by_norm.get(norm(ic))
+            if match is None:
+                return None
+            if match != ic:
+                rename[match] = ic
+        return rename
     
     def _calculate_limit_per_subject(
             self, 
@@ -773,15 +825,11 @@ class TUHEEGEpilepsy:
                 raw.crop(tmin=row_meta['start'], tmax=row_meta['end'], include_tmax=False)
                 raw.load_data()
                 
-                # Option 1 (ica_clean): keep only the brain ICs (back-projection),
-                # then restrict to the montage's scalp channels so downstream
-                # harmonization works exactly as in raw mode.
+                # Option 1 (ica_clean): keep only the brain ICs (back-projection).
                 if mode == 'ica_clean':
                     raw = TUHEEGEpilepsy._apply_brain_ica(raw, desc_row['path'])
                     if raw is None:
                         return None
-                    montage_channels = list(self.montages[desc_row['montage']]['channels'])
-                    raw.pick([c for c in montage_channels if c in raw.ch_names])
 
                 # Apply processing matching _create_dataset
                 if filter_freq is not None:
@@ -793,9 +841,14 @@ class TUHEEGEpilepsy:
                 if set_montage:
                     TUHEEGEpilepsy._set_montage(raw)
                     
+                if mode == 'ica_clean':
+                    # _rename_channels tags the scalp electrodes 'eeg' and the rest
+                    # 'misc'; keep only the scalp channels for harmonization.
+                    raw.pick('eeg')
+
                 if pick_channels:
                     raw.pick(pick_channels)
-                    
+
                 # To Epoch/Tensor
                 # Resample? Not requested, but raw.get_data() returns numpy
                 data = raw.get_data() # (Channels, Time)
