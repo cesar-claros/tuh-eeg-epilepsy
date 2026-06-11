@@ -11,4 +11,4 @@ track_counts : false
 # accelerate feature extraction on a GPU (features are moved back to CPU for the
 # sklearn classifier). Kernels are generated on CPU first, so results are
 # reproducible across devices for a given random_state.
-device : cpu
+device : auto
