@@ -57,10 +57,14 @@ class TUHEEGEpilepsy:
         version: str = 'v3.0.0',
         recording_ids: Union[int, List[int], None] = None,
         add_annotations: bool = False,
+        ica_keep_labels: tuple = ('brain', 'other'),
     ):
-        
+
         self.data_dir = data_dir
         self.version = version
+        # ICLabel categories to keep when reconstructing in 'ica_clean' mode; all
+        # other components (the confident artifacts) are excluded.
+        self.ica_keep_labels = ica_keep_labels
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -433,16 +437,22 @@ class TUHEEGEpilepsy:
         raw.set_montage(montage, on_missing="ignore")
 
     @staticmethod
-    def _apply_brain_ica(raw: mne.io.BaseRaw, raw_path: Path) -> Optional[mne.io.BaseRaw]:
-        """Back-project the raw keeping only brain ICs (Option 1: ICA cleaning).
+    def _apply_ica_cleaning(
+        raw: mne.io.BaseRaw,
+        raw_path: Path,
+        keep_labels: tuple = ('brain', 'other'),
+    ) -> Optional[mne.io.BaseRaw]:
+        """Back-project the raw keeping only ICs whose ICLabel is in ``keep_labels``.
 
         Loads the ICA solution (``<name>-ica.fif``) and IC labels
         (``<name>-ica_labels.csv``) saved by ``compute_ica_labels``, sets an
         average reference to match how the ICA was fitted, then applies the ICA
-        with every non-brain component excluded. The result is a sensor-space
-        signal containing only the brain sources, so the usual cross-file channel
-        harmonization still applies. Returns ``None`` if the ICA files are missing
-        or the application fails.
+        with every component whose label is NOT in ``keep_labels`` excluded. The
+        default keeps 'brain' and 'other' (so only the confident artifact classes,
+        muscle / eye / heart / line noise / channel noise, are removed). The result
+        is a sensor-space signal, so the usual cross-file channel harmonization
+        still applies. Returns ``None`` if the ICA files are missing or the
+        application fails.
 
         Parameters
         ----------
@@ -450,11 +460,13 @@ class TUHEEGEpilepsy:
             The loaded (cropped) raw recording, with its original channel names.
         raw_path : Path
             Path to the original ``.edf`` (used to locate the sibling ICA files).
+        keep_labels : tuple, default=('brain', 'other')
+            ICLabel categories to keep; all others are excluded.
 
         Returns
         -------
         mne.io.BaseRaw | None
-            The brain-only raw, or ``None`` on missing files / failure.
+            The cleaned raw, or ``None`` on missing files / failure.
         """
         ica_path = raw_path.parent / raw_path.name.replace('.edf', '-ica.fif')
         labels_path = raw_path.parent / raw_path.name.replace('.edf', '-ica_labels.csv')
@@ -464,8 +476,9 @@ class TUHEEGEpilepsy:
         try:
             ica = mne.preprocessing.read_ica(ica_path, verbose='ERROR')
             labels_df = pd.read_csv(labels_path, index_col=0)
-            is_brain = labels_df['labels'].astype(str).str.strip().str.lower() == 'brain'
-            non_brain = labels_df.index[~is_brain].tolist()
+            keep = {str(k).strip().lower() for k in keep_labels}
+            labels = labels_df['labels'].astype(str).str.strip().str.lower()
+            exclude = labels_df.index[~labels.isin(keep)].tolist()
 
             # Align the raw to exactly the channels the ICA was fitted on. Try an
             # exact name match first, then a normalized one (strip 'EEG ', '-REF',
@@ -485,10 +498,10 @@ class TUHEEGEpilepsy:
             # (read_raw_edf does not always tag channels as 'eeg').
             raw.set_channel_types({c: 'eeg' for c in raw.ch_names}, verbose='ERROR')
             raw.set_eeg_reference('average', verbose='ERROR')
-            ica.apply(raw, exclude=non_brain, verbose='ERROR')
+            ica.apply(raw, exclude=exclude, verbose='ERROR')
             return raw
         except Exception as e:
-            logger.error(f"Failed to apply brain ICA for {raw_path.name}: {e}")
+            logger.error(f"Failed to apply ICA cleaning for {raw_path.name}: {e}")
             return None
 
     @staticmethod
@@ -835,9 +848,12 @@ class TUHEEGEpilepsy:
                 raw.crop(tmin=row_meta['start'], tmax=row_meta['end'], include_tmax=False)
                 raw.load_data()
                 
-                # Option 1 (ica_clean): keep only the brain ICs (back-projection).
+                # Option 1 (ica_clean): keep only ICs whose ICLabel is in
+                # self.ica_keep_labels (default brain + other), back-projected.
                 if mode == 'ica_clean':
-                    raw = TUHEEGEpilepsy._apply_brain_ica(raw, desc_row['path'])
+                    raw = TUHEEGEpilepsy._apply_ica_cleaning(
+                        raw, desc_row['path'], self.ica_keep_labels
+                    )
                     if raw is None:
                         return None
 

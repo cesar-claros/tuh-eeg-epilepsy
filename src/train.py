@@ -33,6 +33,24 @@ log = RankedLogger(__name__, rank_zero_only=True)
 EPILEPSY_CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 
 
+def _dump_window_metadata(cfg: DictConfig, datamodule: Any) -> None:
+    """Save the per-split window metadata to CSV in the run output directory.
+
+    Each ``windows_<split>.csv`` lists the windows (subject, path, start, end,
+    ...) used in that split. Because the windowing is deterministic in
+    ``data.seed`` and independent of ``signal_mode`` / ``ica_keep_labels``, these
+    files let you confirm that two runs evaluated on exactly the same windows
+    (diff the files) or see precisely which windows differ.
+    """
+    output_dir = Path(cfg.paths.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split in ("train", "val", "test"):
+        df = getattr(datamodule, f"{split}_df", None)
+        if df is not None and len(df):
+            df.to_csv(output_dir / f"windows_{split}.csv", index=False)
+            log.info(f"Saved {len(df)} {split} window rows to windows_{split}.csv")  # noqa: G004
+
+
 def _resolve_feature_seeds(spec: int | list[int] | None) -> list[int] | None:
     """Resolve the ``feature_seeds`` config value into an explicit seed list.
 
@@ -294,6 +312,12 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")  # noqa: G004
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer)
+
+    # Load/window the data once and save the per-split window metadata, so runs
+    # with different signal_mode / ica_keep_labels (same data.seed) can be
+    # confirmed to use the same windows.
+    datamodule.setup()
+    _dump_window_metadata(cfg, datamodule)
 
     # Optional multi-seed evaluation of the random HYDRA kernels: quantifies how
     # much accuracy varies with feature.random_state while the data split is held

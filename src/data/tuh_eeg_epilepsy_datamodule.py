@@ -73,6 +73,7 @@ class TUHEEGDataModule(LightningDataModule):
         seed: int = 42,
         dict_learning_window_len_s: float = 2.0,
         signal_mode: str = 'raw',
+        ica_keep_labels: tuple = ('brain', 'other'),
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -100,8 +101,11 @@ class TUHEEGDataModule(LightningDataModule):
             Window length in seconds for the separate dictionary-learning load
             pass (a short-window view, distinct from the main `window_len_min`).
         signal_mode : str, default='raw'
-            'raw' for sensor-space EEG, or 'ica_clean' to keep only the brain ICs
-            (back-projected to sensor space using the saved ICA solution).
+            'raw' for sensor-space EEG, or 'ica_clean' to keep only the ICs whose
+            ICLabel is in `ica_keep_labels` (back-projected to sensor space).
+        ica_keep_labels : tuple, default=('brain', 'other')
+            For 'ica_clean', the ICLabel categories to keep; all others (the
+            confident artifacts) are excluded.
 
         """
         super().__init__()
@@ -120,6 +124,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.pin_memory = pin_memory
         self.dict_learning_window_len_s = dict_learning_window_len_s
         self.signal_mode = signal_mode
+        self.ica_keep_labels = ica_keep_labels
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -188,7 +193,8 @@ class TUHEEGDataModule(LightningDataModule):
                 data_dir=self.data_dir,
                 version=self.version,
                 add_annotations=True,
-            )            
+                ica_keep_labels=self.ica_keep_labels,
+            )
 
             # Split the dataset
             data = tuh.load_data(
