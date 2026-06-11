@@ -5,9 +5,10 @@ train_val_test_split: [0.8, 0.1, 0.1]
 window_len_min: 5 # 5 minutes
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 overlap_pct: 0.0
-signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected)
-ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean
-# (excludes the confident artifacts: muscle, eye, heart, line noise, channel noise)
+signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources)
+ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
+# (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;
+#  brain_ic uses these labels' ICs directly, so set [brain] for brain-only regional sources)
 batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
 num_workers: 7
 seed: 42

@@ -101,11 +101,14 @@ class TUHEEGDataModule(LightningDataModule):
             Window length in seconds for the separate dictionary-learning load
             pass (a short-window view, distinct from the main `window_len_min`).
         signal_mode : str, default='raw'
-            'raw' for sensor-space EEG, or 'ica_clean' to keep only the ICs whose
-            ICLabel is in `ica_keep_labels` (back-projected to sensor space).
+            'raw' for sensor-space EEG; 'ica_clean' to keep only the ICs whose
+            ICLabel is in `ica_keep_labels` (back-projected to sensor space); or
+            'brain_ic' to feed the region-binned IC sources directly (each kept IC
+            is assigned to a scalp region by its dominant electrode and summed).
         ica_keep_labels : tuple, default=('brain', 'other')
             For 'ica_clean', the ICLabel categories to keep; all others (the
-            confident artifacts) are excluded.
+            confident artifacts) are excluded. For 'brain_ic', the categories
+            whose ICs build the regional series (set ('brain',) for brain-only).
 
         """
         super().__init__()

@@ -21,6 +21,7 @@ from braindecode.preprocessing import create_fixed_length_windows
 import pandas as pd
 import mne
 import warnings
+import re
 import torch
 import numpy as np
 
@@ -50,6 +51,15 @@ class TUHEEGEpilepsy:
     NO_EPILEPSY_PATH = '01_no_epilepsy/'
     DOCS_PATH = 'DOCS/'
     DEPTH = 4  # subject_ID/session/montage/*.edf,*.csv,*.csv_bi
+    # Coarse scalp regions for Option 3 (brain_ic) region binning. Each kept IC is
+    # assigned to one of these by its dominant electrode; this fixed order is the
+    # channel order of the regional time series.
+    CANONICAL_REGIONS = (
+        'frontal_left', 'frontal_right',
+        'temporal_left', 'temporal_right',
+        'posterior_left', 'posterior_right',
+        'central_midline',
+    )
 
     def __init__(
         self,
@@ -480,24 +490,9 @@ class TUHEEGEpilepsy:
             labels = labels_df['labels'].astype(str).str.strip().str.lower()
             exclude = labels_df.index[~labels.isin(keep)].tolist()
 
-            # Align the raw to exactly the channels the ICA was fitted on. Try an
-            # exact name match first, then a normalized one (strip 'EEG ', '-REF',
-            # '-LE', case) to tolerate naming differences between the raw EDF and
-            # the saved ICA solution.
-            rename = TUHEEGEpilepsy._match_ica_channels(raw.ch_names, ica.ch_names)
-            if rename is None:
-                logger.error(
-                    f"Cannot align raw to ICA channels for {raw_path.name}: "
-                    f"raw={raw.ch_names[:4]}..., ica={ica.ch_names[:4]}..."
-                )
+            raw = TUHEEGEpilepsy._align_raw_to_ica(raw, ica, raw_path)
+            if raw is None:
                 return None
-            if rename:
-                raw.rename_channels(rename)
-            raw.pick(ica.ch_names)
-            # Force the EEG type so the average reference and ICA picks resolve
-            # (read_raw_edf does not always tag channels as 'eeg').
-            raw.set_channel_types({c: 'eeg' for c in raw.ch_names}, verbose='ERROR')
-            raw.set_eeg_reference('average', verbose='ERROR')
             ica.apply(raw, exclude=exclude, verbose='ERROR')
             return raw
         except Exception as e:
@@ -538,6 +533,135 @@ class TUHEEGEpilepsy:
                 rename[match] = ic
         return rename
     
+    @staticmethod
+    def _align_raw_to_ica(
+        raw: mne.io.BaseRaw, ica, raw_path: Path
+    ) -> Optional[mne.io.BaseRaw]:
+        """Align the raw to the ICA's channels (rename, pick, eeg-type, avg-ref).
+
+        Renames the raw channels onto the ICA's names (exact or normalized match),
+        restricts to them, forces the 'eeg' type, and sets an average reference to
+        match how the ICA was fitted. Returns the aligned raw, or ``None`` if the
+        channels cannot be aligned.
+        """
+        rename = TUHEEGEpilepsy._match_ica_channels(raw.ch_names, ica.ch_names)
+        if rename is None:
+            logger.error(
+                f"Cannot align raw to ICA channels for {raw_path.name}: "
+                f"raw={raw.ch_names[:4]}..., ica={ica.ch_names[:4]}..."
+            )
+            return None
+        if rename:
+            raw.rename_channels(rename)
+        raw.pick(ica.ch_names)
+        # Force the EEG type so the average reference and ICA picks resolve
+        # (read_raw_edf does not always tag channels as 'eeg').
+        raw.set_channel_types({c: 'eeg' for c in raw.ch_names}, verbose='ERROR')
+        raw.set_eeg_reference('average', verbose='ERROR')
+        return raw
+
+    @staticmethod
+    def _electrode_region(name: str) -> str:
+        """Map a 10-20 electrode name to one of ``CANONICAL_REGIONS``.
+
+        Lobe is inferred from the letter prefix and hemisphere from the trailing
+        digit (odd = left, even = right, 'z' = midline). Frontal and temporal keep
+        their hemisphere; parietal / occipital map to 'posterior'; central and all
+        midline electrodes map to 'central_midline'. Unknown names fall back to
+        'central_midline'.
+        """
+        n = name.upper().replace("EEG ", "").replace("-REF", "").replace("-LE", "").strip()
+        match = re.search(r'(\d+|Z)$', n)
+        if match is None:
+            return 'central_midline'
+        suffix = match.group(1)
+        hemi = 'mid' if suffix == 'Z' else ('left' if int(suffix) % 2 == 1 else 'right')
+        prefix = n[:match.start()]
+        lobe = 'central'
+        for pre, lb in (
+            ('FP', 'frontal'), ('AF', 'frontal'), ('FC', 'central'), ('FT', 'temporal'),
+            ('TP', 'temporal'), ('CP', 'parietal'), ('PO', 'occipital'),
+            ('F', 'frontal'), ('T', 'temporal'), ('C', 'central'),
+            ('P', 'parietal'), ('O', 'occipital'),
+        ):
+            if prefix.startswith(pre):
+                lobe = lb
+                break
+        if hemi == 'mid':
+            return 'central_midline'
+        if lobe in ('frontal', 'temporal'):
+            return f'{lobe}_{hemi}'
+        if lobe in ('parietal', 'occipital'):
+            return f'posterior_{hemi}'
+        return 'central_midline'
+
+    @staticmethod
+    def _brain_ic_regional(
+        raw: mne.io.BaseRaw,
+        raw_path: Path,
+        keep_labels: tuple = ('brain',),
+    ) -> Optional[Tuple[np.ndarray, List[str]]]:
+        """Build the K-region time series from the kept brain ICs (Option 3, R1).
+
+        Selects the components whose ICLabel is in ``keep_labels``, sign-normalizes
+        each by its topography (dominant projection made positive), assigns each to
+        a scalp region by its dominant electrode, and sums the sign-normalized
+        sources within each region.
+
+        Parameters
+        ----------
+        raw : mne.io.BaseRaw
+            The loaded (cropped) raw recording, with its original channel names.
+        raw_path : Path
+            Path to the original ``.edf`` (used to locate the sibling ICA files).
+        keep_labels : tuple, default=('brain',)
+            ICLabel categories whose components are used.
+
+        Returns
+        -------
+        (np.ndarray, list[str]) | None
+            ``(data, region_names)`` with ``data`` of shape (n_regions, n_times),
+            or ``None`` on missing files / failure / no kept components.
+        """
+        ica_path = raw_path.parent / raw_path.name.replace('.edf', '-ica.fif')
+        labels_path = raw_path.parent / raw_path.name.replace('.edf', '-ica_labels.csv')
+        if not ica_path.exists() or not labels_path.exists():
+            logger.error(f"Missing ICA solution/labels for {raw_path.name}; skipping window.")
+            return None
+        try:
+            ica = mne.preprocessing.read_ica(ica_path, verbose='ERROR')
+            labels_df = pd.read_csv(labels_path, index_col=0)
+            keep = {str(k).strip().lower() for k in keep_labels}
+            labels = labels_df['labels'].astype(str).str.strip().str.lower()
+            keep_idx = labels_df.index[labels.isin(keep)].tolist()
+            if not keep_idx:
+                logger.error(
+                    f"No kept ICs ({sorted(keep)}) for {raw_path.name}; skipping window."
+                )
+                return None
+
+            raw = TUHEEGEpilepsy._align_raw_to_ica(raw, ica, raw_path)
+            if raw is None:
+                return None
+
+            sources = ica.get_sources(raw).get_data()  # (n_components, n_times)
+            topographies = ica.get_components()         # (n_channels, n_components)
+            regions = TUHEEGEpilepsy.CANONICAL_REGIONS
+            region_index = {r: i for i, r in enumerate(regions)}
+            regional = np.zeros((len(regions), sources.shape[1]), dtype=np.float64)
+
+            for j in keep_idx:
+                topo = topographies[:, j]
+                dom = int(np.argmax(np.abs(topo)))
+                sign = 1.0 if topo[dom] >= 0 else -1.0
+                region = TUHEEGEpilepsy._electrode_region(ica.ch_names[dom])
+                regional[region_index[region]] += sign * sources[j]
+
+            return regional, list(regions)
+        except Exception as e:
+            logger.error(f"Failed to build brain-IC regions for {raw_path.name}: {e}")
+            return None
+
     def _calculate_limit_per_subject(
             self, 
             df:pd.DataFrame, 
@@ -808,9 +932,10 @@ class TUHEEGEpilepsy:
             if mode == 'ica':
                 file_path = desc_row["path_ica"]
                 ch_names = None
-            elif mode == 'ica_clean':
-                # Option 1: read ALL channels (so the saved ICA's channels are
-                # present), then back-project to brain-only sensor space below.
+            elif mode in ('ica_clean', 'brain_ic'):
+                # Option 1 (ica_clean) / Option 3 (brain_ic): read ALL channels so
+                # the saved ICA's channels are present, then either back-project to
+                # sensor space (ica_clean) or build the regional IC series (brain_ic).
                 file_path = desc_row["path"]
                 ch_names = None
             else:
@@ -847,7 +972,20 @@ class TUHEEGEpilepsy:
                 
                 raw.crop(tmin=row_meta['start'], tmax=row_meta['end'], include_tmax=False)
                 raw.load_data()
-                
+
+                # Option 3 (brain_ic): build the fixed K-region time series from
+                # the kept brain ICs and return it directly. The regions are the
+                # channels, so no further sensor-space processing applies and we
+                # bypass the rename / montage / pick steps below.
+                if mode == 'brain_ic':
+                    out = TUHEEGEpilepsy._brain_ic_regional(
+                        raw, desc_row['path'], self.ica_keep_labels
+                    )
+                    if out is None:
+                        return None
+                    regional_data, region_names = out
+                    return regional_data, raw.info['sfreq'], region_names
+
                 # Option 1 (ica_clean): keep only ICs whose ICLabel is in
                 # self.ica_keep_labels (default brain + other), back-projected.
                 if mode == 'ica_clean':
