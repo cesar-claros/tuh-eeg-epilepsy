@@ -51,6 +51,26 @@ def _dump_window_metadata(cfg: DictConfig, datamodule: Any) -> None:
             log.info(f"Saved {len(df)} {split} window rows to windows_{split}.csv")  # noqa: G004
 
 
+def _write_performance_csv(cfg: DictConfig, scores_by_split: dict) -> None:
+    """Write window- and subject-level performance metrics to ``performance.csv``.
+
+    One row per (split, level) with all metrics as columns (accuracy,
+    balanced_accuracy, sensitivity, specificity, precision, f1, mcc, roc_auc,
+    average_precision, and the n / n_pos / n_neg counts).
+    """
+    rows: list[dict] = []
+    for split_name, scores in scores_by_split.items():
+        for level in ("window", "subject"):
+            if isinstance(scores, dict) and level in scores:
+                rows.append({"split": split_name, "level": level, **scores[level]})
+    if not rows:
+        return
+    output_dir = Path(cfg.paths.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_csv(output_dir / "performance.csv")
+    log.info("Saved performance metrics to performance.csv")
+
+
 def _resolve_feature_seeds(spec: int | list[int] | None) -> list[int] | None:
     """Resolve the ``feature_seeds`` config value into an explicit seed list.
 
@@ -131,15 +151,12 @@ def _run_seed_sweep(
             scaler=scaler,
             datamodule=datamodule,
         )
-        rows.append(
-            {
-                "seed": seed,
-                "train_accuracy_by_window": float(train_scores["accuracy_by_window"]),
-                "train_accuracy_by_subject": float(train_scores["accuracy_by_subject"]),
-                "test_accuracy_by_window": float(test_scores["accuracy_by_window"]),
-                "test_accuracy_by_subject": float(test_scores["accuracy_by_subject"]),
-            }
-        )
+        row: dict[str, float] = {"seed": seed}
+        for split_name, scores in (("train", train_scores), ("test", test_scores)):
+            for level in ("window", "subject"):
+                for metric, value in scores[level].items():
+                    row[f"{split_name}_{level}_{metric}"] = value
+        rows.append(row)
 
     results = pl.DataFrame(rows)
     metric_columns = [c for c in results.columns if c != "seed"]
@@ -149,18 +166,25 @@ def _run_seed_sweep(
     results.write_csv(output_dir / "seed_sweep_results.csv")
     results.drop("seed").describe().write_csv(output_dir / "seed_sweep_summary.csv")
 
-    log.info("HYDRA feature accuracy variation (mean +/- std [min, max]):")
     metric_dict: dict[str, Any] = {}
     for column in metric_columns:
         series = results[column]
-        mean = float(series.mean())
-        std = float(series.std()) if len(seeds) > 1 else 0.0
-        metric_dict[f"{column}_mean"] = mean
-        metric_dict[f"{column}_std"] = std
-        log.info(  # noqa: G004
-            f"  {column:32s}: {mean:.4f} +/- {std:.4f} "
-            f"[{float(series.min()):.4f}, {float(series.max()):.4f}]"
-        )
+        metric_dict[f"{column}_mean"] = float(series.mean())
+        metric_dict[f"{column}_std"] = float(series.std()) if len(seeds) > 1 else 0.0
+
+    # Log only the key test metrics; the CSVs hold every metric for all splits.
+    log.info(f"HYDRA feature performance variation over {len(seeds)} seeds (mean +/- std [min, max]):")  # noqa: G004
+    key_metrics = ("accuracy", "balanced_accuracy", "sensitivity", "specificity", "roc_auc")
+    for level in ("window", "subject"):
+        for metric in key_metrics:
+            column = f"test_{level}_{metric}"
+            if column in results.columns:
+                series = results[column]
+                std = float(series.std()) if len(seeds) > 1 else 0.0
+                log.info(  # noqa: G004
+                    f"  test_{level}_{metric:18s}: {float(series.mean()):.4f} +/- {std:.4f} "
+                    f"[{float(series.min()):.4f}, {float(series.max()):.4f}]"
+                )
 
     object_dict = {
         "cfg": cfg,
@@ -366,6 +390,14 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     # training to have run, so the extractor has processed (and counted) data.
     if cfg.get("train") and cfg.feature.get("track_counts"):
         _report_top_kernels(cfg, feature_extractor)
+
+    # Save the full window- and subject-level performance metrics to CSV.
+    scores_by_split = {}
+    if cfg.get("train"):
+        scores_by_split["train"] = train_metrics
+    if cfg.get("test"):
+        scores_by_split["test"] = test_metrics
+    _write_performance_csv(cfg, scores_by_split)
 
     # merge train and test metrics
     metric_dict = {**train_metrics, **test_metrics}

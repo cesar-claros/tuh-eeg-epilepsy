@@ -1,13 +1,60 @@
+import joblib
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from pytorch_lightning import LightningDataModule
 from loguru import logger as log
-from tqdm import tqdm
-import joblib
 from pathlib import Path
-from src.models.components.hydra_transformer import _SparseScaler
+from pytorch_lightning import LightningDataModule
+from sklearn import metrics as skm
 from sklearn.pipeline import make_pipeline
-import pandas as pd
+from tqdm import tqdm
+
+from src.models.components.hydra_transformer import _SparseScaler
+
+
+def _classification_metrics(y_true, y_pred, y_score) -> dict:
+    """Compute binary-classification metrics.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True 0/1 labels.
+    y_pred : array-like
+        Predicted 0/1 labels.
+    y_score : array-like
+        Signed decision values (for ROC-AUC / average precision).
+
+    Returns
+    -------
+    dict
+        n / n_pos / n_neg counts plus accuracy, balanced_accuracy, sensitivity,
+        specificity, precision, f1, mcc, roc_auc, and average_precision. The
+        AUC-based metrics and MCC are NaN when only one class is present.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+    y_score = np.asarray(y_score, dtype=float)
+    n_pos = int((y_true == 1).sum())
+    n_neg = int((y_true == 0).sum())
+    both = n_pos > 0 and n_neg > 0
+    return {
+        "n": int(y_true.size),
+        "n_pos": n_pos,
+        "n_neg": n_neg,
+        "accuracy": float(skm.accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(skm.balanced_accuracy_score(y_true, y_pred)),
+        "sensitivity": float(skm.recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "specificity": float(skm.recall_score(y_true, y_pred, pos_label=0, zero_division=0)),
+        "precision": float(skm.precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "f1": float(skm.f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "mcc": float(skm.matthews_corrcoef(y_true, y_pred)) if both else float("nan"),
+        "roc_auc": float(skm.roc_auc_score(y_true, y_score)) if both else float("nan"),
+        "average_precision": (
+            float(skm.average_precision_score(y_true, y_score)) if both else float("nan")
+        ),
+    }
+
 
 class Trainer:
     """
@@ -20,19 +67,39 @@ class Trainer:
 
     def _get_scores(self, pipeline, data, metadata_df, split_name):
         log.info(f"Calculating scores for {split_name} data")
-        # Scores by quick window-level predictions
-        score_by_window = pipeline.score(data["X"], data["y"])
-        # Scores by subject-level predictions
-        df = metadata_df[['subject','epilepsy']].copy().set_index('subject')
-        df.loc[:, 'score'] = pipeline.decision_function(data["X"])
-        mean_scores_by_subject = df.groupby(df.index)['score'].mean()
-        epilepsy_by_subject = df.groupby(df.index)['epilepsy'].first()  # Get epilepsy label for each subject
-        accuracy_by_subject = (mean_scores_by_subject > 0).astype(bool) == epilepsy_by_subject.astype(bool)
-        log.info(f"{split_name.capitalize()} accuracy by window: {score_by_window:.4f}")
-        log.info(f"{split_name.capitalize()} accuracy by subject: {accuracy_by_subject.mean():.4f}")
+        # Window-level: signed decision value per window, thresholded at 0.
+        window_score = pipeline.decision_function(data["X"])
+        window_pred = (window_score > 0).astype(int)
+        metrics_window = _classification_metrics(data["y"], window_pred, window_score)
+
+        # Subject-level: average the signed decision value over each subject's
+        # windows, thresholded at 0.
+        df = metadata_df[['subject', 'epilepsy']].copy()
+        df['score'] = window_score
+        grouped = df.groupby('subject')
+        subject_score = grouped['score'].mean().to_numpy()
+        subject_true = grouped['epilepsy'].first().astype(int).to_numpy()
+        subject_pred = (subject_score > 0).astype(int)
+        metrics_subject = _classification_metrics(subject_true, subject_pred, subject_score)
+
+        name = split_name.capitalize()
+        log.info(
+            f"{name} window:  acc={metrics_window['accuracy']:.4f} "
+            f"bal_acc={metrics_window['balanced_accuracy']:.4f} "
+            f"sens={metrics_window['sensitivity']:.4f} spec={metrics_window['specificity']:.4f} "
+            f"auc={metrics_window['roc_auc']:.4f}"
+        )
+        log.info(
+            f"{name} subject: acc={metrics_subject['accuracy']:.4f} "
+            f"bal_acc={metrics_subject['balanced_accuracy']:.4f} "
+            f"sens={metrics_subject['sensitivity']:.4f} spec={metrics_subject['specificity']:.4f} "
+            f"auc={metrics_subject['roc_auc']:.4f}"
+        )
         return {
-            "accuracy_by_window": score_by_window,
-            "accuracy_by_subject": accuracy_by_subject.mean(),
+            "window": metrics_window,
+            "subject": metrics_subject,
+            "accuracy_by_window": metrics_window["accuracy"],
+            "accuracy_by_subject": metrics_subject["accuracy"],
         }
 
 
