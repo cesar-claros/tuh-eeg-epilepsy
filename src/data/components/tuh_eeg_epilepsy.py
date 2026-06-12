@@ -63,12 +63,16 @@ class TUHEEGEpilepsy:
     )
     # Thresholds for region_from_dipole, in MNE head-coordinate meters (+x toward
     # the right preauricular point, +y toward the nasion, +z up, origin near the
-    # head center). Heuristic; calibrate per montage if needed.
-    _DIP_X_MID = 0.025        # |x| below this -> midline (central_midline)
-    _DIP_X_LATERAL = 0.045    # |x| above this, if inferior, -> temporal
-    _DIP_Z_TEMPORAL = 0.0     # z below this, if lateral, -> temporal lobe
-    _DIP_Y_FRONTAL = 0.02     # y above this -> frontal
-    _DIP_Y_POSTERIOR = -0.02  # y below this -> posterior
+    # head center). Calibrated against the fitted-dipole distribution across the
+    # corpus (see documentation/brain_ic_dipoles.md, Section 8): the brain-IC
+    # cloud sits at z > 0 (median ~0.045), so the temporal cut is positive, and
+    # the midline band is narrowed so central_midline does not swallow ~half the
+    # sources. Re-run src/dipole_diagnostics.py if the montage / corpus changes.
+    _DIP_X_MID = 0.015         # |x| below this -> midline (central_midline)
+    _DIP_X_LATERAL = 0.035     # |x| above this, if inferior, -> temporal
+    _DIP_Z_TEMPORAL = 0.030    # z below this, if lateral, -> temporal lobe
+    _DIP_Y_FRONTAL = 0.030     # y above this -> frontal
+    _DIP_Y_POSTERIOR = -0.020  # y below this -> posterior
 
     def __init__(
         self,
