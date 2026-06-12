@@ -22,6 +22,7 @@ import pandas as pd
 import mne
 import warnings
 import re
+import traceback
 import torch
 import numpy as np
 
@@ -472,7 +473,8 @@ class TUHEEGEpilepsy:
             ).to_csv(dipoles_path, index=False)
         except Exception as e:
             logger.error(
-                f"Error fitting IC dipoles for {file_path}: {type(e).__name__}: {e}"
+                f"Error fitting IC dipoles for {file_path}: {type(e).__name__}: {e}\n"
+                f"{traceback.format_exc()}"
             )
 
     def compute_ica_labels(

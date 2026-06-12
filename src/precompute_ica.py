@@ -66,9 +66,17 @@ def main() -> None:
         default=1,
         help="Parallel workers (joblib) for each pass (default: 1).",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process only the first N recordings (for debugging a single file).",
+    )
     args = parser.parse_args()
 
-    tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version)
+    tuh = TUHEEGEpilepsy(
+        data_dir=args.data_dir, version=args.version, recording_ids=args.limit
+    )
 
     if args.steps in ("labels", "both"):
         tuh.compute_ica_labels(n_jobs=args.n_jobs)
