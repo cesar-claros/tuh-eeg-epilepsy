@@ -74,6 +74,8 @@ class TUHEEGDataModule(LightningDataModule):
         dict_learning_window_len_s: float = 2.0,
         signal_mode: str = 'raw',
         ica_keep_labels: tuple = ('brain', 'other'),
+        brain_ic_min_gof: float = 0.0,
+        brain_ic_use_dipoles: bool = True,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -109,6 +111,13 @@ class TUHEEGDataModule(LightningDataModule):
             For 'ica_clean', the ICLabel categories to keep; all others (the
             confident artifacts) are excluded. For 'brain_ic', the categories
             whose ICs build the regional series (set ('brain',) for brain-only).
+        brain_ic_min_gof : float, default=0.0
+            For 'brain_ic', drop ICs whose cached dipole goodness of fit (percent)
+            is below this; 0.0 keeps all ICs.
+        brain_ic_use_dipoles : bool, default=True
+            For 'brain_ic', assign regions from the cached dipoles
+            ('-ica_dipoles.csv') when present; False uses the dominant-electrode
+            heuristic instead.
 
         """
         super().__init__()
@@ -128,6 +137,8 @@ class TUHEEGDataModule(LightningDataModule):
         self.dict_learning_window_len_s = dict_learning_window_len_s
         self.signal_mode = signal_mode
         self.ica_keep_labels = ica_keep_labels
+        self.brain_ic_min_gof = brain_ic_min_gof
+        self.brain_ic_use_dipoles = brain_ic_use_dipoles
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -197,6 +208,8 @@ class TUHEEGDataModule(LightningDataModule):
                 version=self.version,
                 add_annotations=True,
                 ica_keep_labels=self.ica_keep_labels,
+                brain_ic_min_gof=self.brain_ic_min_gof,
+                brain_ic_use_dipoles=self.brain_ic_use_dipoles,
             )
 
             # Split the dataset

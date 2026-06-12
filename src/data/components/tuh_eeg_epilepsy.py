@@ -77,6 +77,8 @@ class TUHEEGEpilepsy:
         recording_ids: Union[int, List[int], None] = None,
         add_annotations: bool = False,
         ica_keep_labels: tuple = ('brain', 'other'),
+        brain_ic_min_gof: float = 0.0,
+        brain_ic_use_dipoles: bool = True,
     ):
 
         self.data_dir = data_dir
@@ -84,6 +86,11 @@ class TUHEEGEpilepsy:
         # ICLabel categories to keep when reconstructing in 'ica_clean' mode; all
         # other components (the confident artifacts) are excluded.
         self.ica_keep_labels = ica_keep_labels
+        # 'brain_ic' options: minimum dipole goodness of fit (percent) to keep an
+        # IC (0 = keep all), and whether to assign regions from cached dipoles
+        # ('-ica_dipoles.csv') rather than the dominant-electrode heuristic.
+        self.brain_ic_min_gof = brain_ic_min_gof
+        self.brain_ic_use_dipoles = brain_ic_use_dipoles
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -758,16 +765,18 @@ class TUHEEGEpilepsy:
         raw_path: Path,
         keep_labels: tuple = ('brain',),
         min_gof: float = 0.0,
+        use_dipoles: bool = True,
     ) -> Optional[Tuple[np.ndarray, List[str]]]:
         """Build the K-region time series from the kept brain ICs (Option 3, R1).
 
         Selects the components whose ICLabel is in ``keep_labels``, sign-normalizes
         each by its topography (dominant projection made positive), assigns each to
         a scalp region, and sums the sign-normalized sources within each region.
-        Region assignment prefers a cached per-IC dipole location
-        (``-ica_dipoles.csv`` via ``region_from_dipole``) and falls back to the
-        dominant-electrode heuristic (``_electrode_region``) when no dipole file is
-        present.
+        When ``use_dipoles`` is True, region assignment prefers a cached per-IC
+        dipole location (``-ica_dipoles.csv`` via ``region_from_dipole``) and falls
+        back to the dominant-electrode heuristic (``_electrode_region``) when no
+        dipole file is present; with ``use_dipoles=False`` the electrode heuristic
+        is always used.
 
         Parameters
         ----------
@@ -780,6 +789,9 @@ class TUHEEGEpilepsy:
         min_gof : float, default=0.0
             If > 0 and dipoles are cached, drop ICs whose dipole goodness of fit
             (percent) is below this, keeping only confidently localized sources.
+        use_dipoles : bool, default=True
+            If True, assign regions from the cached dipole locations when present;
+            if False, always use the dominant-electrode heuristic.
 
         Returns
         -------
@@ -815,10 +827,14 @@ class TUHEEGEpilepsy:
             regional = np.zeros((len(regions), sources.shape[1]), dtype=np.float64)
 
             # Prefer cached per-IC dipole locations (source geometry) over the
-            # dominant-electrode heuristic; fall back to the electrode when the
-            # dipole file or a given IC's row is missing.
+            # dominant-electrode heuristic; fall back to the electrode when dipoles
+            # are disabled, the dipole file is absent, or a given IC's row is missing.
             dipoles_path = raw_path.parent / raw_path.name.replace('.edf', '-ica_dipoles.csv')
-            dipoles = pd.read_csv(dipoles_path).set_index('ic') if dipoles_path.exists() else None
+            dipoles = (
+                pd.read_csv(dipoles_path).set_index('ic')
+                if use_dipoles and dipoles_path.exists()
+                else None
+            )
 
             for j in keep_idx:
                 topo = topographies[:, j]
@@ -1158,7 +1174,11 @@ class TUHEEGEpilepsy:
                 # bypass the rename / montage / pick steps below.
                 if mode == 'brain_ic':
                     out = TUHEEGEpilepsy._brain_ic_regional(
-                        raw, desc_row['path'], self.ica_keep_labels
+                        raw,
+                        desc_row['path'],
+                        self.ica_keep_labels,
+                        min_gof=self.brain_ic_min_gof,
+                        use_dipoles=self.brain_ic_use_dipoles,
                     )
                     if out is None:
                         return None

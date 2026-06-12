@@ -9,6 +9,8 @@ signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels
 ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
 # (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;
 #  brain_ic uses these labels' ICs directly, so set [brain] for brain-only regional sources)
+brain_ic_min_gof: 0.0 # brain_ic: drop ICs whose dipole goodness of fit (percent) is below this (0 = keep all)
+brain_ic_use_dipoles: true # brain_ic: assign regions from cached dipoles (-ica_dipoles.csv); false uses the dominant-electrode heuristic
 batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
 num_workers: 7
 seed: 42
