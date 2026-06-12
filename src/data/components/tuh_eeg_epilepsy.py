@@ -60,6 +60,14 @@ class TUHEEGEpilepsy:
         'posterior_left', 'posterior_right',
         'central_midline',
     )
+    # Thresholds for region_from_dipole, in MNE head-coordinate meters (+x toward
+    # the right preauricular point, +y toward the nasion, +z up, origin near the
+    # head center). Heuristic; calibrate per montage if needed.
+    _DIP_X_MID = 0.025        # |x| below this -> midline (central_midline)
+    _DIP_X_LATERAL = 0.045    # |x| above this, if inferior, -> temporal
+    _DIP_Z_TEMPORAL = 0.0     # z below this, if lateral, -> temporal lobe
+    _DIP_Y_FRONTAL = 0.02     # y above this -> frontal
+    _DIP_Y_POSTERIOR = -0.02  # y below this -> posterior
 
     def __init__(
         self,
@@ -378,6 +386,90 @@ class TUHEEGEpilepsy:
         except Exception as e:
             logger.error(f"Error processing ICA for {file_path}: {e}")
 
+    @staticmethod
+    def _generate_ic_dipoles(
+        file_path: Path,
+        montage_name: str = 'standard_1020',
+    ) -> None:
+        """Fit one equivalent-current dipole per IC topography and cache it.
+
+        Offline, side-effect-heavy pass mirroring ``_generate_ICA_labels``. Reads
+        the saved ICA solution (``-ica.fif``), fits a single dipole to each
+        component's scalp map (a column of the mixing matrix) with a template
+        spherical head model, and writes ``-ica_dipoles.csv`` (one row per IC:
+        ``ic, x, y, z, ori_x, ori_y, ori_z, gof``; positions in MNE head
+        coordinates, meters; ``gof`` in percent). Window loading reads this CSV
+        instead of refitting, since the topographies are fixed per recording.
+        Skips work if the CSV already exists. Requires ``compute_ica_labels`` to
+        have produced the ``.fif`` first; no individual MRI is used, so locations
+        are template-space approximations comparable across subjects.
+
+        Parameters
+        ----------
+        file_path : Path
+            Path to the original ``.edf`` (used to locate the sibling ICA files).
+        montage_name : str, default='standard_1020'
+            Standard montage supplying the template electrode positions.
+        """
+        try:
+            ica_path = file_path.parent / file_path.name.replace('.edf', '-ica.fif')
+            dipoles_path = file_path.parent / file_path.name.replace('.edf', '-ica_dipoles.csv')
+            if dipoles_path.exists():
+                logger.info(f"Skipping dipoles for {file_path.name}, already exist.")
+                return
+            if not ica_path.exists():
+                logger.error(
+                    f"Missing ICA solution for {file_path.name}; run compute_ica_labels first."
+                )
+                return
+
+            ica = mne.preprocessing.read_ica(ica_path, verbose='ERROR')
+
+            # Topographies as an Evoked: each "time sample" is one component's
+            # scalp map, so fit_dipole returns one dipole per component at once.
+            evoked = mne.EvokedArray(
+                ica.get_components(), ica.info.copy(), tmin=0.0, verbose='ERROR'
+            )
+            # Canonical 10-20 names + eeg type, then template electrode positions.
+            TUHEEGEpilepsy._rename_channels(evoked)
+            evoked.set_montage(montage_name, on_missing='ignore', verbose='ERROR')
+
+            # Keep only channels that received a position from the montage; the
+            # forward model and the sphere fit both need electrode locations.
+            has_pos = [
+                ch
+                for ch, info_ch in zip(evoked.ch_names, evoked.info['chs'])
+                if np.any(info_ch['loc'][:3]) and np.all(np.isfinite(info_ch['loc'][:3]))
+            ]
+            if len(has_pos) < 4:
+                logger.error(
+                    f"Too few localizable channels for {file_path.name}; skipping dipoles."
+                )
+                return
+            evoked.pick(has_pos)
+            evoked.set_eeg_reference('average', projection=True, verbose='ERROR')
+
+            # Template spherical conductor (no MRI) + ad-hoc identity covariance.
+            sphere = mne.make_sphere_model(
+                r0='auto', head_radius='auto', info=evoked.info, verbose='ERROR'
+            )
+            cov = mne.make_ad_hoc_cov(evoked.info, verbose='ERROR')
+            dip, _ = mne.fit_dipole(evoked, cov, sphere, verbose='ERROR')
+
+            pos = np.asarray(dip.pos)  # (n_components, 3), meters, head coords
+            ori = np.asarray(dip.ori)  # (n_components, 3)
+            gof = np.asarray(dip.gof)  # (n_components,), percent
+            pd.DataFrame(
+                {
+                    'ic': np.arange(pos.shape[0]),
+                    'x': pos[:, 0], 'y': pos[:, 1], 'z': pos[:, 2],
+                    'ori_x': ori[:, 0], 'ori_y': ori[:, 1], 'ori_z': ori[:, 2],
+                    'gof': gof,
+                }
+            ).to_csv(dipoles_path, index=False)
+        except Exception as e:
+            logger.error(f"Error fitting IC dipoles for {file_path}: {e}")
+
     def compute_ica_labels(
         self,
         n_jobs: int = 1,
@@ -399,6 +491,32 @@ class TUHEEGEpilepsy:
                 for path in tqdm(paths, desc="Computing ICA Labels")
             )
         logger.info("ICA computation completed.")
+
+    def compute_ic_dipoles(
+        self,
+        n_jobs: int = 1,
+    ) -> None:
+        """Fit and cache per-IC dipoles for every recording.
+
+        Run after ``compute_ica_labels`` (it needs the ``-ica.fif`` files). Writes
+        one ``-ica_dipoles.csv`` next to each ``.edf``; existing files are skipped.
+
+        Parameters
+        ----------
+        n_jobs : int, default=1
+            Number of parallel workers (joblib) for the per-file dipole fits.
+        """
+        logger.info(f"Starting IC dipole fitting for {len(self.descriptions)} files...")
+        paths = self.descriptions['path'].tolist()
+        if n_jobs == 1:
+            for path in tqdm(paths, desc="Fitting IC dipoles"):
+                self._generate_ic_dipoles(path)
+        else:
+            Parallel(n_jobs=n_jobs)(
+                delayed(self._generate_ic_dipoles)(path)
+                for path in tqdm(paths, desc="Fitting IC dipoles")
+            )
+        logger.info("IC dipole fitting completed.")
 
     @staticmethod
     def _rename_channels(raw: mne.io.BaseRaw) -> None:
@@ -596,17 +714,47 @@ class TUHEEGEpilepsy:
         return 'central_midline'
 
     @staticmethod
+    def region_from_dipole(x: float, y: float, z: float) -> str:
+        """Map a fitted dipole location to one of ``CANONICAL_REGIONS``.
+
+        Coordinates are MNE head coordinates in meters (+x toward the right
+        preauricular point, +y toward the nasion, +z up, origin near the head
+        center). The folding mirrors ``_electrode_region`` (frontal and temporal
+        keep their hemisphere; parietal and occipital collapse into 'posterior';
+        central, vertex and midline sources go to 'central_midline') but uses the
+        source location instead of the dominant electrode. Thresholds are the
+        ``_DIP_*`` class constants.
+        """
+        hemi = 'left' if x < 0 else 'right'
+        # Temporal lobes sit low and lateral.
+        if z < TUHEEGEpilepsy._DIP_Z_TEMPORAL and abs(x) > TUHEEGEpilepsy._DIP_X_LATERAL:
+            return f'temporal_{hemi}'
+        # Close to the midline -> central / vertex / midline.
+        if abs(x) < TUHEEGEpilepsy._DIP_X_MID:
+            return 'central_midline'
+        if y > TUHEEGEpilepsy._DIP_Y_FRONTAL:
+            return f'frontal_{hemi}'
+        if y < TUHEEGEpilepsy._DIP_Y_POSTERIOR:
+            return f'posterior_{hemi}'
+        # Lateral but central in y: no lateral-central region, fold to midline.
+        return 'central_midline'
+
+    @staticmethod
     def _brain_ic_regional(
         raw: mne.io.BaseRaw,
         raw_path: Path,
         keep_labels: tuple = ('brain',),
+        min_gof: float = 0.0,
     ) -> Optional[Tuple[np.ndarray, List[str]]]:
         """Build the K-region time series from the kept brain ICs (Option 3, R1).
 
         Selects the components whose ICLabel is in ``keep_labels``, sign-normalizes
         each by its topography (dominant projection made positive), assigns each to
-        a scalp region by its dominant electrode, and sums the sign-normalized
-        sources within each region.
+        a scalp region, and sums the sign-normalized sources within each region.
+        Region assignment prefers a cached per-IC dipole location
+        (``-ica_dipoles.csv`` via ``region_from_dipole``) and falls back to the
+        dominant-electrode heuristic (``_electrode_region``) when no dipole file is
+        present.
 
         Parameters
         ----------
@@ -616,6 +764,9 @@ class TUHEEGEpilepsy:
             Path to the original ``.edf`` (used to locate the sibling ICA files).
         keep_labels : tuple, default=('brain',)
             ICLabel categories whose components are used.
+        min_gof : float, default=0.0
+            If > 0 and dipoles are cached, drop ICs whose dipole goodness of fit
+            (percent) is below this, keeping only confidently localized sources.
 
         Returns
         -------
@@ -650,11 +801,26 @@ class TUHEEGEpilepsy:
             region_index = {r: i for i, r in enumerate(regions)}
             regional = np.zeros((len(regions), sources.shape[1]), dtype=np.float64)
 
+            # Prefer cached per-IC dipole locations (source geometry) over the
+            # dominant-electrode heuristic; fall back to the electrode when the
+            # dipole file or a given IC's row is missing.
+            dipoles_path = raw_path.parent / raw_path.name.replace('.edf', '-ica_dipoles.csv')
+            dipoles = pd.read_csv(dipoles_path).set_index('ic') if dipoles_path.exists() else None
+
             for j in keep_idx:
                 topo = topographies[:, j]
                 dom = int(np.argmax(np.abs(topo)))
                 sign = 1.0 if topo[dom] >= 0 else -1.0
-                region = TUHEEGEpilepsy._electrode_region(ica.ch_names[dom])
+                region = None
+                if dipoles is not None and j in dipoles.index:
+                    row = dipoles.loc[j]
+                    if min_gof > 0.0 and float(row['gof']) < min_gof:
+                        continue  # poorly localized IC: not a confident dipole
+                    region = TUHEEGEpilepsy.region_from_dipole(
+                        float(row['x']), float(row['y']), float(row['z'])
+                    )
+                if region is None:
+                    region = TUHEEGEpilepsy._electrode_region(ica.ch_names[dom])
                 regional[region_index[region]] += sign * sources[j]
 
             return regional, list(regions)
