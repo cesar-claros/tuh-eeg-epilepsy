@@ -449,9 +449,12 @@ class TUHEEGEpilepsy:
             evoked.pick(has_pos)
             evoked.set_eeg_reference('average', projection=True, verbose='ERROR')
 
-            # Template spherical conductor (no MRI) + ad-hoc identity covariance.
+            # Fixed adult-head spherical conductor in head coordinates (no MRI,
+            # no headshape digitization). The electrodes are a fixed template, so
+            # an auto-fitted sphere would be identical every time and only adds a
+            # fragile dependency on dig points that the saved ICA does not carry.
             sphere = mne.make_sphere_model(
-                r0='auto', head_radius='auto', info=evoked.info, verbose='ERROR'
+                r0=(0.0, 0.0, 0.04), head_radius=0.09, verbose='ERROR'
             )
             cov = mne.make_ad_hoc_cov(evoked.info, verbose='ERROR')
             dip, _ = mne.fit_dipole(evoked, cov, sphere, verbose='ERROR')
@@ -468,7 +471,9 @@ class TUHEEGEpilepsy:
                 }
             ).to_csv(dipoles_path, index=False)
         except Exception as e:
-            logger.error(f"Error fitting IC dipoles for {file_path}: {e}")
+            logger.error(
+                f"Error fitting IC dipoles for {file_path}: {type(e).__name__}: {e}"
+            )
 
     def compute_ica_labels(
         self,
