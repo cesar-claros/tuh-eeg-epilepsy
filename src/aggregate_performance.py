@@ -25,6 +25,7 @@ From the ``code/`` directory::
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -77,7 +78,8 @@ def _run_config(run_dir: Path) -> dict:
             info["ica_keep_labels"] = list(keep) if keep is not None else None
             info["brain_ic_min_gof"] = OmegaConf.select(cfg, "data.brain_ic_min_gof")
             info["brain_ic_use_dipoles"] = OmegaConf.select(cfg, "data.brain_ic_use_dipoles")
-            info["seed"] = OmegaConf.select(cfg, "seed")
+            seed = OmegaConf.select(cfg, "seed")
+            info["seed"] = seed if seed is not None else OmegaConf.select(cfg, "data.seed")
             target = OmegaConf.select(cfg, "model._target_")
             info["model"] = target.split(".")[-1] if isinstance(target, str) else target
         except Exception as e:  # noqa: BLE001
@@ -122,7 +124,6 @@ def _focused(combined: pd.DataFrame, split: str, level: str, metrics: list[str])
     """Pivot to one row per run for a chosen split / level, sorted by bal. acc."""
     sel = combined[(combined["split"] == split) & (combined["level"] == level)].copy()
     if sel.empty:
-        logger.warning(f"No rows for split='{split}', level='{level}'.")
         return sel
     available = [m for m in metrics if m in sel.columns]
     cols = ["run", *[c for c in _CONFIG_COLS if c != "overrides"], *available, "overrides"]
@@ -131,6 +132,57 @@ def _focused(combined: pd.DataFrame, split: str, level: str, metrics: list[str])
     if "balanced_accuracy" in sel.columns:
         sel = sel.sort_values("balanced_accuracy", ascending=False)
     return sel.reset_index(drop=True)
+
+
+def _strip_seed(overrides: object) -> str:
+    """Drop any ``seed=`` / ``data.seed=`` token so seed-only differences group."""
+    parts = [p.strip() for p in str(overrides).split(";") if p.strip()]
+    kept = [p for p in parts if not re.match(r"^(data\.)?seed\s*=", p)]
+    return "; ".join(kept)
+
+
+_GROUP_KEYS = (
+    "signal_mode",
+    "ica_keep_labels",
+    "brain_ic_min_gof",
+    "brain_ic_use_dipoles",
+    "model",
+    "overrides_noseed",
+)
+
+
+def _grouped(combined: pd.DataFrame, split: str, level: str, metrics: list[str]) -> pd.DataFrame:
+    """Aggregate runs that share a config (ignoring seed): mean / std per metric."""
+    sel = combined[(combined["split"] == split) & (combined["level"] == level)].copy()
+    if sel.empty:
+        return sel
+    sel["overrides_noseed"] = sel["overrides"].map(_strip_seed)
+    available = [
+        m for m in metrics if m in sel.columns and pd.api.types.is_numeric_dtype(sel[m])
+    ]
+    rows: list[dict] = []
+    for key, group in sel.groupby(list(_GROUP_KEYS), dropna=False):
+        row = dict(zip(_GROUP_KEYS, key))
+        seeds = sorted({str(s) for s in group["seed"].dropna().tolist()})
+        row["n_runs"] = len(group)
+        row["seeds"] = ",".join(seeds)
+        for m in available:
+            row[f"{m}_mean"] = group[m].mean()
+            row[f"{m}_std"] = group[m].std()  # NaN for a single run
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if "balanced_accuracy_mean" in out.columns:
+        out = out.sort_values("balanced_accuracy_mean", ascending=False)
+    return out.reset_index(drop=True)
+
+
+def _fmt(mean: float, std: float) -> str:
+    """Format a metric as ``mean +/- std`` (or ``mean (n=1)`` when std is undefined)."""
+    if pd.isna(mean):
+        return ""
+    if pd.isna(std):
+        return f"{mean:.4f} (n=1)"
+    return f"{mean:.4f} +/- {std:.4f}"
 
 
 def main() -> None:
@@ -171,14 +223,31 @@ def main() -> None:
     logger.info(f"Wrote combined table to {out}")
 
     focused = _focused(combined, args.split, args.level, args.metrics)
-    if not focused.empty:
-        focused_path = out.with_name(f"{out.stem}_{args.split}_{args.level}.csv")
-        focused.to_csv(focused_path, index=False)
-        logger.info(f"Wrote focused table to {focused_path}")
-        logger.info(
-            f"Comparison ({args.split} / {args.level}, best first):\n"
-            f"{focused.round(4).to_string(index=False)}"
-        )
+    if focused.empty:
+        logger.warning(f"No rows for split='{args.split}', level='{args.level}'.")
+        return
+    focused_path = out.with_name(f"{out.stem}_{args.split}_{args.level}.csv")
+    focused.to_csv(focused_path, index=False)
+    logger.info(f"Wrote per-run table to {focused_path}")
+    logger.info(
+        f"Per-run comparison ({args.split} / {args.level}, best first):\n"
+        f"{focused.round(4).to_string(index=False)}"
+    )
+
+    grouped = _grouped(combined, args.split, args.level, args.metrics)
+    grouped_path = out.with_name(f"{out.stem}_{args.split}_{args.level}_by_config.csv")
+    grouped.to_csv(grouped_path, index=False)
+    logger.info(f"Wrote per-config (seed-aggregated) table to {grouped_path}")
+
+    metrics_present = [m for m in args.metrics if f"{m}_mean" in grouped.columns]
+    label_cols = ["signal_mode", "brain_ic_min_gof", "brain_ic_use_dipoles", "model", "n_runs", "seeds"]
+    disp = grouped[[c for c in label_cols if c in grouped.columns]].copy()
+    for m in metrics_present:
+        disp[m] = [_fmt(mu, sd) for mu, sd in zip(grouped[f"{m}_mean"], grouped[f"{m}_std"])]
+    logger.info(
+        f"Per-config comparison ({args.split} / {args.level}, mean +/- std over seeds, best first):\n"
+        f"{disp.to_string(index=False)}"
+    )
 
 
 if __name__ == "__main__":
