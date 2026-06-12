@@ -431,6 +431,12 @@ class TUHEEGEpilepsy:
             evoked = mne.EvokedArray(
                 ica.get_components(), ica.info.copy(), tmin=0.0, verbose='ERROR'
             )
+            # EDF EEG-only recordings carry no device->head transform, so the info
+            # inherited from the ICA has dev_head_t=None; fit_dipole dereferences
+            # it while logging. Set an identity transform (EEG is already in head
+            # coordinates) so the fit proceeds.
+            with evoked.info._unlock():
+                evoked.info['dev_head_t'] = mne.transforms.Transform('meg', 'head')
             # Canonical 10-20 names + eeg type, then template electrode positions.
             TUHEEGEpilepsy._rename_channels(evoked)
             evoked.set_montage(montage_name, on_missing='ignore', verbose='ERROR')
