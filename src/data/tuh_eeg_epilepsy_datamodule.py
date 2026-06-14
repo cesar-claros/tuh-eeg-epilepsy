@@ -76,6 +76,7 @@ class TUHEEGDataModule(LightningDataModule):
         ica_keep_labels: tuple = ('brain', 'other'),
         brain_ic_min_gof: float = 0.0,
         brain_ic_use_dipoles: bool = True,
+        max_windows_per_subject: int | None = None,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -118,6 +119,13 @@ class TUHEEGDataModule(LightningDataModule):
             For 'brain_ic', assign regions from the cached dipoles
             ('-ica_dipoles.csv') when present; False uses the dominant-electrode
             heuristic instead.
+        max_windows_per_subject : int | None, default=None
+            Per-subject window cap for the main (non-dictionary-learning) load. The
+            balanced windowing keeps min(actual, cap) windows per subject; subjects
+            with fewer keep all they have. None reverts to strict balancing (every
+            subject clamped to the global-minimum subject's count), which can
+            discard most of the corpus. Set a value (e.g. 20) to use far more data
+            at the cost of mild per-subject imbalance.
 
         """
         super().__init__()
@@ -139,6 +147,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.ica_keep_labels = ica_keep_labels
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
+        self.max_windows_per_subject = max_windows_per_subject
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -224,6 +233,7 @@ class TUHEEGDataModule(LightningDataModule):
                 window_len_s = self.window_len_min*60, # 5 minutes
                 overlap_pct = self.overlap_pct,
                 balance_per_subject = True,
+                max_windows_per_subject = self.max_windows_per_subject,
                 include_seizures = False,
                 fix_length_mode = 'resample', # 'resample', 'pad', or None
                 shuffle_windows = True,

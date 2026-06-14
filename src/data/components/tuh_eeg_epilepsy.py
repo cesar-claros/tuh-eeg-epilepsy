@@ -229,6 +229,7 @@ class TUHEEGEpilepsy:
         idx_list: Optional[List[str]] = None,
         dictionary_learning: bool = False,
         n_windows_per_subject: Optional[int] = None,
+        max_windows_per_subject: Optional[int] = None,
         overlap_pct: float = 0.0,
         balance_per_subject: bool = False,
         include_seizures: bool = True,
@@ -253,6 +254,7 @@ class TUHEEGEpilepsy:
                     idx_list=idx_list,
                     dictionary_learning=dictionary_learning,
                     n_windows_per_subject=n_windows_per_subject,
+                    max_windows_per_subject=max_windows_per_subject,
                     stratify_by=stratify_by,
                     mode=mode,
                     filter_freq=filter_freq,
@@ -862,11 +864,12 @@ class TUHEEGEpilepsy:
             return None
 
     def _calculate_limit_per_subject(
-            self, 
-            df:pd.DataFrame, 
-            window_len_s:int, 
-            stride:float, 
+            self,
+            df:pd.DataFrame,
+            window_len_s:int,
+            stride:float,
             balance_per_subject:bool,
+            max_windows_per_subject: Optional[int] = None,
             unit: str = 'seconds',
         ) -> Optional[int]:
         # Approx windows per file
@@ -883,20 +886,55 @@ class TUHEEGEpilepsy:
         df_smallest = df[df["subject"].isin(smallest_n_windows_count.index)][["subject", "duration","n_windows"]].sort_values(["subject","n_windows" ])
         logger.info(f'Durations of subjects with the lowest number of windows:\n{df_smallest}')
         
+        total_available = int(subject_window_counts.sum())
+        n_subjects = int(subject_window_counts.shape[0])
+        strict_min = int(subject_window_counts.min())
+
         if balance_per_subject:
-            limit_per_subject = int(subject_window_counts.min())
-            idx_limit_subject = subject_window_counts.idxmin()
-            duration_limit_subject = df[df['subject'] == idx_limit_subject]['duration']
-            windows_limit_subject = df[df['subject'] == idx_limit_subject]['n_windows']
-            logger.info(f"Subject '{idx_limit_subject}' with total duration {duration_limit_subject.sum():.2f}s.")
-            logger.info(f"Subject '{idx_limit_subject}' durations: {duration_limit_subject.tolist()}")
-            logger.info(f"Subject '{idx_limit_subject}' windows: {windows_limit_subject.tolist()}")
-            logger.info(f"Balancing: Limiting to {limit_per_subject} windows per subject.")
+            if max_windows_per_subject is not None:
+                # Soft balance: cap each subject at max_windows_per_subject;
+                # subjects with fewer keep all they have (the slice in
+                # _generate_windows_list takes min(actual, limit)). Uses far more
+                # data than clamping every subject to the global minimum (strict
+                # balance), at the cost of mild per-subject imbalance.
+                limit_per_subject = int(max_windows_per_subject)
+            else:
+                # Strict balance: every subject contributes the global-minimum count.
+                limit_per_subject = strict_min
+            mode_str = "soft cap" if max_windows_per_subject is not None else "strict global-min"
+            logger.info(
+                f"Balancing ({mode_str}): limiting to {limit_per_subject} windows per subject "
+                f"(fewest-window subject '{subject_window_counts.idxmin()}' has {strict_min})."
+            )
             if limit_per_subject == 0:
-                raise ValueError("Balancing requested but at least one subject has 0 valid windows.")
+                raise ValueError("Balancing requested but the per-subject limit is 0.")
         else:
-            limit_per_subject = None # Use all
-            logger.info("Using all available windows (unbalanced).")
+            limit_per_subject = (
+                int(max_windows_per_subject) if max_windows_per_subject is not None else None
+            )
+            logger.info(
+                "Unbalanced: "
+                + (
+                    f"capping at {limit_per_subject} windows per subject."
+                    if limit_per_subject is not None
+                    else "using all available windows."
+                )
+            )
+
+        # Quantify how much of the available window budget the limit keeps, so the
+        # cost of balancing is visible (the strict global-min clamp can discard the
+        # large majority of windows).
+        kept = (
+            int(subject_window_counts.clip(upper=limit_per_subject).sum())
+            if limit_per_subject is not None
+            else total_available
+        )
+        logger.info(
+            f"Window budget: {kept} / {total_available} kept "
+            f"({100 * kept / max(total_available, 1):.1f}%) across {n_subjects} subjects; "
+            f"per-subject window counts min={strict_min}, "
+            f"median={int(subject_window_counts.median())}, max={int(subject_window_counts.max())}."
+        )
         return df, limit_per_subject
 
     def _generate_windows_list(
@@ -982,6 +1020,7 @@ class TUHEEGEpilepsy:
         idx_list: Optional[List[str]],
         dictionary_learning: bool,
         n_windows_per_subject: Optional[int],
+        max_windows_per_subject: Optional[int],
         stratify_by: str,
         mode: str,
         filter_freq: Optional[List[float]],
@@ -1026,8 +1065,11 @@ class TUHEEGEpilepsy:
                 raise ValueError("Overlap must be < 1.0")
             logger.info(f"Window length: {window_len_s}s, Overlap: {overlap_pct*100}%, Stride: {stride_s}s")
 
-            df, limit_per_subject = self._calculate_limit_per_subject(df, window_len_s, stride_s, balance_per_subject, unit='seconds')
-            
+            df, limit_per_subject = self._calculate_limit_per_subject(
+                df, window_len_s, stride_s, balance_per_subject,
+                max_windows_per_subject=max_windows_per_subject, unit='seconds',
+            )
+
             # 3. Generate Window List
             window_df = self._generate_windows_list(df, window_len_s, stride_s, shuffle_windows, limit_per_subject, rng, unit='seconds')
 

@@ -5,6 +5,12 @@ train_val_test_split: [0.8, 0.1, 0.1]
 window_len_min: 5 # 5 minutes
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 overlap_pct: 0.0
+# Per-subject window cap. null = strict balancing (every subject clamped to the
+# global-minimum subject's window count, which discards most of the corpus). Set
+# an integer (e.g. 20) for soft balancing: keep min(actual, cap) per subject, so
+# short subjects keep all and long ones are capped. The run log prints a "Window
+# budget: kept / available" line so the effect is visible.
+max_windows_per_subject: null
 signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources)
 ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
 # (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;
