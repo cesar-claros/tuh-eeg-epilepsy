@@ -863,6 +863,13 @@ class TUHEEGEpilepsy:
             logger.error(f"Failed to build brain-IC regions for {raw_path.name}: {e}")
             return None
 
+    @staticmethod
+    def _windowed_tensor_gb(
+        n_windows: int, n_channels: int, n_samples: int, bytes_per: int = 4
+    ) -> float:
+        """Estimate the windowed-tensor size in GB for a given shape and dtype width."""
+        return n_windows * n_channels * n_samples * bytes_per / 1e9
+
     def _calculate_limit_per_subject(
             self,
             df:pd.DataFrame,
@@ -1072,6 +1079,36 @@ class TUHEEGEpilepsy:
 
             # 3. Generate Window List
             window_df = self._generate_windows_list(df, window_len_s, stride_s, shuffle_windows, limit_per_subject, rng, unit='seconds')
+
+        # Pre-flight memory estimate: the loader materializes every window in RAM
+        # (float64 while processing, float32 once stacked), so memory scales with
+        # the planned window count. Log the projected size before allocating so an
+        # oversized configuration is visible up front rather than via an OOM kill.
+        n_planned = len(window_df)
+        est_sfreq = float(df['sfreq'].min()) if 'sfreq' in df.columns and len(df) else 0.0
+        est_samples = int(window_len_s * est_sfreq)
+        if mode == 'brain_ic':
+            est_channels = len(TUHEEGEpilepsy.CANONICAL_REGIONS)
+        elif 'montage' in df.columns:
+            montage_sets = [
+                set(self.montages[m]['channels'])
+                for m in df['montage'].unique()
+                if m in self.montages
+            ]
+            est_channels = len(set.intersection(*montage_sets)) if montage_sets else 0
+        else:
+            est_channels = 0
+        if est_samples > 0 and est_channels > 0:
+            gb_resident = self._windowed_tensor_gb(n_planned, est_channels, est_samples, 4)
+            gb_peak = self._windowed_tensor_gb(n_planned, est_channels, est_samples, 8) * 2.5
+            logger.info(
+                f"Pre-flight memory estimate: {n_planned} windows x {est_channels} ch x "
+                f"{est_samples} samp (~{est_sfreq:.0f} Hz) -> ~{gb_resident:.1f} GB resident "
+                f"(float32); est. peak ~{gb_peak:.1f} GB during load (float64 + copies). "
+                f"Lower data.max_windows_per_subject or data.window_len_min if this exceeds node RAM."
+            )
+        else:
+            logger.warning("Pre-flight memory estimate skipped (missing sfreq/montage info).")
 
         # 3.5 Handle Data Splitting (Assign splits to rows)
         # Default split is 'all' if no splits provided

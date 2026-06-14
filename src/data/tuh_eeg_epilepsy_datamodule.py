@@ -77,6 +77,7 @@ class TUHEEGDataModule(LightningDataModule):
         brain_ic_min_gof: float = 0.0,
         brain_ic_use_dipoles: bool = True,
         max_windows_per_subject: int | None = None,
+        build_dict_learning_set: bool = False,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -126,6 +127,12 @@ class TUHEEGDataModule(LightningDataModule):
             subject clamped to the global-minimum subject's count), which can
             discard most of the corpus. Set a value (e.g. 20) to use far more data
             at the cost of mild per-subject imbalance.
+        build_dict_learning_set : bool, default=False
+            If True, also load the short-window set for dictionary learning. It is
+            off by default because its result is not consumed anywhere (HYDRA uses
+            random kernels), so enabling it only re-reads EDF windows and holds an
+            extra tensor in RAM. Turn it on only when an actual dictionary-learning
+            step is wired up.
 
         """
         super().__init__()
@@ -148,6 +155,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
         self.max_windows_per_subject = max_windows_per_subject
+        self.build_dict_learning_set = build_dict_learning_set
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -251,29 +259,35 @@ class TUHEEGDataModule(LightningDataModule):
             self.val_df = data['val'][2]
             self.test_df = data['test'][2]
 
-            # Split the dataset for dictionary learning
-            data_dictionary_learning = tuh.load_data(
-                mode = self.signal_mode,
-                target_name = 'epilepsy',
-                preload = True,
-                rename_channels = True,
-                set_montage = False,
-                n_jobs = 1,
-                # New args for balanced windowing
-                window_len_s = self.dict_learning_window_len_s, # dictionary-learning window length (seconds)
-                dictionary_learning=True,
-                n_windows_per_subject=10, # limit to 10 windows per subject for dictionary learning to manage memory and training time. These will be randomly selected from the full set of possible windows for each subject.
-                overlap_pct = self.overlap_pct,
-                balance_per_subject = True,
-                include_seizures = False,
-                fix_length_mode = 'resample', # 'resample', 'pad', or None
-                shuffle_windows = True,
-                seed = self.seed,
-                idx_list = self.train_df['subject'].unique().tolist(), # only use training subjects for dictionary learning
-                stratify_by = 'epilepsy',
-            )
-            logger.info(f"Dictionary Learning Dataset: Generated {data_dictionary_learning[0].shape} windows for dictionary learning.")
-            logger.info(f"Example window shape for dictionary learning:\n {data_dictionary_learning[-1].head(30)}")
+            # Optionally build the short-window set for dictionary learning. Off
+            # by default: its result is not consumed anywhere (HYDRA uses random
+            # kernels), so enabling it only re-reads EDF windows for every training
+            # subject and holds an extra tensor in RAM. Enable via
+            # data.build_dict_learning_set when an actual dictionary-learning step
+            # is wired up.
+            if self.build_dict_learning_set:
+                data_dictionary_learning = tuh.load_data(
+                    mode = self.signal_mode,
+                    target_name = 'epilepsy',
+                    preload = True,
+                    rename_channels = True,
+                    set_montage = False,
+                    n_jobs = 1,
+                    # New args for balanced windowing
+                    window_len_s = self.dict_learning_window_len_s, # dictionary-learning window length (seconds)
+                    dictionary_learning=True,
+                    n_windows_per_subject=10, # limit to 10 windows per subject for dictionary learning to manage memory and training time. These will be randomly selected from the full set of possible windows for each subject.
+                    overlap_pct = self.overlap_pct,
+                    balance_per_subject = True,
+                    include_seizures = False,
+                    fix_length_mode = 'resample', # 'resample', 'pad', or None
+                    shuffle_windows = True,
+                    seed = self.seed,
+                    idx_list = self.train_df['subject'].unique().tolist(), # only use training subjects for dictionary learning
+                    stratify_by = 'epilepsy',
+                )
+                logger.info(f"Dictionary Learning Dataset: Generated {data_dictionary_learning[0].shape} windows for dictionary learning.")
+                logger.info(f"Example window shape for dictionary learning:\n {data_dictionary_learning[-1].head(30)}")
 
 
     def train_dataloader(self) -> DataLoader[Any]:
