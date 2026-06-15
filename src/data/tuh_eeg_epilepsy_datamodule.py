@@ -78,6 +78,7 @@ class TUHEEGDataModule(LightningDataModule):
         brain_ic_use_dipoles: bool = True,
         max_windows_per_subject: int | None = None,
         build_dict_learning_set: bool = False,
+        lazy_loading: bool = False,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -133,6 +134,13 @@ class TUHEEGDataModule(LightningDataModule):
             random kernels), so enabling it only re-reads EDF windows and holds an
             extra tensor in RAM. Turn it on only when an actual dictionary-learning
             step is wired up.
+        lazy_loading : bool, default=False
+            If True, stream windows from disk on demand (a `WindowDataset` read in
+            the DataLoader workers) instead of materializing the whole dataset in
+            RAM. Resident memory becomes O(batch) instead of O(N). Supports
+            signal_mode 'raw' and 'brain_ic' only; harmonization targets (channel
+            set, resample rate) are fixed up front. Draft: validate that it selects
+            the same windows as the eager path via the windows_*.csv dump.
 
         """
         super().__init__()
@@ -156,6 +164,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
         self.max_windows_per_subject = max_windows_per_subject
         self.build_dict_learning_set = build_dict_learning_set
+        self.lazy_loading = lazy_loading
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -229,35 +238,64 @@ class TUHEEGDataModule(LightningDataModule):
                 brain_ic_use_dipoles=self.brain_ic_use_dipoles,
             )
 
-            # Split the dataset
-            data = tuh.load_data(
-                mode = self.signal_mode,
-                target_name = 'epilepsy',
-                preload = True,
-                rename_channels = True,
-                set_montage = False,
-                n_jobs = 1,
-                # New args for balanced windowing
-                window_len_s = self.window_len_min*60, # 5 minutes
-                overlap_pct = self.overlap_pct,
-                balance_per_subject = True,
-                max_windows_per_subject = self.max_windows_per_subject,
-                include_seizures = False,
-                fix_length_mode = 'resample', # 'resample', 'pad', or None
-                shuffle_windows = True,
-                seed = self.seed,
-                splits = {'train': self.train_val_test_split[0],
-                          'val': self.train_val_test_split[1],
-                          'test': self.train_val_test_split[2]},
-                stratify_by = 'epilepsy',
-            )
-            self.data_train = TensorDataset(data['train'][0], data['train'][1].squeeze())
-            self.data_val = TensorDataset(data['val'][0], data['val'][1].squeeze())
-            self.data_test = TensorDataset(data['test'][0], data['test'][1].squeeze())
+            split_ratios = {'train': self.train_val_test_split[0],
+                            'val': self.train_val_test_split[1],
+                            'test': self.train_val_test_split[2]}
 
-            self.train_df = data['train'][2]
-            self.val_df = data['val'][2]
-            self.test_df = data['test'][2]
+            if self.lazy_loading:
+                # Stream windows from disk on demand (O(batch) RAM). The window
+                # selection and split reuse the engine's plan helpers, so they
+                # match the eager path; only the signal load is deferred.
+                from src.data.components.window_dataset import build_lazy_datasets
+                lazy = build_lazy_datasets(
+                    tuh,
+                    window_len_s=self.window_len_min * 60,
+                    overlap_pct=self.overlap_pct,
+                    balance_per_subject=True,
+                    max_windows_per_subject=self.max_windows_per_subject,
+                    include_seizures=False,
+                    shuffle_windows=True,
+                    seed=self.seed,
+                    splits=split_ratios,
+                    stratify_by='epilepsy',
+                    mode=self.signal_mode,
+                    filter_freq=None,
+                    target_name='epilepsy',
+                    pick_channels=None,
+                    rename_channels=True,
+                    set_montage=False,
+                )
+                self.data_train, self.train_df = lazy['train']
+                self.data_val, self.val_df = lazy['val']
+                self.data_test, self.test_df = lazy['test']
+            else:
+                # Eager: materialize the whole windowed dataset in RAM.
+                data = tuh.load_data(
+                    mode = self.signal_mode,
+                    target_name = 'epilepsy',
+                    preload = True,
+                    rename_channels = True,
+                    set_montage = False,
+                    n_jobs = 1,
+                    # New args for balanced windowing
+                    window_len_s = self.window_len_min*60, # 5 minutes
+                    overlap_pct = self.overlap_pct,
+                    balance_per_subject = True,
+                    max_windows_per_subject = self.max_windows_per_subject,
+                    include_seizures = False,
+                    fix_length_mode = 'resample', # 'resample', 'pad', or None
+                    shuffle_windows = True,
+                    seed = self.seed,
+                    splits = split_ratios,
+                    stratify_by = 'epilepsy',
+                )
+                self.data_train = TensorDataset(data['train'][0], data['train'][1].squeeze())
+                self.data_val = TensorDataset(data['val'][0], data['val'][1].squeeze())
+                self.data_test = TensorDataset(data['test'][0], data['test'][1].squeeze())
+
+                self.train_df = data['train'][2]
+                self.val_df = data['val'][2]
+                self.test_df = data['test'][2]
 
             # Optionally build the short-window set for dictionary learning. Off
             # by default: its result is not consumed anywhere (HYDRA uses random

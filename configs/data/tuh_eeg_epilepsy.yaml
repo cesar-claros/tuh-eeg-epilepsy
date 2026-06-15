@@ -5,6 +5,7 @@ train_val_test_split: [0.8, 0.1, 0.1]
 window_len_min: 5 # 5 minutes
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 build_dict_learning_set: false # load the (currently unused) dictionary-learning short-window set; off saves EDF reads + RAM
+lazy_loading: false # stream windows from disk on demand (O(batch) RAM) instead of materializing all upfront; supports signal_mode raw/brain_ic
 overlap_pct: 0.0
 # Per-subject window cap. null = strict balancing (every subject clamped to the
 # global-minimum subject's window count, which discards most of the corpus). Set
