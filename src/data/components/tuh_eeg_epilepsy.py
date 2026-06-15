@@ -26,6 +26,18 @@ import traceback
 import torch
 import numpy as np
 
+# The benign mixed-sampling-frequency edge-artifact warning is emitted both when
+# reading (read_raw_edf) and when materializing data (load_data) for preload=False
+# EDFs. Our EEG channels are at the native (maximum) rate so they are never
+# resampled, and any resampled non-EEG channels are dropped before features are
+# computed, so silence it process-wide. Registered at import, so DataLoader workers
+# (which run the per-window load) inherit / re-register it.
+warnings.filterwarnings(
+    "ignore",
+    message=".*mixed sampling frequencies.*",
+    category=RuntimeWarning,
+)
+
 # Local imports
 try:
     from . import utils
