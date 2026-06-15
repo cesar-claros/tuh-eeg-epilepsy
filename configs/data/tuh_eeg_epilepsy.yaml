@@ -5,7 +5,14 @@ train_val_test_split: [0.8, 0.1, 0.1]
 window_len_min: 5 # 5 minutes
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 build_dict_learning_set: false # load the (currently unused) dictionary-learning short-window set; off saves EDF reads + RAM
-lazy_loading: false # stream windows from disk on demand (O(batch) RAM) instead of materializing all upfront; supports signal_mode raw/brain_ic
+lazy_loading: false # stream windows from disk on demand (O(batch) RAM) instead of materializing all upfront; supports signal_mode raw/brain_ic/ic_bag
+# Reuse a fixed window set for reproducibility / identical windows across signal
+# modes: point these at a previous run's windows_{train,val,test}.csv. When all
+# three are set the plan is loaded from them instead of generated (requires
+# lazy_loading). Provide all three or none.
+windows_train_csv: null
+windows_val_csv: null
+windows_test_csv: null
 overlap_pct: 0.0
 # Per-subject window cap. null = strict balancing (every subject clamped to the
 # global-minimum subject's window count, which discards most of the corpus). Set

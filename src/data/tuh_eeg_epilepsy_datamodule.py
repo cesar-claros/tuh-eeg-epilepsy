@@ -82,6 +82,9 @@ class TUHEEGDataModule(LightningDataModule):
         ic_bag_max_k: int = 20,
         ic_bag_sign_normalize: bool = True,
         ic_bag_rank_by: str = 'variance',
+        windows_train_csv: str | None = None,
+        windows_val_csv: str | None = None,
+        windows_test_csv: str | None = None,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -152,6 +155,12 @@ class TUHEEGDataModule(LightningDataModule):
         ic_bag_rank_by : str, default='variance'
             For 'ic_bag', ranking used to pick the top max_k ICs ('variance' |
             'prob'); only matters when a window has more than max_k kept ICs.
+        windows_train_csv, windows_val_csv, windows_test_csv : str | None, default=None
+            Paths to a previous run's ``windows_{train,val,test}.csv``. When all
+            three are given, the window plan is loaded from them (each window's
+            recording is matched by path) instead of being generated, so different
+            signal modes / runs train and evaluate on the identical window set.
+            Requires ``lazy_loading=True``; provide all three or none.
 
         """
         super().__init__()
@@ -179,6 +188,9 @@ class TUHEEGDataModule(LightningDataModule):
         self.ic_bag_max_k = ic_bag_max_k
         self.ic_bag_sign_normalize = ic_bag_sign_normalize
         self.ic_bag_rank_by = ic_bag_rank_by
+        self.windows_train_csv = windows_train_csv
+        self.windows_val_csv = windows_val_csv
+        self.windows_test_csv = windows_test_csv
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -259,6 +271,24 @@ class TUHEEGDataModule(LightningDataModule):
                             'val': self.train_val_test_split[1],
                             'test': self.train_val_test_split[2]}
 
+            # Optional fixed window set from a previous run's windows_*.csv.
+            csv_paths = [self.windows_train_csv, self.windows_val_csv, self.windows_test_csv]
+            window_csvs = None
+            if any(csv_paths):
+                if not all(csv_paths):
+                    raise ValueError(
+                        "Provide all three windows_{train,val,test}_csv, or none."
+                    )
+                if not self.lazy_loading:
+                    raise NotImplementedError(
+                        "Window CSV input requires data.lazy_loading=true."
+                    )
+                window_csvs = {
+                    'train': self.windows_train_csv,
+                    'val': self.windows_val_csv,
+                    'test': self.windows_test_csv,
+                }
+
             if self.lazy_loading:
                 # Stream windows from disk on demand (O(batch) RAM). The window
                 # selection and split reuse the engine's plan helpers, so they
@@ -284,6 +314,7 @@ class TUHEEGDataModule(LightningDataModule):
                     ic_bag_max_k=self.ic_bag_max_k,
                     ic_bag_sign_normalize=self.ic_bag_sign_normalize,
                     ic_bag_rank_by=self.ic_bag_rank_by,
+                    window_csvs=window_csvs,
                 )
                 self.data_train, self.train_df = lazy['train']
                 self.data_val, self.val_df = lazy['val']

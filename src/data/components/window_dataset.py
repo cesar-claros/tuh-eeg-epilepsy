@@ -285,6 +285,101 @@ class WindowDataset(Dataset):
         return torch.tensor(vals)
 
 
+def _plan_from_csv(engine: TUHEEGEpilepsy, csv_path: str) -> pd.DataFrame:
+    """Rebuild a window plan from a dumped ``windows_*.csv``, re-attaching descriptions.
+
+    Each window's recording is looked up in the engine's descriptions (by path) to
+    recover the full description row the loader needs (montage, sfreq, ...), so a
+    fixed window set can be reused across runs / signal modes for reproducibility.
+    """
+    plan_csv = pd.read_csv(csv_path)
+    desc_by_path = {str(row['path']): row for _, row in engine.descriptions.iterrows()}
+    has_idx = 'window_idx_within_subject' in plan_csv.columns
+    records = []
+    missing = 0
+    for _, r in plan_csv.iterrows():
+        desc = desc_by_path.get(str(r['path']))
+        if desc is None:
+            missing += 1
+            continue
+        records.append({
+            'subject': desc['subject'],
+            'path': desc['path'],
+            'start': float(r['start']),
+            'end': float(r['end']),
+            'epilepsy': desc['epilepsy'],
+            't_id': desc.get('t_id', 'unknown'),
+            'window_idx_within_subject': (
+                int(r['window_idx_within_subject']) if has_idx else len(records)
+            ),
+            'description_row': desc,
+        })
+    if missing:
+        logger.warning(
+            f"{missing} of {len(plan_csv)} rows in {csv_path} had no matching recording; skipped."
+        )
+    if not records:
+        raise ValueError(f"No usable windows loaded from {csv_path}.")
+    return pd.DataFrame(records)
+
+
+def _build_lazy_from_csv(
+    engine: TUHEEGEpilepsy,
+    window_csvs: dict,
+    *,
+    window_len_s: float,
+    mode: str,
+    filter_freq: Optional[List[float]],
+    target_name: str,
+    pick_channels: Optional[List[str]],
+    rename_channels: bool,
+    set_montage: bool,
+    ic_bag_max_k: int,
+    ic_bag_sign_normalize: bool,
+    ic_bag_rank_by: str,
+) -> dict:
+    """Build per-split lazy datasets from fixed window CSVs (one path per split).
+
+    The split is given by which CSV a window came from (no re-splitting). Targets
+    (channel set, resample rate) are derived from the recordings the CSVs name, so
+    runs sharing the same CSVs get identical windows and targets.
+    """
+    plans = {sp: _plan_from_csv(engine, path) for sp, path in window_csvs.items()}
+    all_rows = pd.concat(plans.values(), ignore_index=True)
+    target_sfreq = float(min(d['sfreq'] for d in all_rows['description_row']))
+    target_len = int(window_len_s * target_sfreq)
+    if mode == 'brain_ic':
+        target_channels = sorted(TUHEEGEpilepsy.CANONICAL_REGIONS)
+    elif mode == 'ic_bag':
+        target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
+    else:
+        target_channels = _scan_common_channels(all_rows, engine.montages, rename_channels)
+    logger.info(
+        f"lazy_loading (fixed window CSVs): {len(all_rows)} windows across {len(plans)} splits; "
+        f"{len(target_channels)} channels, {target_sfreq:.0f} Hz, {target_len} samples."
+    )
+    if isinstance(target_name, str):
+        target_cols = [target_name]
+    elif target_name:
+        target_cols = list(target_name)
+    else:
+        target_cols = ['epilepsy']
+
+    out: dict = {}
+    for split_name, plan in plans.items():
+        dataset = WindowDataset(
+            plan, mode, target_channels, target_sfreq, target_len,
+            engine.montages, filter_freq, rename_channels, set_montage, pick_channels,
+            engine.ica_keep_labels, engine.brain_ic_min_gof, engine.brain_ic_use_dipoles,
+            target_cols,
+            ic_bag_max_k=ic_bag_max_k,
+            ic_bag_sign_normalize=ic_bag_sign_normalize,
+            ic_bag_rank_by=ic_bag_rank_by,
+        )
+        out[split_name] = (dataset, plan.drop(columns=['description_row']))
+    return out
+
+
 def build_lazy_datasets(
     engine: TUHEEGEpilepsy,
     *,
@@ -307,6 +402,7 @@ def build_lazy_datasets(
     ic_bag_max_k: int = 20,
     ic_bag_sign_normalize: bool = True,
     ic_bag_rank_by: str = 'variance',
+    window_csvs: Optional[dict] = None,
 ) -> dict:
     """Build ``{split: (WindowDataset, metadata_df)}`` without loading any signal.
 
@@ -317,6 +413,18 @@ def build_lazy_datasets(
     if mode in ('ica', 'ica_clean'):
         raise NotImplementedError(
             f"lazy_loading does not support mode='{mode}' yet; use the eager path."
+        )
+
+    # Fixed window set (reproducibility / identical windows across signal modes):
+    # load the plan from the provided per-split CSVs instead of generating one.
+    if window_csvs is not None:
+        return _build_lazy_from_csv(
+            engine, window_csvs,
+            window_len_s=window_len_s, mode=mode, filter_freq=filter_freq,
+            target_name=target_name, pick_channels=pick_channels,
+            rename_channels=rename_channels, set_montage=set_montage,
+            ic_bag_max_k=ic_bag_max_k, ic_bag_sign_normalize=ic_bag_sign_normalize,
+            ic_bag_rank_by=ic_bag_rank_by,
         )
 
     rng = np.random.RandomState(seed)
