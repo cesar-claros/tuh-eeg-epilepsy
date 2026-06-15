@@ -8,3 +8,9 @@ Cs:
 n_jobs: -1
 max_iter: 500
 verbose: 1
+# null = unweighted (default). Set to 'balanced' to counteract window-level class
+# imbalance (epilepsy windows outnumber non-epilepsy, more so at higher
+# max_windows_per_subject), which otherwise biases the decision threshold toward
+# the positive class (high sensitivity, low specificity). Override on the CLI with
+# model.class_weight=balanced.
+class_weight: null

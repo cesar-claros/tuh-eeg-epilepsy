@@ -5,3 +5,6 @@ alphas:
   stop: 3
   num: 10
 cv: 5
+# null = unweighted (default); 'balanced' counteracts window-level class imbalance.
+# Override on the CLI with model.class_weight=balanced.
+class_weight: null
