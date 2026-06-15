@@ -176,13 +176,7 @@ class TUHEEGEpilepsy:
         
         # Read raw edf file
         try:
-            raw = mne.io.read_raw_edf(
-                file_path, 
-                include=channels,
-                preload=preload,
-                infer_types=False, 
-                verbose="error",
-            )
+            raw = TUHEEGEpilepsy._read_raw_edf(file_path, include=channels, preload=preload)
         except Exception as e:
             logger.error(f"Failed to read {file_path}: {e}")
             return None
@@ -969,6 +963,35 @@ class TUHEEGEpilepsy:
         """Estimate the windowed-tensor size in GB for a given shape and dtype width."""
         return n_windows * n_channels * n_samples * bytes_per / 1e9
 
+    @staticmethod
+    def _read_raw_edf(
+        file_path: Path,
+        include: Optional[List[str]] = None,
+        preload: bool = False,
+    ) -> mne.io.BaseRaw:
+        """Read an EDF, silencing the benign mixed-sampling-frequency warning.
+
+        With ``preload=False`` MNE upsamples any lower-rate channels on the fly and
+        warns about edge artifacts. In our pipeline the EEG channels are at the
+        native (maximum) rate, so they are never resampled, and any resampled
+        non-EEG channels are dropped before features are computed; the warning does
+        not affect the result. Suppress it so the per-window logs (one read per
+        window in lazy mode) stay clean.
+        """
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*mixed sampling frequencies.*",
+                category=RuntimeWarning,
+            )
+            return mne.io.read_raw_edf(
+                file_path,
+                include=include,
+                preload=preload,
+                infer_types=False,
+                verbose="error",
+            )
+
     def _calculate_limit_per_subject(
             self,
             df:pd.DataFrame,
@@ -1330,14 +1353,8 @@ class TUHEEGEpilepsy:
                 # However, for 5 min windows, full load might be huge.
                 # Efficient way: read_raw_edf(preload=False), then crop, then load_data()
                 
-                raw = mne.io.read_raw_edf(
-                    file_path, 
-                    include=ch_names,
-                    preload=False,
-                    infer_types=False, 
-                    verbose="error",
-                )
-                
+                raw = TUHEEGEpilepsy._read_raw_edf(file_path, include=ch_names, preload=False)
+
                  # Basic Filter (should be done before cropping ideally to avoid edge artifacts, or crop with margin)
                  # If we filter AFTER cropping, we need margin. 
                  # Given user request for "load only necessary", we accept edge artifacts or assume data is clean/prefiltered,

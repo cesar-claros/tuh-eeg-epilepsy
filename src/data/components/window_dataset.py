@@ -121,9 +121,7 @@ def _scan_common_channels(
         seen.add(path)
         include = list(montages[desc['montage']]['channels'])
         try:
-            raw = mne.io.read_raw_edf(
-                path, include=include, preload=False, infer_types=False, verbose='error'
-            )
+            raw = TUHEEGEpilepsy._read_raw_edf(path, include=include, preload=False)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Channel scan skipped {path}: {e}")
             continue
@@ -232,9 +230,7 @@ class WindowDataset(Dataset):
         else:
             include = list(self.montages[desc['montage']]['channels'])
         try:
-            raw = mne.io.read_raw_edf(
-                desc['path'], include=include, preload=False, infer_types=False, verbose='error'
-            )
+            raw = TUHEEGEpilepsy._read_raw_edf(desc['path'], include=include, preload=False)
             raw.crop(tmin=row['start'], tmax=row['end'], include_tmax=False)
             raw.load_data()
 
