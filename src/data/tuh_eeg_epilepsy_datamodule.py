@@ -79,6 +79,9 @@ class TUHEEGDataModule(LightningDataModule):
         max_windows_per_subject: int | None = None,
         build_dict_learning_set: bool = False,
         lazy_loading: bool = False,
+        ic_bag_max_k: int = 20,
+        ic_bag_sign_normalize: bool = True,
+        ic_bag_rank_by: str = 'variance',
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -138,9 +141,17 @@ class TUHEEGDataModule(LightningDataModule):
             If True, stream windows from disk on demand (a `WindowDataset` read in
             the DataLoader workers) instead of materializing the whole dataset in
             RAM. Resident memory becomes O(batch) instead of O(N). Supports
-            signal_mode 'raw' and 'brain_ic' only; harmonization targets (channel
-            set, resample rate) are fixed up front. Draft: validate that it selects
-            the same windows as the eager path via the windows_*.csv dump.
+            signal_mode 'raw', 'brain_ic' and 'ic_bag' only; harmonization targets
+            (channel set, resample rate) are fixed up front. Draft: validate that
+            it selects the same windows as the eager path via the windows_*.csv dump.
+        ic_bag_max_k : int, default=20
+            For signal_mode='ic_bag', the number of IC slots per window (pad /
+            truncate). Pair with feature=ic_bag_transformer.
+        ic_bag_sign_normalize : bool, default=True
+            For 'ic_bag', sign-normalize each IC source by its topography.
+        ic_bag_rank_by : str, default='variance'
+            For 'ic_bag', ranking used to pick the top max_k ICs ('variance' |
+            'prob'); only matters when a window has more than max_k kept ICs.
 
         """
         super().__init__()
@@ -165,6 +176,9 @@ class TUHEEGDataModule(LightningDataModule):
         self.max_windows_per_subject = max_windows_per_subject
         self.build_dict_learning_set = build_dict_learning_set
         self.lazy_loading = lazy_loading
+        self.ic_bag_max_k = ic_bag_max_k
+        self.ic_bag_sign_normalize = ic_bag_sign_normalize
+        self.ic_bag_rank_by = ic_bag_rank_by
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -236,6 +250,9 @@ class TUHEEGDataModule(LightningDataModule):
                 ica_keep_labels=self.ica_keep_labels,
                 brain_ic_min_gof=self.brain_ic_min_gof,
                 brain_ic_use_dipoles=self.brain_ic_use_dipoles,
+                ic_bag_max_k=self.ic_bag_max_k,
+                ic_bag_sign_normalize=self.ic_bag_sign_normalize,
+                ic_bag_rank_by=self.ic_bag_rank_by,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],
@@ -264,6 +281,9 @@ class TUHEEGDataModule(LightningDataModule):
                     pick_channels=None,
                     rename_channels=True,
                     set_montage=False,
+                    ic_bag_max_k=self.ic_bag_max_k,
+                    ic_bag_sign_normalize=self.ic_bag_sign_normalize,
+                    ic_bag_rank_by=self.ic_bag_rank_by,
                 )
                 self.data_train, self.train_df = lazy['train']
                 self.data_val, self.val_df = lazy['val']

@@ -13,12 +13,15 @@ overlap_pct: 0.0
 # short subjects keep all and long ones are capped. The run log prints a "Window
 # budget: kept / available" line so the effect is visible.
 max_windows_per_subject: null
-signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources)
+signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources) | 'ic_bag' (padded bag of IC sources; pair with feature=ic_bag_transformer)
 ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
 # (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;
 #  brain_ic uses these labels' ICs directly, so set [brain] for brain-only regional sources)
 brain_ic_min_gof: 0.0 # brain_ic: drop ICs whose dipole goodness of fit (percent) is below this (0 = keep all)
 brain_ic_use_dipoles: true # brain_ic: assign regions from cached dipoles (-ica_dipoles.csv); false uses the dominant-electrode heuristic
+ic_bag_max_k: 20 # ic_bag: IC slots per window (pad/truncate); memory ~ max_k channels
+ic_bag_sign_normalize: true # ic_bag: sign-normalize sources by topography
+ic_bag_rank_by: variance # ic_bag: rank ICs for top-k selection (variance | prob); used only when K > max_k
 batch_size: 32 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
 num_workers: 7
 seed: 42

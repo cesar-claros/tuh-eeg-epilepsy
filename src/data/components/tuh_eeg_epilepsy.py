@@ -83,6 +83,9 @@ class TUHEEGEpilepsy:
         ica_keep_labels: tuple = ('brain', 'other'),
         brain_ic_min_gof: float = 0.0,
         brain_ic_use_dipoles: bool = True,
+        ic_bag_max_k: int = 20,
+        ic_bag_sign_normalize: bool = True,
+        ic_bag_rank_by: str = 'variance',
     ):
 
         self.data_dir = data_dir
@@ -95,6 +98,12 @@ class TUHEEGEpilepsy:
         # ('-ica_dipoles.csv') rather than the dominant-electrode heuristic.
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
+        # 'ic_bag' options: max ICs per window (pad/truncate), whether to
+        # sign-normalize sources by topography, and the ranking used to pick the
+        # top ICs when there are more than ic_bag_max_k.
+        self.ic_bag_max_k = ic_bag_max_k
+        self.ic_bag_sign_normalize = ic_bag_sign_normalize
+        self.ic_bag_rank_by = ic_bag_rank_by
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -864,6 +873,96 @@ class TUHEEGEpilepsy:
             return None
 
     @staticmethod
+    def _ic_bag_sources(
+        raw: mne.io.BaseRaw,
+        raw_path: Path,
+        keep_labels: tuple = ('brain',),
+        max_k: int = 20,
+        sign_normalize: bool = True,
+        rank_by: str = 'variance',
+    ) -> Optional[Tuple[np.ndarray, List[str]]]:
+        """Build a padded bag of kept IC sources for univariate-HYDRA pooling.
+
+        Selects the components whose ICLabel is in ``keep_labels``, optionally
+        sign-normalizes each by its topography (dominant projection made positive),
+        ranks them, takes the top ``max_k``, and stacks them into a fixed
+        ``(max_k, n_times)`` array (zero-padded if fewer kept ICs). Channel names
+        are positional placeholders (``ic_0`` ...); the downstream
+        ``ICBagTransformer`` pools over them, so slot order does not matter.
+
+        Parameters
+        ----------
+        raw : mne.io.BaseRaw
+            The loaded (cropped) raw recording, with its original channel names.
+        raw_path : Path
+            Path to the original ``.edf`` (used to locate the sibling ICA files).
+        keep_labels : tuple, default=('brain',)
+            ICLabel categories whose components are used.
+        max_k : int, default=20
+            Number of IC slots per window; more kept ICs are truncated to the top
+            ``max_k`` by ``rank_by``, fewer are zero-padded.
+        sign_normalize : bool, default=True
+            If True, flip each source so its dominant topography projection is
+            positive (polarity consistent across recordings).
+        rank_by : str, default='variance'
+            Ranking used to pick the top ``max_k`` ICs: 'variance' (source
+            variance) or 'prob' (ICLabel probability, if available).
+
+        Returns
+        -------
+        (np.ndarray, list[str]) | None
+            ``(data, names)`` with ``data`` of shape (max_k, n_times), or ``None``
+            on missing files / failure / no kept components.
+        """
+        ica_path = raw_path.parent / raw_path.name.replace('.edf', '-ica.fif')
+        labels_path = raw_path.parent / raw_path.name.replace('.edf', '-ica_labels.csv')
+        if not ica_path.exists() or not labels_path.exists():
+            logger.error(f"Missing ICA solution/labels for {raw_path.name}; skipping window.")
+            return None
+        try:
+            ica = mne.preprocessing.read_ica(ica_path, verbose='ERROR')
+            labels_df = pd.read_csv(labels_path, index_col=0)
+            keep = {str(k).strip().lower() for k in keep_labels}
+            labels = labels_df['labels'].astype(str).str.strip().str.lower()
+            keep_idx = labels_df.index[labels.isin(keep)].tolist()
+            if not keep_idx:
+                logger.error(
+                    f"No kept ICs ({sorted(keep)}) for {raw_path.name}; skipping window."
+                )
+                return None
+
+            raw = TUHEEGEpilepsy._align_raw_to_ica(raw, ica, raw_path)
+            if raw is None:
+                return None
+
+            sources = ica.get_sources(raw).get_data()  # (n_components, n_times)
+            topographies = ica.get_components()         # (n_channels, n_components)
+            n_times = sources.shape[1]
+            use_prob = rank_by == 'prob' and 'y_pred_proba' in labels_df.columns
+
+            keys: List[float] = []
+            srcs: List[np.ndarray] = []
+            for j in keep_idx:
+                src = sources[j]
+                if sign_normalize:
+                    topo = topographies[:, j]
+                    if topo[int(np.argmax(np.abs(topo)))] < 0:
+                        src = -src
+                keys.append(float(labels_df['y_pred_proba'].loc[j]) if use_prob else float(np.var(src)))
+                srcs.append(src)
+
+            # Rank descending by key, keep the top max_k.
+            order = np.argsort(keys)[::-1][:max_k]
+            bag = np.zeros((max_k, n_times), dtype=np.float64)
+            for i, idx in enumerate(order):
+                bag[i] = srcs[int(idx)]
+            names = [f'ic_{i}' for i in range(max_k)]
+            return bag, names
+        except Exception as e:
+            logger.error(f"Failed to build IC bag for {raw_path.name}: {e}")
+            return None
+
+    @staticmethod
     def _windowed_tensor_gb(
         n_windows: int, n_channels: int, n_samples: int, bytes_per: int = 4
     ) -> float:
@@ -1089,6 +1188,8 @@ class TUHEEGEpilepsy:
         est_samples = int(window_len_s * est_sfreq)
         if mode == 'brain_ic':
             est_channels = len(TUHEEGEpilepsy.CANONICAL_REGIONS)
+        elif mode == 'ic_bag':
+            est_channels = self.ic_bag_max_k
         elif 'montage' in df.columns:
             montage_sets = [
                 set(self.montages[m]['channels'])
@@ -1210,10 +1311,11 @@ class TUHEEGEpilepsy:
             if mode == 'ica':
                 file_path = desc_row["path_ica"]
                 ch_names = None
-            elif mode in ('ica_clean', 'brain_ic'):
-                # Option 1 (ica_clean) / Option 3 (brain_ic): read ALL channels so
-                # the saved ICA's channels are present, then either back-project to
-                # sensor space (ica_clean) or build the regional IC series (brain_ic).
+            elif mode in ('ica_clean', 'brain_ic', 'ic_bag'):
+                # ica_clean / brain_ic / ic_bag: read ALL channels so the saved
+                # ICA's channels are present, then back-project to sensor space
+                # (ica_clean), build the regional IC series (brain_ic), or build the
+                # padded bag of IC sources (ic_bag).
                 file_path = desc_row["path"]
                 ch_names = None
             else:
@@ -1267,6 +1369,23 @@ class TUHEEGEpilepsy:
                         return None
                     regional_data, region_names = out
                     return regional_data, raw.info['sfreq'], region_names
+
+                # Option (ic_bag): build the padded bag of kept IC sources and
+                # return directly (IC slots are the channels; the ICBagTransformer
+                # pools over them). Bypasses the sensor-space steps below.
+                if mode == 'ic_bag':
+                    out = TUHEEGEpilepsy._ic_bag_sources(
+                        raw,
+                        desc_row['path'],
+                        self.ica_keep_labels,
+                        max_k=self.ic_bag_max_k,
+                        sign_normalize=self.ic_bag_sign_normalize,
+                        rank_by=self.ic_bag_rank_by,
+                    )
+                    if out is None:
+                        return None
+                    bag_data, bag_names = out
+                    return bag_data, raw.info['sfreq'], bag_names
 
                 # Option 1 (ica_clean): keep only ICs whose ICLabel is in
                 # self.ica_keep_labels (default brain + other), back-projected.

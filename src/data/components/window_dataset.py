@@ -11,8 +11,8 @@ resident, only the much smaller feature matrix.
 
 Scope of this draft:
 
-- Supports ``mode='raw'`` and ``mode='brain_ic'``. ``ica`` / ``ica_clean`` raise
-  ``NotImplementedError`` (their harmonization target depends on per-file ICA
+- Supports ``mode='raw'``, ``'brain_ic'`` and ``'ic_bag'``. ``ica`` / ``ica_clean``
+  raise ``NotImplementedError`` (their harmonization target depends on per-file ICA
   channels; use the eager path for those).
 - Harmonization targets (the common channel set and the resample rate) are fixed
   *up front* (the eager path derives them from the loaded batch). The channel set
@@ -191,6 +191,9 @@ class WindowDataset(Dataset):
         brain_ic_min_gof: float,
         brain_ic_use_dipoles: bool,
         target_cols: List[str],
+        ic_bag_max_k: int = 20,
+        ic_bag_sign_normalize: bool = True,
+        ic_bag_rank_by: str = 'variance',
     ) -> None:
         self.plan = plan.reset_index(drop=True)
         self.mode = mode
@@ -206,6 +209,9 @@ class WindowDataset(Dataset):
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
         self.target_cols = list(target_cols)
+        self.ic_bag_max_k = ic_bag_max_k
+        self.ic_bag_sign_normalize = ic_bag_sign_normalize
+        self.ic_bag_rank_by = ic_bag_rank_by
 
     def __len__(self) -> int:
         return len(self.plan)
@@ -221,7 +227,7 @@ class WindowDataset(Dataset):
 
     def _process(self, row: pd.Series) -> Optional[np.ndarray]:
         desc = row['description_row']
-        if self.mode == 'brain_ic':
+        if self.mode in ('brain_ic', 'ic_bag'):
             include = None
         else:
             include = list(self.montages[desc['montage']]['channels'])
@@ -236,6 +242,16 @@ class WindowDataset(Dataset):
                 out = TUHEEGEpilepsy._brain_ic_regional(
                     raw, desc['path'], self.ica_keep_labels,
                     min_gof=self.brain_ic_min_gof, use_dipoles=self.brain_ic_use_dipoles,
+                )
+                if out is None:
+                    return None
+                data, ch_names = out
+                sfreq = raw.info['sfreq']
+            elif self.mode == 'ic_bag':
+                out = TUHEEGEpilepsy._ic_bag_sources(
+                    raw, desc['path'], self.ica_keep_labels,
+                    max_k=self.ic_bag_max_k, sign_normalize=self.ic_bag_sign_normalize,
+                    rank_by=self.ic_bag_rank_by,
                 )
                 if out is None:
                     return None
@@ -292,6 +308,9 @@ def build_lazy_datasets(
     rename_channels: bool,
     set_montage: bool,
     idx_list: Optional[List[str]] = None,
+    ic_bag_max_k: int = 20,
+    ic_bag_sign_normalize: bool = True,
+    ic_bag_rank_by: str = 'variance',
 ) -> dict:
     """Build ``{split: (WindowDataset, metadata_df)}`` without loading any signal.
 
@@ -337,6 +356,10 @@ def build_lazy_datasets(
         # Eager harmonization sorts the common channels alphabetically; match that
         # ordering here so the HYDRA features are identical (channel order matters).
         target_channels = sorted(TUHEEGEpilepsy.CANONICAL_REGIONS)
+    elif mode == 'ic_bag':
+        # Positional IC slots; the ICBagTransformer pools over them, so order does
+        # not matter (sorted to match the eager alphabetical harmonization).
+        target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
     else:
         target_channels = _scan_common_channels(window_df, engine.montages, rename_channels)
     logger.info(
@@ -360,6 +383,9 @@ def build_lazy_datasets(
             engine.montages, filter_freq, rename_channels, set_montage, pick_channels,
             engine.ica_keep_labels, engine.brain_ic_min_gof, engine.brain_ic_use_dipoles,
             target_cols,
+            ic_bag_max_k=ic_bag_max_k,
+            ic_bag_sign_normalize=ic_bag_sign_normalize,
+            ic_bag_rank_by=ic_bag_rank_by,
         )
         meta = (
             split_plan.drop(columns=['description_row'])
