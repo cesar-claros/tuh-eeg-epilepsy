@@ -38,6 +38,10 @@ class ICBagTransformer(nn.Module):
         If True, append the per-window valid-IC count as one extra feature.
     n_jobs : int, default=1
         Threads for the underlying HYDRA.
+    ic_chunk_size : int, default=32
+        Number of IC-instances pushed through HYDRA at once. The per-IC pass
+        reshapes to ``(B*K_max, 1, T)``; processing it in chunks of this size bounds
+        the conv1d GPU memory (raise for speed if memory allows, lower on OOM).
     """
 
     def __init__(
@@ -49,6 +53,7 @@ class ICBagTransformer(nn.Module):
         pool: tuple[str, ...] = ("mean", "max", "std"),
         append_count: bool = False,
         n_jobs: int = 1,
+        ic_chunk_size: int = 32,
     ) -> None:
         super().__init__()
         pool = tuple(pool)
@@ -57,8 +62,11 @@ class ICBagTransformer(nn.Module):
             raise ValueError(f"Unknown pool ops {bad}; choose from {_POOL_OPS}.")
         if not pool:
             raise ValueError("pool must contain at least one of mean/max/std.")
+        if ic_chunk_size < 1:
+            raise ValueError("ic_chunk_size must be >= 1.")
         self.pool = pool
         self.append_count = append_count
+        self.ic_chunk_size = ic_chunk_size
         # Univariate HYDRA: each IC is a single-channel series (max_num_channels=1).
         self.hydra = HydraTransformer(
             n_kernels=n_kernels,
@@ -89,7 +97,16 @@ class ICBagTransformer(nn.Module):
         b, k_max, t = X.shape
         # Valid ICs are rows that are not all-zero (padding stays exactly zero).
         mask = X.abs().sum(dim=-1) > 0  # (B, K_max)
-        feats = self.hydra(X.reshape(b * k_max, 1, t))  # (B*K_max, d)
+        # Reshaping to (B*K_max, 1, T) inflates the effective batch by K_max, so a
+        # single HYDRA pass would blow up the conv1d intermediates on GPU. Chunk
+        # the per-IC pass (each IC is independent, so this is exact) to bound peak
+        # memory regardless of B and K_max.
+        flat = X.reshape(b * k_max, 1, t)
+        feat_chunks = [
+            self.hydra(flat[s:s + self.ic_chunk_size])
+            for s in range(0, flat.shape[0], self.ic_chunk_size)
+        ]
+        feats = torch.cat(feat_chunks, dim=0)  # (B*K_max, d)
         d = feats.shape[1]
         feats = feats.reshape(b, k_max, d)
 

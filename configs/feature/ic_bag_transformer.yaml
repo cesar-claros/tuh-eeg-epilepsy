@@ -11,3 +11,6 @@ device : auto
 pool : [mean, max, std]
 # Append the per-window valid-IC count as one extra feature.
 append_count : false
+# IC-instances per HYDRA pass. The per-IC reshape inflates the batch by max_k, so
+# this bounds the conv1d GPU memory. Lower it on CUDA OOM, raise for speed.
+ic_chunk_size : 32
