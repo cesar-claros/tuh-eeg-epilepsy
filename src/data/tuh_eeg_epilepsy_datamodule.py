@@ -85,6 +85,7 @@ class TUHEEGDataModule(LightningDataModule):
         windows_train_csv: str | None = None,
         windows_val_csv: str | None = None,
         windows_test_csv: str | None = None,
+        require_keep_labels: tuple | None = None,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -161,6 +162,12 @@ class TUHEEGDataModule(LightningDataModule):
             recording is matched by path) instead of being generated, so different
             signal modes / runs train and evaluate on the identical window set.
             Requires ``lazy_loading=True``; provide all three or none.
+        require_keep_labels : tuple | None, default=None
+            If set, keep only recordings whose ICA has >=1 IC in these labels
+            (e.g. ('brain',)), applied before windowing. Independent of
+            ``ica_keep_labels``; set the same value across signal modes so they all
+            train/evaluate on the identical window set (a recording either has a
+            matching IC or it doesn't, so this is representation-independent).
 
         """
         super().__init__()
@@ -191,6 +198,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.windows_train_csv = windows_train_csv
         self.windows_val_csv = windows_val_csv
         self.windows_test_csv = windows_test_csv
+        self.require_keep_labels = require_keep_labels
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -265,6 +273,7 @@ class TUHEEGDataModule(LightningDataModule):
                 ic_bag_max_k=self.ic_bag_max_k,
                 ic_bag_sign_normalize=self.ic_bag_sign_normalize,
                 ic_bag_rank_by=self.ic_bag_rank_by,
+                require_keep_labels=self.require_keep_labels,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

@@ -433,6 +433,8 @@ def build_lazy_datasets(
         df = df[df['n_seizure'] == 0]
     if idx_list is not None:
         df = df[df['subject'].isin(idx_list)]
+    if engine.require_keep_labels is not None:
+        df = TUHEEGEpilepsy._filter_recordings_by_labels(df, engine.require_keep_labels)
     if df.empty:
         raise ValueError("No data available after filtering.")
 

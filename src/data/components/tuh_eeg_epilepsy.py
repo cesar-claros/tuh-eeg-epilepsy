@@ -98,6 +98,7 @@ class TUHEEGEpilepsy:
         ic_bag_max_k: int = 20,
         ic_bag_sign_normalize: bool = True,
         ic_bag_rank_by: str = 'variance',
+        require_keep_labels: Optional[tuple] = None,
     ):
 
         self.data_dir = data_dir
@@ -116,6 +117,10 @@ class TUHEEGEpilepsy:
         self.ic_bag_max_k = ic_bag_max_k
         self.ic_bag_sign_normalize = ic_bag_sign_normalize
         self.ic_bag_rank_by = ic_bag_rank_by
+        # If set, restrict to recordings whose ICA has >=1 IC in these labels
+        # (applied before windowing, independent of ica_keep_labels). Used to make
+        # the window set identical across signal modes.
+        self.require_keep_labels = require_keep_labels
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -976,6 +981,40 @@ class TUHEEGEpilepsy:
         return n_windows * n_channels * n_samples * bytes_per / 1e9
 
     @staticmethod
+    def _filter_recordings_by_labels(df: pd.DataFrame, keep_labels) -> pd.DataFrame:
+        """Keep only recordings whose ``-ica_labels.csv`` has >=1 IC in ``keep_labels``.
+
+        Having a kept IC category is a per-recording property of its ICA, so
+        filtering here (before windowing) makes the window set well-defined and
+        identical across signal modes that share the same ``keep_labels`` (a record
+        with no matching IC, or no labels file, is dropped). Scans the small labels
+        CSVs once at setup.
+        """
+        keep = {str(k).strip().lower() for k in keep_labels}
+        valid = []
+        for path in df['path']:
+            labels_path = path.parent / path.name.replace('.edf', '-ica_labels.csv')
+            ok = False
+            if labels_path.exists():
+                try:
+                    labels = (
+                        pd.read_csv(labels_path)['labels']
+                        .astype(str).str.strip().str.lower()
+                    )
+                    ok = bool(labels.isin(keep).any())
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Could not read labels for {path.name}: {e}")
+            valid.append(ok)
+        mask = pd.Series(valid, index=df.index)
+        logger.info(
+            f"require_keep_labels={sorted(keep)}: kept {int(mask.sum())}/{len(df)} "
+            f"recordings with >=1 matching IC."
+        )
+        if not mask.any():
+            raise ValueError(f"No recordings have an IC labeled in {sorted(keep)}.")
+        return df[mask]
+
+    @staticmethod
     def _read_raw_edf(
         file_path: Path,
         include: Optional[List[str]] = None,
@@ -1185,6 +1224,10 @@ class TUHEEGEpilepsy:
         # Filter by idx_list if provided (e.g. specific subjects)
         if idx_list is not None:
             df = df[df['subject'].isin(idx_list)]
+        # Keep only recordings with >=1 IC in require_keep_labels (representation-
+        # independent, so the window set matches across signal modes).
+        if self.require_keep_labels is not None:
+            df = TUHEEGEpilepsy._filter_recordings_by_labels(df, self.require_keep_labels)
 
         if df.empty:
             raise ValueError("No data available after filtering.")
