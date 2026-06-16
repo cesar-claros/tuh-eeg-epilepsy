@@ -1067,8 +1067,26 @@ class TUHEEGEpilepsy:
         logger.info(f'Durations of subjects with the lowest number of windows:\n{df_smallest}')
         
         total_available = int(subject_window_counts.sum())
-        n_subjects = int(subject_window_counts.shape[0])
-        strict_min = int(subject_window_counts.min())
+        # Subjects with 0 windows (e.g. all their kept recordings are shorter than
+        # the window length, which require_keep_labels can cause by removing their
+        # longer recordings) would force the strict global-min to 0. Drop them so
+        # balancing uses only subjects with real data (_generate_windows_list skips
+        # them anyway, but the min must ignore them).
+        zero_subjects = subject_window_counts.index[subject_window_counts == 0].tolist()
+        if zero_subjects:
+            logger.warning(
+                f"Dropping {len(zero_subjects)} subject(s) with 0 windows (too short "
+                f"for the window length): {zero_subjects[:10]}"
+                + ("..." if len(zero_subjects) > 10 else "")
+            )
+            df = df[~df['subject'].isin(zero_subjects)]
+        nonzero_counts = subject_window_counts[subject_window_counts > 0]
+        if nonzero_counts.empty:
+            raise ValueError(
+                "No subject has any valid window (all recordings shorter than the window length?)."
+            )
+        n_subjects = int(nonzero_counts.shape[0])
+        strict_min = int(nonzero_counts.min())
 
         if balance_per_subject:
             if max_windows_per_subject is not None:
@@ -1084,7 +1102,7 @@ class TUHEEGEpilepsy:
             mode_str = "soft cap" if max_windows_per_subject is not None else "strict global-min"
             logger.info(
                 f"Balancing ({mode_str}): limiting to {limit_per_subject} windows per subject "
-                f"(fewest-window subject '{subject_window_counts.idxmin()}' has {strict_min})."
+                f"(fewest-window subject '{nonzero_counts.idxmin()}' has {strict_min})."
             )
             if limit_per_subject == 0:
                 raise ValueError("Balancing requested but the per-subject limit is 0.")
@@ -1105,7 +1123,7 @@ class TUHEEGEpilepsy:
         # cost of balancing is visible (the strict global-min clamp can discard the
         # large majority of windows).
         kept = (
-            int(subject_window_counts.clip(upper=limit_per_subject).sum())
+            int(nonzero_counts.clip(upper=limit_per_subject).sum())
             if limit_per_subject is not None
             else total_available
         )
@@ -1113,7 +1131,7 @@ class TUHEEGEpilepsy:
             f"Window budget: {kept} / {total_available} kept "
             f"({100 * kept / max(total_available, 1):.1f}%) across {n_subjects} subjects; "
             f"per-subject window counts min={strict_min}, "
-            f"median={int(subject_window_counts.median())}, max={int(subject_window_counts.max())}."
+            f"median={int(nonzero_counts.median())}, max={int(nonzero_counts.max())}."
         )
         return df, limit_per_subject
 
