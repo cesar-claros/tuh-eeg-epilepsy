@@ -8,7 +8,7 @@ device : auto
 # Pooling operators over the IC axis (any subset of mean / max / std). 'max' is
 # the focal-source detector ("does any IC look epileptiform?"). Output dim is
 # len(pool) * d, where d is the univariate-HYDRA feature dimension.
-pool : [mean, max, std]
+pool : [mean, max]
 # Append the per-window valid-IC count as one extra feature.
 append_count : false
 # IC-instances per HYDRA pass. The per-IC reshape inflates the batch by max_k, so
