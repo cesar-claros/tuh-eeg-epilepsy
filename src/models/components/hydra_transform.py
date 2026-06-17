@@ -502,6 +502,105 @@ class HydraTransform(nn.Module):
             )
         return infos
 
+    def top_kernels_by_coef(
+        self,
+        coef,
+        n_top: int,
+        combine: str = "sum",
+        sfreq: float | None = None,
+        feature_std=None,
+    ) -> list["KernelInfo"]:
+        """Rank kernels by the trained linear classifier's weight on their features.
+
+        Unlike ``top_kernels`` (data win counts) and the discriminative ranking
+        (per-class win fractions), this ranks kernels by how much the fitted linear
+        classifier relies on them, so it does NOT need ``track_counts``. The HYDRA
+        feature vector has two columns per kernel, the max-win and min-win counts,
+        laid out exactly as ``forward`` emits them
+        (``(num_dilations, divisor, 2, h, k)`` flattened). ``coef`` is the
+        classifier weight per feature column; each kernel's importance aggregates
+        the absolute weight of its two columns.
+
+        Parameters
+        ----------
+        coef : array-like
+            Classifier weight per feature column, length
+            ``num_dilations * divisor * 2 * h * k`` (e.g. ``LogisticRegression``'s
+            ``coef_[0]``), in the same order as the features returned by ``forward``.
+        n_top : int
+            Number of top kernels to return.
+        combine : str, default="sum"
+            How to aggregate a kernel's two feature columns (max-win, min-win):
+            "sum" of absolute weights or "max" of absolute weights.
+        sfreq : float | None, default=None
+            If given, populate each kernel's ``peak_freq_hz`` (in Hz).
+        feature_std : array-like | None, default=None
+            Optional per-column std of the features the classifier saw, to weight
+            ``|coef|`` by the feature's spread. With the default sparse scaler the
+            features are already standardized, so leaving this None (pure ``|coef|``)
+            is the natural importance.
+
+        Returns
+        -------
+        list[KernelInfo]
+            The top kernels by classifier weight, highest importance first. The
+            ``count`` field holds the aggregated absolute weight.
+        """
+        coef = torch.as_tensor(coef, dtype=torch.float32).reshape(-1)
+        expected = self.num_dilations * self.divisor * 2 * self.h * self.k
+        if coef.numel() != expected:
+            raise ValueError(
+                f"`coef` has {coef.numel()} entries, expected {expected} "
+                f"(num_dilations*divisor*2*h*k)."
+            )
+        importance = coef.abs()
+        if feature_std is not None:
+            std = torch.as_tensor(feature_std, dtype=torch.float32).reshape(-1)
+            if std.numel() != expected:
+                raise ValueError("`feature_std` length must match `coef` length.")
+            importance = importance * std
+        # (num_dilations, divisor, 2, h, k): axis 2 holds the kernel's two feature
+        # columns (max-win count, min-win count). Collapse it to a per-kernel score.
+        importance = importance.reshape(
+            self.num_dilations, self.divisor, 2, self.h, self.k
+        )
+        if combine == "sum":
+            per_kernel = importance.sum(2)
+        elif combine == "max":
+            per_kernel = importance.amax(2)
+        else:
+            raise ValueError(f"`combine` must be 'sum' or 'max', got {combine!r}")
+
+        # per_kernel is (num_dilations, divisor, h, k), the same layout as the
+        # win-count matrices, so reuse the existing topk + decode path.
+        weights = self.kernel_weights()
+        _, divisor, h, k = per_kernel.shape
+        flat = per_kernel.reshape(-1)
+        top_values, top_indices = torch.topk(flat, min(n_top, flat.numel()))
+
+        infos: list[KernelInfo] = []
+        for rank, (value, index) in enumerate(
+            zip(top_values.tolist(), top_indices.tolist())
+        ):
+            dilation_index, diff_index, group, kernel = self._decode_index(
+                index, divisor, h, k
+            )
+            dilation = int(self.dilations[dilation_index].item())
+            weight = weights[dilation_index, diff_index, group, kernel].clone().cpu()
+            infos.append(
+                KernelInfo(
+                    rank=rank,
+                    count=value,
+                    dilation=dilation,
+                    representation="raw" if diff_index == 0 else "diff",
+                    group=group,
+                    kernel=kernel,
+                    weight=weight,
+                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
+                )
+            )
+        return infos
+
     def top_discriminative_kernels(
         self,
         n_top: int,

@@ -169,6 +169,27 @@ class HydraTransformer(nn.Module):
             n_top, by=by, class_label=class_label, weighting=weighting, sfreq=sfreq
         )
 
+    def top_kernels_by_coef(
+        self,
+        coef,
+        n_top: int,
+        combine: str = "sum",
+        sfreq: float | None = None,
+        feature_std=None,
+    ) -> list[KernelInfo]:
+        """Rank kernels by the linear classifier's weight on their feature columns.
+
+        Does not require ``track_counts`` (it uses the classifier weights, not win
+        counts), but the transformer must have processed at least one batch so its
+        dimensions are known. ``coef`` is the per-feature classifier weight in the
+        order ``forward`` emits features (see ``HydraTransform.top_kernels_by_coef``).
+        """
+        if self._hydra is None:
+            raise RuntimeError("Call the transformer on data before top_kernels_by_coef().")
+        return self._hydra.top_kernels_by_coef(
+            coef, n_top, combine=combine, sfreq=sfreq, feature_std=feature_std
+        )
+
     def top_discriminative_kernels(
         self,
         n_top: int,

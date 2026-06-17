@@ -228,15 +228,37 @@ def _kernel_sfreq(cfg: DictConfig, feature_extractor: Any) -> float | None:
     return None
 
 
-def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
-    """Log, save, and plot the most-used and most class-discriminative kernels.
+def _classifier_coef(model: Any) -> Any:
+    """Flatten a fitted linear classifier's coefficients to one weight per feature.
 
-    Only meaningful when ``feature.track_counts`` is enabled (so win counts were
-    accumulated during feature extraction). Writes ``top_kernels.csv`` /
-    ``top_discriminative_kernels.csv`` (with a ``peak_freq_hz`` column) and, when
-    a sampling rate is derivable, waveform-plus-spectrum plots and a peak-frequency
+    Returns the binary ``coef_[0]`` (or, for a multiclass model, the per-feature sum
+    of absolute class weights), or ``None`` if the model exposes no linear ``coef_``
+    (so the classifier-weighted kernel ranking is simply skipped).
+    """
+    import numpy as np
+
+    coef = getattr(model, "coef_", None)
+    if coef is None:
+        return None
+    coef = np.asarray(coef, dtype=float)
+    if coef.ndim == 2:
+        return coef[0] if coef.shape[0] == 1 else np.abs(coef).sum(0)
+    return coef.reshape(-1)
+
+
+def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = None) -> None:
+    """Log, save, and plot the most-used, most discriminative, and most classifier-weighted kernels.
+
+    The win-count rankings (most-used, class-discriminative) require
+    ``feature.track_counts`` (so win counts were accumulated during feature
+    extraction). The classifier-weighted ranking instead uses the fitted linear
+    ``model`` coefficients, so it runs whenever a linear ``model`` is supplied.
+    Writes ``top_kernels.csv`` / ``top_discriminative_kernels.csv`` /
+    ``top_classifier_kernels.csv`` (each with a ``peak_freq_hz`` column) and, when a
+    sampling rate is derivable, waveform-plus-spectrum plots and a peak-frequency
     histogram split by favored class, to the run output directory. The variants
-    (n, weighting, competition, metric) come from the ``top_kernels`` config block.
+    (n, weighting, competition, metric, clf_combine) come from the ``top_kernels``
+    config block.
     """
     from src.models.components import kernel_viz
 
@@ -304,6 +326,33 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any) -> None:
             )
     else:
         log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004
+
+    # Classifier-weighted ranking: which kernels the trained linear classifier
+    # relies on. This uses the fitted model coefficients (one weight per feature
+    # column), not the win counts, so it is a third, independent view of "top".
+    coef = _classifier_coef(model)
+    if coef is not None:
+        clf_combine = spec.get("clf_combine", "sum")
+        log.info(f"Top {n} kernels by classifier |weight| (combine={clf_combine}):")  # noqa: G004
+        clf_top = feature_extractor.top_kernels_by_coef(
+            coef, n, combine=clf_combine, sfreq=sfreq
+        )
+        pl.DataFrame(_kernel_rows(clf_top)).write_csv(
+            output_dir / "top_classifier_kernels.csv"
+        )
+        for info in clf_top[:5]:
+            freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
+            log.info(  # noqa: G004
+                f"  #{info.rank} d{info.dilation} {info.representation} "
+                f"g{info.group}k{info.kernel} |w|={info.count:.3f}{freq}"
+            )
+        if sfreq is not None:
+            kernel_viz.plot_kernels(
+                clf_top, sfreq, output_dir / "top_classifier_kernels.png",
+                "Top classifier-weighted HYDRA kernels",
+            )
+    elif model is not None:
+        log.info("Skipping classifier-weighted ranking (model has no linear coef_).")  # noqa: G004
 
 
 @task_wrapper
@@ -386,10 +435,11 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         )
 
     # Report the most-used / most discriminative HYDRA kernels when the feature
-    # extractor accumulated win counts (feature.track_counts=true). Requires
-    # training to have run, so the extractor has processed (and counted) data.
+    # extractor accumulated win counts (feature.track_counts=true), plus the
+    # classifier-weighted ranking from the fitted model. Requires training to have
+    # run, so the extractor has processed (and counted) data and the model is fit.
     if cfg.get("train") and cfg.feature.get("track_counts"):
-        _report_top_kernels(cfg, feature_extractor)
+        _report_top_kernels(cfg, feature_extractor, model)
 
     # Save the full window- and subject-level performance metrics to CSV.
     scores_by_split = {}

@@ -57,7 +57,9 @@ feature_seeds: null
 # When feature.track_counts is enabled, report the most-used and most
 # class-discriminative kernels after training (writes top_kernels.csv and
 # top_discriminative_kernels.csv to the run output dir, and logs the top 5).
-# Enable with `feature.track_counts=true`.
+# Independently, the fitted linear classifier's weights are used to rank the
+# kernels it relies on most (top_classifier_kernels.csv); this does not need win
+# counts but is only emitted alongside the others (track_counts=true triggers all).
 top_kernels:
   n: 20                 # top-N by |score| for the global top_kernels.csv
   n_per_class: 5        # kernels per class shown in the discriminative plot
@@ -65,3 +67,4 @@ top_kernels:
   by: max               # max | min | total
   weighting: frequency  # frequency | magnitude
   metric: difference    # difference | ratio | logodds  (discriminative only)
+  clf_combine: sum      # aggregate a kernel's 2 feature columns: sum | max  (classifier ranking)
