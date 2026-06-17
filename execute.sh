@@ -36,11 +36,11 @@ COMMON="data.lazy_loading=true model.class_weight=balanced data.require_keep_lab
 # so it shares raw's channel space and isolates pure denoising; it uses the same
 # multichannel HYDRA as raw (no feature override).
 ARMS=(
-  "raw|data.signal_mode=raw"
+  # "raw|data.signal_mode=raw"
   "ica_clean_brain|data.signal_mode=ica_clean data.ica_keep_labels=[brain]"
-  "brain_ic_dipole|data.signal_mode=brain_ic data.ica_keep_labels=[brain]"
-  "brain_ic_electrode|data.signal_mode=brain_ic data.ica_keep_labels=[brain] data.brain_ic_use_dipoles=false"
-  "ic_bag|data.signal_mode=ic_bag data.ica_keep_labels=[brain] feature=ic_bag_transformer"
+  # "brain_ic_dipole|data.signal_mode=brain_ic data.ica_keep_labels=[brain]"
+  # "brain_ic_electrode|data.signal_mode=brain_ic data.ica_keep_labels=[brain] data.brain_ic_use_dipoles=false"
+  # "ic_bag|data.signal_mode=ic_bag data.ica_keep_labels=[brain] feature=ic_bag_transformer"
 )
 
 total=$(( ${#ARMS[@]} * ${#CAPS[@]} * ${#SEEDS[@]} ))
