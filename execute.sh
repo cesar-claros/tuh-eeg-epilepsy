@@ -7,12 +7,13 @@
 #   - lazy loading                (O(batch) RAM, so the larger caps fit)
 #   - model.class_weight=balanced (window-level class imbalance fix)
 #   - require_keep_labels=[brain] (keep only recordings with >=1 brain IC, applied
-#                                  before windowing) -- this makes raw / brain_ic /
-#                                  ic_bag train and evaluate on the SAME windows for
-#                                  a given seed, so the comparison is fair.
+#                                  before windowing) -- this makes raw / ica_clean /
+#                                  brain_ic / ic_bag train and evaluate on the SAME
+#                                  windows for a given seed, so the comparison is fair.
 #
-# Prerequisites (offline, once): the IC modes need -ica.fif + -ica_labels.csv;
-# brain_ic with dipoles also needs -ica_dipoles.csv. Generate with:
+# Prerequisites (offline, once): the IC modes (ica_clean, brain_ic, ic_bag) need
+# -ica.fif + -ica_labels.csv; brain_ic with dipoles also needs -ica_dipoles.csv.
+# Generate with:
 #   python src/precompute_ica.py --steps both --n_jobs 8
 #
 # Grid is ARMS x CAPS x SEEDS runs; trim any array to shrink it. For a fast ranking
@@ -31,8 +32,12 @@ EXTRA="${EXTRA:-}"             # optional uniform overrides, e.g. EXTRA='feature
 COMMON="data.lazy_loading=true model.class_weight=balanced data.require_keep_labels=[brain]"
 
 # Benchmark arms: "name|extra overrides" (one distinct representation each).
+# ica_clean_brain reconstructs sensor EEG from brain ICs only (back-projection),
+# so it shares raw's channel space and isolates pure denoising; it uses the same
+# multichannel HYDRA as raw (no feature override).
 ARMS=(
   "raw|data.signal_mode=raw"
+  "ica_clean_brain|data.signal_mode=ica_clean data.ica_keep_labels=[brain]"
   "brain_ic_dipole|data.signal_mode=brain_ic data.ica_keep_labels=[brain]"
   "brain_ic_electrode|data.signal_mode=brain_ic data.ica_keep_labels=[brain] data.brain_ic_use_dipoles=false"
   "ic_bag|data.signal_mode=ic_bag data.ica_keep_labels=[brain] feature=ic_bag_transformer"

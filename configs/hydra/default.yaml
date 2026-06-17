@@ -10,10 +10,10 @@ job:
   # ? Only used to validate the config
   # ? Generates a blank dir, safe to ignore
   num: 1208937
-# output directory: the command-line `output_dir` when set, else a dynamic
-# timestamped path under logs/${task_name}/runs/.
+# output directory: follows the top-level `output_dir` (default a dynamic
+# timestamped path under logs/${task_name}/runs/, overridable on the command line).
 run:
-  dir: ${oc.select:output_dir,${paths.log_dir}/${task_name}/runs/${hydra.job.name}}
+  dir: ${output_dir}
 sweep:
   dir: ${paths.log_dir}/${task_name}/multiruns/${hydra.job.name}
   subdir: ${hydra.job.num}

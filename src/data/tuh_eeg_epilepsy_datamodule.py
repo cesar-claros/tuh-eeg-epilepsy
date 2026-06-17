@@ -145,9 +145,10 @@ class TUHEEGDataModule(LightningDataModule):
             If True, stream windows from disk on demand (a `WindowDataset` read in
             the DataLoader workers) instead of materializing the whole dataset in
             RAM. Resident memory becomes O(batch) instead of O(N). Supports
-            signal_mode 'raw', 'brain_ic' and 'ic_bag' only; harmonization targets
-            (channel set, resample rate) are fixed up front. Draft: validate that
-            it selects the same windows as the eager path via the windows_*.csv dump.
+            signal_mode 'raw', 'ica_clean', 'brain_ic' and 'ic_bag' (not 'ica');
+            harmonization targets (channel set, resample rate) are fixed up front.
+            'ica_clean' shares the same sensor channel target as 'raw'. Draft:
+            validate it selects the same windows as the eager path via windows_*.csv.
         ic_bag_max_k : int, default=20
             For signal_mode='ic_bag', the number of IC slots per window (pad /
             truncate). Pair with feature=ic_bag_transformer.

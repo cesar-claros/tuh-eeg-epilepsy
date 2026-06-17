@@ -20,13 +20,13 @@ defaults:
 # task name, determines output directory path
 task_name: "train"
 
-# Output directory for this run. Leave null to use the default timestamped path
-# (logs/${task_name}/runs/<timestamp>/). Set it from the command line to send all
-# run artifacts (model.joblib, performance.csv, windows_*.csv, logs, and the
-# resolved config) to a folder you choose, e.g.:
+# Output directory for this run. Defaults to a timestamped path under
+# logs/${task_name}/runs/. Override from the command line to send all run
+# artifacts (model.joblib, performance.csv, windows_*.csv, logs, and the resolved
+# config) to a folder you choose, e.g.:
 #   python src/train.py output_dir=/scratch/me/run_01
 # It feeds hydra.run.dir, so paths.output_dir resolves to the same folder.
-output_dir: null
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
 
 # tags to help you identify your experiments
 # overwrite from command line with `uv run train.py tags="[first_tag, second_tag]"`

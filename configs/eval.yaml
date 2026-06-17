@@ -12,6 +12,11 @@ task_name: "eval"
 
 tags: ["dev"]
 
+# Output directory for this run (feeds hydra.run.dir). Defaults to a timestamped
+# path under logs/${task_name}/runs/; override on the command line, e.g.
+#   python src/eval.py ckpt_path=... output_dir=/scratch/me/eval_01
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
 # path to a trained run directory (the Hydra output_dir of a `train` run, which
 # contains model.joblib + feature_extractor.joblib), or directly to the
 # model.joblib file. The trained feature extractor and scaler+classifier

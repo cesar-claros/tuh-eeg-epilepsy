@@ -11,18 +11,26 @@ resident, only the much smaller feature matrix.
 
 Scope of this draft:
 
-- Supports ``mode='raw'``, ``'brain_ic'`` and ``'ic_bag'``. ``ica`` / ``ica_clean``
-  raise ``NotImplementedError`` (their harmonization target depends on per-file ICA
-  channels; use the eager path for those).
+- Supports ``mode='raw'``, ``'ica_clean'``, ``'brain_ic'`` and ``'ic_bag'``.
+  ``'ica_clean'`` back-projects each window keeping only the ICs whose ICLabel is
+  in ``ica_keep_labels`` (set ``[brain]`` for a brain-IC-only reconstruction) and
+  then runs the same sensor-space pipeline as ``'raw'``, so the two share the SAME
+  channel target and differ only by denoising. ``'ica'`` (raw IC sources) still
+  raises ``NotImplementedError``; use the eager path for it.
 - Harmonization targets (the common channel set and the resample rate) are fixed
   *up front* (the eager path derives them from the loaded batch). The channel set
   is found by a header-only scan of the unique files in the plan, matching the
-  eager intersection; the resample rate is the minimum sfreq.
+  eager intersection; the resample rate is the minimum sfreq. ``'ica_clean'`` uses
+  the same montage-based sensor target as ``'raw'`` (the montage channels are a
+  subset of the channels the ICA was fit on, so they survive the back-projection);
+  this keeps it in raw's channel space and may differ slightly from the eager
+  ``ica_clean`` target, which intersects all post-ICA channels.
 - A window that fails to load is zero-filled (not dropped), so ``__len__`` is
   fixed and the per-split metadata stays aligned with the feature order. For
   ``raw`` this never triggers (no ICA dependency), so lazy and eager produce
-  identical windows; for ``brain_ic`` a failed window becomes a zero row instead
-  of being dropped (a small, documented difference from eager).
+  identical windows; for ``brain_ic`` / ``ic_bag`` / ``ica_clean`` a failed window
+  (missing ICA files, alignment failure) becomes a zero row instead of being
+  dropped (a small, documented difference from eager).
 
 The plan + split assignment reuse the engine's own helpers and RNG order, so the
 selected windows and the subject-level split match the eager path. Validate with
@@ -225,7 +233,9 @@ class WindowDataset(Dataset):
 
     def _process(self, row: pd.Series) -> Optional[np.ndarray]:
         desc = row['description_row']
-        if self.mode in ('brain_ic', 'ic_bag'):
+        # brain_ic / ic_bag build IC series; ica_clean back-projects via the saved
+        # ICA. All three need every channel the ICA was fit on, so read all of them.
+        if self.mode in ('brain_ic', 'ic_bag', 'ica_clean'):
             include = None
         else:
             include = list(self.montages[desc['montage']]['channels'])
@@ -254,6 +264,15 @@ class WindowDataset(Dataset):
                 data, ch_names = out
                 sfreq = raw.info['sfreq']
             else:
+                # ica_clean: back-project keeping only the ICs whose ICLabel is in
+                # ica_keep_labels, yielding a sensor-space raw; then run the exact
+                # same pipeline as 'raw' so both harmonize to the same channels.
+                if self.mode == 'ica_clean':
+                    raw = TUHEEGEpilepsy._apply_ica_cleaning(
+                        raw, desc['path'], self.ica_keep_labels
+                    )
+                    if raw is None:
+                        return None
                 if self.filter_freq is not None:
                     raw.filter(l_freq=self.filter_freq[0], h_freq=self.filter_freq[1], verbose='ERROR')
                 if self.rename_channels:
@@ -410,7 +429,7 @@ def build_lazy_datasets(
     subject-level split match the eager path; only the per-window signal load is
     deferred to ``WindowDataset``.
     """
-    if mode in ('ica', 'ica_clean'):
+    if mode == 'ica':
         raise NotImplementedError(
             f"lazy_loading does not support mode='{mode}' yet; use the eager path."
         )
