@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from src.models.components.hydra_transform import HydraTransform
 
 
@@ -46,8 +48,15 @@ def _draw_kernel(ax_time, ax_freq, info, sfreq) -> float:
     return peak
 
 
-def plot_kernels(infos, sfreq: float, out_path, title: str = "Top HYDRA kernels"):
+def plot_kernels(
+    infos, sfreq: float, out_path, title: str = "Top HYDRA kernels",
+    max_kernels: int = 10, kernels_per_row: int = 2,
+):
     """Plot each kernel's time-domain waveform (ms) beside its ``|H(f)|`` (Hz).
+
+    Shows up to ``max_kernels`` kernels (highest-ranked first), laid out
+    ``kernels_per_row`` kernels per row; each kernel uses a (time, frequency)
+    column pair. The defaults (10 kernels, 2 per row) give a 5x4 grid of panels.
 
     Returns the saved Path, or None if matplotlib is unavailable or ``infos`` empty.
     """
@@ -63,15 +72,28 @@ def plot_kernels(infos, sfreq: float, out_path, title: str = "Top HYDRA kernels"
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    infos = infos[:max_kernels]
     n = len(infos)
-    fig, axes = plt.subplots(n, 2, figsize=(8, 1.7 * n), squeeze=False)
+    n_rows = int(np.ceil(n / kernels_per_row))
+    n_cols = 2 * kernels_per_row
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(4 * kernels_per_row, 1.7 * n_rows), squeeze=False
+    )
     for i, info in enumerate(infos):
-        peak = _draw_kernel(axes[i][0], axes[i][1], info, sfreq)
-        axes[i][0].set_title(f"{_label(info)}  (time)", fontsize=7)
-        axes[i][1].set_title(f"peak = {peak:.1f} Hz  (freq)", fontsize=7)
-        if i == n - 1:
-            axes[i][0].set_xlabel("ms", fontsize=7)
-            axes[i][1].set_xlabel("Hz", fontsize=7)
+        r, c = i // kernels_per_row, (i % kernels_per_row) * 2
+        ax_t, ax_f = axes[r][c], axes[r][c + 1]
+        peak = _draw_kernel(ax_t, ax_f, info, sfreq)
+        ax_t.set_title(f"{_label(info)}  (time)", fontsize=7)
+        ax_f.set_title(f"peak = {peak:.1f} Hz  (freq)", fontsize=7)
+        # Label the x-axis only on the lowest kernel in each column.
+        if i + kernels_per_row >= n:
+            ax_t.set_xlabel("ms", fontsize=7)
+            ax_f.set_xlabel("Hz", fontsize=7)
+    # Hide any unused cells when the last row is only partly filled.
+    for j in range(n, n_rows * kernels_per_row):
+        r, c = j // kernels_per_row, (j % kernels_per_row) * 2
+        axes[r][c].axis("off")
+        axes[r][c + 1].axis("off")
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -155,10 +177,15 @@ def plot_kernels_by_class(
 
 
 def plot_peak_freq_hist(
-    disc_infos, sfreq: float, out_path, bins: int = 20,
+    disc_infos, sfreq: float, out_path, bin_width: float = 5.0, fmax: float | None = None,
     title: str = "Peak frequency by favored class", class_names: dict | None = None,
 ):
     """Histogram of discriminative kernels' peak frequencies, split by favored class.
+
+    Both classes share the same fixed-width bin edges (``bin_width`` Hz, from 0 to
+    ``fmax`` rounded up to a whole bin), so the two distributions are directly
+    comparable. ``fmax`` defaults to the Nyquist frequency (``sfreq / 2``), the
+    largest peak frequency a kernel can have.
 
     Returns the saved Path, or None if matplotlib is unavailable or ``disc_infos``
     empty.
@@ -182,9 +209,17 @@ def plot_peak_freq_hist(
             peak = HydraTransform.peak_frequency(info.weight, info.dilation, sfreq)
         by_class.setdefault(info.favors, []).append(peak)
 
+    # Shared fixed-width bin edges from 0 to (rounded-up) fmax, so the two classes
+    # use identical bins and can be compared directly. fmax defaults to Nyquist.
+    if fmax is None:
+        fmax = sfreq / 2.0
+    top = float(np.ceil(fmax / bin_width) * bin_width)
+    edges = np.arange(0.0, top + bin_width / 2.0, bin_width)
+
     fig, ax = plt.subplots(figsize=(6, 4))
     for label, peaks in sorted(by_class.items(), key=lambda kv: str(kv[0])):
-        ax.hist(peaks, bins=bins, alpha=0.5, label=f"favors {_class_name(label, class_names)}")
+        ax.hist(peaks, bins=edges, alpha=0.5, label=f"favors {_class_name(label, class_names)}")
+    ax.set_xlim(0.0, top)
     ax.set_xlabel("peak frequency (Hz)")
     ax.set_ylabel("number of kernels")
     ax.legend()
