@@ -255,10 +255,11 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
     ``model`` coefficients, so it runs whenever a linear ``model`` is supplied.
     Writes ``top_kernels.csv`` / ``top_discriminative_kernels.csv`` /
     ``top_classifier_kernels.csv`` (each with a ``peak_freq_hz`` column) and, when a
-    sampling rate is derivable, waveform-plus-spectrum plots and a peak-frequency
-    histogram split by favored class, to the run output directory. The variants
-    (n, weighting, competition, metric, clf_combine) come from the ``top_kernels``
-    config block.
+    sampling rate is derivable, waveform-plus-spectrum plots plus a single
+    ``peak_freq_hists.png`` figure with one peak-frequency histogram per ranking (the
+    discriminative one split by favored class), to the run output directory. The
+    variants (n, weighting, competition, metric, clf_combine) come from the
+    ``top_kernels`` config block.
     """
     from src.models.components import kernel_viz
 
@@ -276,11 +277,16 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
     if sfreq is not None:
         log.info(f"Kernel frequencies reported at sfreq={sfreq:.1f} Hz")  # noqa: G004
 
+    # Each ranking contributes one peak-frequency histogram panel; they are drawn
+    # together in a single figure (peak_freq_hists.png) at the end.
+    hist_panels: list = []
+    class_names: dict | None = None
+
     log.info(f"Top {n} kernels by global '{by}/{weighting}' count:")  # noqa: G004
     top = feature_extractor.top_kernels(n, by=by, weighting=weighting, sfreq=sfreq)
     pl.DataFrame(_kernel_rows(top)).write_csv(output_dir / "top_kernels.csv")
     for info in top[:5]:
-        freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
+        freq = f" peak={info.peak_freq_hz:.3g}Hz" if info.peak_freq_hz is not None else ""
         log.info(  # noqa: G004
             f"  #{info.rank} d{info.dilation} {info.representation} "
             f"g{info.group}k{info.kernel} count={info.count:.2f}{freq}"
@@ -289,6 +295,9 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
         kernel_viz.plot_kernels(
             top, sfreq, output_dir / "top_kernels.png", "Top HYDRA kernels (global)"
         )
+        # Collect a larger top set (n_hist) for the combined histogram figure.
+        top_hist = feature_extractor.top_kernels(n_hist, by=by, weighting=weighting, sfreq=sfreq)
+        hist_panels.append(("most-used (data win counts)", top_hist))
 
     labels = feature_extractor.class_labels()
     if len(labels) == 2:
@@ -320,10 +329,7 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
                 plot_set, sfreq, output_dir / "top_discriminative_kernels.png",
                 "Top discriminative HYDRA kernels", class_names=class_names,
             )
-            kernel_viz.plot_peak_freq_hist(
-                flat, sfreq, output_dir / "discriminative_peak_freq_hist.png",
-                class_names=class_names,
-            )
+            hist_panels.append(("class-discriminative", flat))
     else:
         log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004
 
@@ -341,7 +347,7 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
             output_dir / "top_classifier_kernels.csv"
         )
         for info in clf_top[:5]:
-            freq = f" peak={info.peak_freq_hz:.1f}Hz" if info.peak_freq_hz is not None else ""
+            freq = f" peak={info.peak_freq_hz:.3g}Hz" if info.peak_freq_hz is not None else ""
             log.info(  # noqa: G004
                 f"  #{info.rank} d{info.dilation} {info.representation} "
                 f"g{info.group}k{info.kernel} |w|={info.count:.3f}{freq}"
@@ -351,8 +357,21 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
                 clf_top, sfreq, output_dir / "top_classifier_kernels.png",
                 "Top classifier-weighted HYDRA kernels",
             )
+            # Collect a larger top set (n_hist) for the combined histogram figure.
+            clf_hist = feature_extractor.top_kernels_by_coef(
+                coef, n_hist, combine=clf_combine, sfreq=sfreq
+            )
+            hist_panels.append(("classifier-weighted", clf_hist))
     elif model is not None:
         log.info("Skipping classifier-weighted ranking (model has no linear coef_).")  # noqa: G004
+
+    # One figure with a peak-frequency histogram per available ranking, all on the
+    # same bins / x-axis so the rankings are directly comparable.
+    if sfreq is not None and hist_panels:
+        kernel_viz.plot_peak_freq_hists(
+            hist_panels, sfreq, output_dir / "peak_freq_hists.png",
+            class_names=class_names,
+        )
 
 
 @task_wrapper

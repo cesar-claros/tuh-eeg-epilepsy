@@ -228,3 +228,66 @@ def plot_peak_freq_hist(
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     return out_path
+
+
+def plot_peak_freq_hists(
+    panels, sfreq: float, out_path, bin_width: float = 5.0, fmax: float | None = None,
+    suptitle: str = "Peak frequency of top kernels by ranking",
+    class_names: dict | None = None,
+):
+    """One figure stacking a peak-frequency histogram per ranking, on shared bins.
+
+    ``panels`` is a list of ``(subtitle, infos)``. If a panel's infos carry a
+    ``favors`` attribute they are split by favored class (overlaid, like the
+    discriminative ranking); otherwise they are drawn as a single distribution.
+    Every panel uses the same fixed-width bins (``bin_width`` Hz, from 0 to ``fmax``
+    rounded up to a whole bin; ``fmax`` defaults to Nyquist) and a shared x-axis, so
+    the rankings are directly comparable.
+
+    Returns the saved Path, or None if matplotlib is unavailable or no panel has
+    any kernels.
+    """
+    panels = [(t, infos) for t, infos in panels if infos]
+    if not panels:
+        return None
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if fmax is None:
+        fmax = sfreq / 2.0
+    top = float(np.ceil(fmax / bin_width) * bin_width)
+    edges = np.arange(0.0, top + bin_width / 2.0, bin_width)
+
+    def _peak(info):
+        p = info.peak_freq_hz
+        return p if p is not None else HydraTransform.peak_frequency(info.weight, info.dilation, sfreq)
+
+    n = len(panels)
+    fig, axes = plt.subplots(n, 1, figsize=(6, 2.3 * n), sharex=True, squeeze=False)
+    for ax, (subtitle, infos) in zip(axes[:, 0], panels):
+        if any(getattr(i, "favors", None) is not None for i in infos):
+            by_class: dict = {}
+            for i in infos:
+                by_class.setdefault(i.favors, []).append(_peak(i))
+            for label, peaks in sorted(by_class.items(), key=lambda kv: str(kv[0])):
+                ax.hist(peaks, bins=edges, alpha=0.5,
+                        label=f"favors {_class_name(label, class_names)}")
+            ax.legend(fontsize=7)
+        else:
+            ax.hist([_peak(i) for i in infos], bins=edges, color="steelblue", alpha=0.8)
+        ax.set_xlim(0.0, top)
+        ax.set_ylabel("kernels")
+        ax.set_title(subtitle, fontsize=9)
+    axes[-1, 0].set_xlabel("peak frequency (Hz)")
+    fig.suptitle(suptitle)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
