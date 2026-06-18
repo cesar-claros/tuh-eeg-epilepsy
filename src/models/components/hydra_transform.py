@@ -302,21 +302,33 @@ class HydraTransform(nn.Module):
 
     @staticmethod
     def kernel_frequency_response(
-        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257,
+        representation: str = "raw",
     ) -> tuple:
-        """Magnitude frequency response of a dilated length-9 kernel (principal band).
+        """Magnitude frequency response of a dilated length-9 kernel on the signal x.
 
-        The dilated kernel has taps at samples 0, d, ..., 8d, so its response at
-        physical frequency f is ``sum_j w_j exp(-i 2*pi (d f / sfreq) j)``. As a
-        filter it is a comb: the response repeats every ``sfreq / d`` Hz, giving
-        ``d`` identical replicas across [0, Nyquist]. All the unique information
-        lives in the lowest (principal) Nyquist band ``[0, sfreq / (2 d)]``, which
-        this function returns; the higher replicas are exact copies. Restricting to
-        that band makes the frequency axis show only the relevant frequencies and
-        makes ``peak_frequency`` report the fundamental (lowest comb tooth) rather
-        than an arbitrary replica, because the replicas are equal to within floating
-        point so an argmax over the full Nyquist band would pick one at random.
-        Because the kernel is zero-mean it has no DC response.
+        The dilated kernel has taps at samples 0, d, ..., 8d; its own response at
+        physical frequency f is ``H(f) = sum_j w_j exp(-i 2*pi (d f / sfreq) j)``.
+        What this returns depends on which representation the kernel was applied to.
+
+        ``representation='raw'``: the kernel convolves the signal x, so the response
+        IS ``|H(f)|``. As a comb filter it repeats every ``sfreq / d`` Hz into ``d``
+        identical replicas across [0, Nyquist], so only the principal band
+        ``[0, sfreq / (2 d)]`` is returned (the higher replicas are exact copies) and
+        ``peak_frequency`` reports the fundamental (the lowest tooth), avoiding an
+        argmax over equal replicas. Zero-mean weights give no DC response.
+
+        ``representation='diff'``: the kernel convolves the first difference
+        ``dx_t = x_{t+1} - x_t``, so the EFFECTIVE filter on x is the kernel composed
+        with the first-difference operator. The (undilated, lag-1) difference has
+        response ``|1 - e^{-i w}| = 2|sin(pi f / sfreq)|`` (0 at DC, 2 at Nyquist), so
+        the returned magnitude is ``|H(f)| * 2|sin(pi f / sfreq)|``. Because that
+        high-pass is undilated it is NOT comb-periodic, so it breaks the equal-replica
+        symmetry (it boosts higher replicas); the response is therefore returned over
+        the FULL band ``[0, sfreq / 2]`` so the peak can land on the boosted high
+        replica rather than the suppressed fundamental. This is the "View B" reading:
+        every kernel's spectrum is its response to the raw signal, on one comparable
+        Hz axis (see documentation/hydra_kernel_spectra.md).
 
         Parameters
         ----------
@@ -327,39 +339,57 @@ class HydraTransform(nn.Module):
         sfreq : float
             Sampling rate in Hz.
         n_freqs : int, default=257
-            Number of frequency points across the principal band.
+            Number of frequency points across the returned band.
+        representation : str, default='raw'
+            'raw' (kernel on the signal) or 'diff' (kernel on the first difference);
+            'diff' includes the first-difference high-pass and uses the full band.
 
         Returns
         -------
         tuple
-            ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``, with
-            ``freqs_hz`` spanning ``[0, sfreq / (2 * dilation)]``.
+            ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``. For 'raw'
+            ``freqs_hz`` spans ``[0, sfreq / (2 * dilation)]``; for 'diff'
+            ``[0, sfreq / 2]``.
         """
-        freqs = torch.linspace(0.0, sfreq / (2.0 * dilation), n_freqs, device=weight.device)
+        fmax = sfreq / 2.0 if representation == "diff" else sfreq / (2.0 * dilation)
+        freqs = torch.linspace(0.0, fmax, n_freqs, device=weight.device)
         taps = torch.arange(weight.numel(), dtype=weight.dtype, device=weight.device)
         phase = (2.0 * torch.pi * dilation / sfreq) * freqs[:, None] * taps[None, :]
         response = (weight[None, :] * torch.exp(-1j * phase)).sum(-1)
-        return freqs, response.abs()
+        mag = response.abs()
+        if representation == "diff":
+            # Effective response on x: multiply by the undilated first-difference
+            # high-pass |1 - e^{-i w}| = 2|sin(pi f / sfreq)|.
+            mag = mag * (2.0 * torch.sin(torch.pi * freqs / sfreq).abs())
+        return freqs, mag
 
     @staticmethod
     def peak_frequency(
-        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257,
+        representation: str = "raw",
     ) -> float:
-        """Fundamental frequency (Hz) of the dilated kernel: the strongest lobe in
-        its principal band ``[0, sfreq / (2 * dilation)]`` (the lowest comb tooth)."""
+        """Peak frequency (Hz) of the kernel's response on the signal x.
+
+        For 'raw' this is the fundamental (lowest comb tooth) in the principal band;
+        for 'diff' it is the strongest lobe of the EFFECTIVE response on x (the kernel
+        times the first-difference high-pass) over the full band, which tends to sit
+        high because the high-pass boosts higher frequencies."""
         freqs, mag = HydraTransform.kernel_frequency_response(
-            weight, dilation, sfreq, n_freqs
+            weight, dilation, sfreq, n_freqs, representation
         )
         return float(freqs[int(mag.argmax())].item())
 
     @staticmethod
     def spectral_centroid(
-        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
+        weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257,
+        representation: str = "raw",
     ) -> float:
-        """Magnitude-weighted mean frequency (Hz) of the dilated kernel's response,
-        over its principal band ``[0, sfreq / (2 * dilation)]`` (one comb period)."""
+        """Magnitude-weighted mean frequency (Hz) of the kernel's response on x.
+
+        The first-difference high-pass is included for 'diff' (the effective response
+        on the signal); 'raw' uses the principal band (one comb period)."""
         freqs, mag = HydraTransform.kernel_frequency_response(
-            weight, dilation, sfreq, n_freqs
+            weight, dilation, sfreq, n_freqs, representation
         )
         total = mag.sum()
         if float(total) == 0.0:
@@ -447,9 +477,14 @@ class HydraTransform(nn.Module):
             f"`metric` must be 'difference', 'ratio', or 'logodds', got {metric!r}"
         )
 
-    def _peak_freq(self, weight: torch.Tensor, dilation: int, sfreq: float | None):
+    def _peak_freq(
+        self, weight: torch.Tensor, dilation: int, sfreq: float | None,
+        representation: str = "raw",
+    ):
         """Peak frequency for a kernel, or None when no sampling rate is given."""
-        return None if sfreq is None else self.peak_frequency(weight, dilation, sfreq)
+        if sfreq is None:
+            return None
+        return self.peak_frequency(weight, dilation, sfreq, representation=representation)
 
     def top_kernels(
         self,
@@ -507,7 +542,9 @@ class HydraTransform(nn.Module):
                     group=group,
                     kernel=kernel,
                     weight=weight,
-                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
+                    peak_freq_hz=self._peak_freq(
+                        weight, dilation, sfreq, "raw" if diff_index == 0 else "diff"
+                    ),
                 )
             )
         return infos
@@ -606,7 +643,9 @@ class HydraTransform(nn.Module):
                     group=group,
                     kernel=kernel,
                     weight=weight,
-                    peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
+                    peak_freq_hz=self._peak_freq(
+                        weight, dilation, sfreq, "raw" if diff_index == 0 else "diff"
+                    ),
                 )
             )
         return infos
@@ -759,7 +798,9 @@ class HydraTransform(nn.Module):
             group=group,
             kernel=kernel,
             weight=weight,
-            peak_freq_hz=self._peak_freq(weight, dilation, sfreq),
+            peak_freq_hz=self._peak_freq(
+                weight, dilation, sfreq, "raw" if diff_index == 0 else "diff"
+            ),
         )
 
 

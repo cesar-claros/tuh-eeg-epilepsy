@@ -33,15 +33,18 @@ def _draw_kernel(ax_time, ax_freq, info, sfreq) -> float:
     """Draw one kernel's waveform (ms) on ax_time and its |H(f)| (Hz) on ax_freq."""
     weight = info.weight
     dilation = info.dilation
+    representation = getattr(info, "representation", "raw")
     taps_ms = [j * dilation / sfreq * 1000.0 for j in range(weight.numel())]
     ax_time.stem(taps_ms, weight.tolist())
     ax_time.axhline(0.0, color="gray", linewidth=0.5)
     ax_time.tick_params(labelsize=6)
 
-    freqs, mag = HydraTransform.kernel_frequency_response(weight, dilation, sfreq)
+    freqs, mag = HydraTransform.kernel_frequency_response(
+        weight, dilation, sfreq, representation=representation
+    )
     peak = info.peak_freq_hz
     if peak is None:
-        peak = HydraTransform.peak_frequency(weight, dilation, sfreq)
+        peak = HydraTransform.peak_frequency(weight, dilation, sfreq, representation=representation)
     ax_freq.plot(freqs.tolist(), mag.tolist())
     ax_freq.axvline(peak, color="0.3", linestyle="--", linewidth=0.7)
     ax_freq.tick_params(labelsize=6)
@@ -206,7 +209,10 @@ def plot_peak_freq_hist(
     for info in disc_infos:
         peak = info.peak_freq_hz
         if peak is None:
-            peak = HydraTransform.peak_frequency(info.weight, info.dilation, sfreq)
+            peak = HydraTransform.peak_frequency(
+                info.weight, info.dilation, sfreq,
+                representation=getattr(info, "representation", "raw"),
+            )
         by_class.setdefault(info.favors, []).append(peak)
 
     # Shared fixed-width bin edges from 0 to (rounded-up) fmax, so the two classes
@@ -267,7 +273,12 @@ def plot_peak_freq_hists(
 
     def _peak(info):
         p = info.peak_freq_hz
-        return p if p is not None else HydraTransform.peak_frequency(info.weight, info.dilation, sfreq)
+        if p is not None:
+            return p
+        return HydraTransform.peak_frequency(
+            info.weight, info.dilation, sfreq,
+            representation=getattr(info, "representation", "raw"),
+        )
 
     n = len(panels)
     fig, axes = plt.subplots(n, 1, figsize=(6, 2.3 * n), sharex=True, squeeze=False)
