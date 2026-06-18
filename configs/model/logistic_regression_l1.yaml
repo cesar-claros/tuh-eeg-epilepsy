@@ -1,0 +1,27 @@
+# L1-regularized variant of the default logistic_regression model. L1 drives many
+# kernel coefficients to exactly 0, so it performs sparse feature (kernel)
+# selection instead of the dense L2 shrinkage of the default. Useful for sharpening
+# the classifier-weighted kernel ranking (top_classifier_kernels): only the kernels
+# with nonzero weights are kept, the rest get importance 0.
+#
+# Select it on the CLI: `python src/train.py model=logistic_regression_l1`.
+_target_: sklearn.linear_model.LogisticRegressionCV
+penalty: l1            # L1 (sparse). The default config uses the sklearn default, L2.
+solver: liblinear      # liblinear / saga are the only solvers that support L1 (lbfgs does not).
+                       # liblinear is fast and robust for binary L1; switch to saga for very
+                       # large window counts (and raise max_iter if it warns about convergence).
+cv: 5
+Cs:
+  _target_: numpy.logspace
+  start: -3
+  stop: 3
+  num: 10
+n_jobs: -1
+max_iter: 500
+verbose: 1
+# null = unweighted (default). Set to 'balanced' to counteract window-level class
+# imbalance (epilepsy windows outnumber non-epilepsy, more so at higher
+# max_windows_per_subject), which otherwise biases the decision threshold toward
+# the positive class (high sensitivity, low specificity). Override on the CLI with
+# model.class_weight=balanced.
+class_weight: null
