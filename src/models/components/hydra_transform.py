@@ -304,12 +304,19 @@ class HydraTransform(nn.Module):
     def kernel_frequency_response(
         weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
     ) -> tuple:
-        """Magnitude frequency response of a dilated length-9 kernel.
+        """Magnitude frequency response of a dilated length-9 kernel (principal band).
 
         The dilated kernel has taps at samples 0, d, ..., 8d, so its response at
-        physical frequency f is ``sum_j w_j exp(-i 2*pi (d f / sfreq) j)``. Because
-        the kernel is zero-mean it has no DC response, and because of the dilation
-        the response is a comb with ``d`` replicas across [0, Nyquist].
+        physical frequency f is ``sum_j w_j exp(-i 2*pi (d f / sfreq) j)``. As a
+        filter it is a comb: the response repeats every ``sfreq / d`` Hz, giving
+        ``d`` identical replicas across [0, Nyquist]. All the unique information
+        lives in the lowest (principal) Nyquist band ``[0, sfreq / (2 d)]``, which
+        this function returns; the higher replicas are exact copies. Restricting to
+        that band makes the frequency axis show only the relevant frequencies and
+        makes ``peak_frequency`` report the fundamental (lowest comb tooth) rather
+        than an arbitrary replica, because the replicas are equal to within floating
+        point so an argmax over the full Nyquist band would pick one at random.
+        Because the kernel is zero-mean it has no DC response.
 
         Parameters
         ----------
@@ -318,16 +325,17 @@ class HydraTransform(nn.Module):
         dilation : int
             The dilation the kernel is applied with.
         sfreq : float
-            Sampling rate in Hz (sets the frequency axis up to Nyquist).
+            Sampling rate in Hz.
         n_freqs : int, default=257
-            Number of frequency points from 0 to Nyquist.
+            Number of frequency points across the principal band.
 
         Returns
         -------
         tuple
-            ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``.
+            ``(freqs_hz, magnitude)`` as 1-D tensors of length ``n_freqs``, with
+            ``freqs_hz`` spanning ``[0, sfreq / (2 * dilation)]``.
         """
-        freqs = torch.linspace(0.0, sfreq / 2.0, n_freqs, device=weight.device)
+        freqs = torch.linspace(0.0, sfreq / (2.0 * dilation), n_freqs, device=weight.device)
         taps = torch.arange(weight.numel(), dtype=weight.dtype, device=weight.device)
         phase = (2.0 * torch.pi * dilation / sfreq) * freqs[:, None] * taps[None, :]
         response = (weight[None, :] * torch.exp(-1j * phase)).sum(-1)
@@ -337,7 +345,8 @@ class HydraTransform(nn.Module):
     def peak_frequency(
         weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
     ) -> float:
-        """Frequency (Hz) of the strongest lobe of the dilated kernel's response."""
+        """Fundamental frequency (Hz) of the dilated kernel: the strongest lobe in
+        its principal band ``[0, sfreq / (2 * dilation)]`` (the lowest comb tooth)."""
         freqs, mag = HydraTransform.kernel_frequency_response(
             weight, dilation, sfreq, n_freqs
         )
@@ -347,7 +356,8 @@ class HydraTransform(nn.Module):
     def spectral_centroid(
         weight: torch.Tensor, dilation: int, sfreq: float, n_freqs: int = 257
     ) -> float:
-        """Magnitude-weighted mean frequency (Hz) of the dilated kernel's response."""
+        """Magnitude-weighted mean frequency (Hz) of the dilated kernel's response,
+        over its principal band ``[0, sfreq / (2 * dilation)]`` (one comb period)."""
         freqs, mag = HydraTransform.kernel_frequency_response(
             weight, dilation, sfreq, n_freqs
         )

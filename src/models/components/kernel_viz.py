@@ -84,7 +84,7 @@ def plot_kernels(
         ax_t, ax_f = axes[r][c], axes[r][c + 1]
         peak = _draw_kernel(ax_t, ax_f, info, sfreq)
         ax_t.set_title(f"{_label(info)}  (time)", fontsize=7)
-        ax_f.set_title(f"peak = {peak:.1f} Hz  (freq)", fontsize=7)
+        ax_f.set_title(f"peak = {peak:.3g} Hz  (freq)", fontsize=7)
         # Label the x-axis only on the lowest kernel in each column.
         if i + kernels_per_row >= n:
             ax_t.set_xlabel("ms", fontsize=7)
@@ -165,7 +165,7 @@ def plot_kernels_by_class(
                 f"favors {name} #{info.rank} d{info.dilation} {info.representation}",
                 fontsize=7,
             )
-            ax_f.set_title(f"peak = {peak:.1f} Hz", fontsize=7)
+            ax_f.set_title(f"peak = {peak:.3g} Hz", fontsize=7)
             if r == n_rows - 1 or r == len(infos) - 1:
                 ax_t.set_xlabel("ms", fontsize=7)
                 ax_f.set_xlabel("Hz", fontsize=7)
