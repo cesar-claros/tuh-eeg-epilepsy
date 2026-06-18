@@ -68,3 +68,8 @@ top_kernels:
   weighting: frequency  # frequency | magnitude
   metric: difference    # difference | ratio | logodds  (discriminative only)
   clf_combine: sum      # aggregate a kernel's 2 feature columns: sum | max  (classifier ranking)
+  # Combined peak-frequency histogram (peak_freq_hists.png): which rankings to
+  # show as panels, the bin width (Hz), and the upper frequency (Hz; null = Nyquist).
+  hist_rankings: [most_used, classifier]  # subset/order of most_used, discriminative, classifier
+  hist_bin_width: 1     # histogram bin width in Hz
+  hist_fmax: 60         # histogram upper frequency in Hz (null = Nyquist)

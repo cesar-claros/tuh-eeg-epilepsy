@@ -256,10 +256,11 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
     Writes ``top_kernels.csv`` / ``top_discriminative_kernels.csv`` /
     ``top_classifier_kernels.csv`` (each with a ``peak_freq_hz`` column) and, when a
     sampling rate is derivable, waveform-plus-spectrum plots plus a single
-    ``peak_freq_hists.png`` figure with one peak-frequency histogram per ranking (the
-    discriminative one split by favored class), to the run output directory. The
-    variants (n, weighting, competition, metric, clf_combine) come from the
-    ``top_kernels`` config block.
+    ``peak_freq_hists.png`` figure with a peak-frequency histogram for each ranking
+    in ``hist_rankings`` (the discriminative one split by favored class), to the run
+    output directory. The variants (n, weighting, competition, metric, clf_combine)
+    and the histogram options (hist_rankings, hist_bin_width, hist_fmax) come from
+    the ``top_kernels`` config block.
     """
     from src.models.components import kernel_viz
 
@@ -270,6 +271,12 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
     by = spec.get("by", "max")
     weighting = spec.get("weighting", "frequency")
     metric = spec.get("metric", "difference")
+    # Combined peak-frequency histogram: which rankings to include (subset of
+    # most_used / discriminative / classifier) and the bins.
+    hist_rankings = list(spec.get("hist_rankings", ["most_used", "classifier"]))
+    hist_bin_width = float(spec.get("hist_bin_width", 1.0))
+    _hf = spec.get("hist_fmax", 60.0)
+    hist_fmax = float(_hf) if _hf is not None else None
 
     output_dir = Path(cfg.paths.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -296,8 +303,9 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
             top, sfreq, output_dir / "top_kernels.png", "Top HYDRA kernels (global)"
         )
         # Collect a larger top set (n_hist) for the combined histogram figure.
-        top_hist = feature_extractor.top_kernels(n_hist, by=by, weighting=weighting, sfreq=sfreq)
-        hist_panels.append(("most-used (data win counts)", top_hist))
+        if "most_used" in hist_rankings:
+            top_hist = feature_extractor.top_kernels(n_hist, by=by, weighting=weighting, sfreq=sfreq)
+            hist_panels.append(("most-used (data win counts)", top_hist))
 
     labels = feature_extractor.class_labels()
     if len(labels) == 2:
@@ -329,7 +337,8 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
                 plot_set, sfreq, output_dir / "top_discriminative_kernels.png",
                 "Top discriminative HYDRA kernels", class_names=class_names,
             )
-            hist_panels.append(("class-discriminative", flat))
+            if "discriminative" in hist_rankings:
+                hist_panels.append(("class-discriminative", flat))
     else:
         log.info(f"Skipping discriminative ranking (need 2 classes, have {labels}).")  # noqa: G004
 
@@ -358,10 +367,11 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
                 "Top classifier-weighted HYDRA kernels",
             )
             # Collect a larger top set (n_hist) for the combined histogram figure.
-            clf_hist = feature_extractor.top_kernels_by_coef(
-                coef, n_hist, combine=clf_combine, sfreq=sfreq
-            )
-            hist_panels.append(("classifier-weighted", clf_hist))
+            if "classifier" in hist_rankings:
+                clf_hist = feature_extractor.top_kernels_by_coef(
+                    coef, n_hist, combine=clf_combine, sfreq=sfreq
+                )
+                hist_panels.append(("classifier-weighted", clf_hist))
     elif model is not None:
         log.info("Skipping classifier-weighted ranking (model has no linear coef_).")  # noqa: G004
 
@@ -370,7 +380,7 @@ def _report_top_kernels(cfg: DictConfig, feature_extractor: Any, model: Any = No
     if sfreq is not None and hist_panels:
         kernel_viz.plot_peak_freq_hists(
             hist_panels, sfreq, output_dir / "peak_freq_hists.png",
-            class_names=class_names,
+            bin_width=hist_bin_width, fmax=hist_fmax, class_names=class_names,
         )
 
 
