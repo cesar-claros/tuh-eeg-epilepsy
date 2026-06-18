@@ -1,7 +1,7 @@
 _target_: src.data.tuh_eeg_epilepsy_datamodule.TUHEEGDataModule
 data_dir: ${paths.data_dir}
 version: 'v3.0.0'
-train_val_test_split: [0.8, 0.1, 0.1]
+train_val_test_split: [0.6, 0.2, 0.2] # subject-level (stratified by epilepsy); train+val are merged for fitting, so effectively 80/20 train/test
 window_len_min: 5 # 5 minutes
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 build_dict_learning_set: false # load the (currently unused) dictionary-learning short-window set; off saves EDF reads + RAM

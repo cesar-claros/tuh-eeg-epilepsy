@@ -64,7 +64,7 @@ class TUHEEGDataModule(LightningDataModule):
         self,
         data_dir: str = "../../data/",
         version: str = 'v3.0.0',
-        train_val_test_split: tuple[float, float, float] = (0.8, 0.1, 0.1),
+        train_val_test_split: tuple[float, float, float] = (0.6, 0.2, 0.2),
         window_len_min: int = 5, # 5 minutes
         overlap_pct: float = 0.0,
         batch_size: int = 64,
@@ -95,8 +95,10 @@ class TUHEEGDataModule(LightningDataModule):
             The data directory containing the dataset version folder.
         version : str, default="v3.0.0"
             The corpus version subdirectory to load.
-        train_val_test_split : tuple[float, float, float], default=(0.8, 0.1, 0.1)
-            The subject-level train, validation and test split ratios.
+        train_val_test_split : tuple[float, float, float], default=(0.6, 0.2, 0.2)
+            The subject-level train, validation and test split ratios (stratified by
+            epilepsy). The trainer merges train + val before fitting, so this is
+            effectively an 80/20 train/test split.
         window_len_min : int, default=5
             Window length in minutes.
         overlap_pct : float, default=0.0
