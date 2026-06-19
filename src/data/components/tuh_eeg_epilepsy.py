@@ -237,6 +237,7 @@ class TUHEEGEpilepsy:
         self,
         mode: str = 'raw',
         filter_freq: Optional[List[float]] = None,
+        notch_freqs: Optional[List[float]] = None,
         target_name: Optional[Union[str, Tuple[str, ...]]] = 'epilepsy',
         pick_channels: Optional[List[str]] = None,
         preload: bool = False,
@@ -278,6 +279,7 @@ class TUHEEGEpilepsy:
                     stratify_by=stratify_by,
                     mode=mode,
                     filter_freq=filter_freq,
+                    notch_freqs=notch_freqs,
                     target_name=target_name,
                     pick_channels=pick_channels,
                     rename_channels=rename_channels,
@@ -1320,6 +1322,7 @@ class TUHEEGEpilepsy:
         rename_channels: bool,
         set_montage: bool,
         n_jobs: int,
+        notch_freqs: Optional[List[float]] = None,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor, pd.DataFrame], Dict[str, Tuple[torch.Tensor, torch.Tensor, pd.DataFrame]]]:
         
         # RNG
@@ -1582,7 +1585,9 @@ class TUHEEGEpilepsy:
                 # Apply processing matching _create_dataset
                 if filter_freq is not None:
                     raw.filter(l_freq=filter_freq[0], h_freq=filter_freq[1], verbose='ERROR')
-            
+                if notch_freqs:
+                    raw.notch_filter(notch_freqs, verbose='ERROR')
+
                 if rename_channels:
                     TUHEEGEpilepsy._rename_channels(raw)
             

@@ -200,6 +200,7 @@ class WindowDataset(Dataset):
         ic_bag_max_k: int = 20,
         ic_bag_sign_normalize: bool = True,
         ic_bag_rank_by: str = 'variance',
+        notch_freqs: Optional[List[float]] = None,
     ) -> None:
         self.plan = plan.reset_index(drop=True)
         self.mode = mode
@@ -208,6 +209,7 @@ class WindowDataset(Dataset):
         self.target_len = int(target_len)
         self.montages = montages
         self.filter_freq = filter_freq
+        self.notch_freqs = notch_freqs
         self.rename_channels = rename_channels
         self.set_montage = set_montage
         self.pick_channels = pick_channels
@@ -275,6 +277,8 @@ class WindowDataset(Dataset):
                         return None
                 if self.filter_freq is not None:
                     raw.filter(l_freq=self.filter_freq[0], h_freq=self.filter_freq[1], verbose='ERROR')
+                if self.notch_freqs:
+                    raw.notch_filter(self.notch_freqs, verbose='ERROR')
                 if self.rename_channels:
                     TUHEEGEpilepsy._rename_channels(raw)
                 if self.set_montage:
@@ -356,6 +360,7 @@ def _build_lazy_from_csv(
     ic_bag_max_k: int,
     ic_bag_sign_normalize: bool,
     ic_bag_rank_by: str,
+    notch_freqs: Optional[List[float]] = None,
 ) -> dict:
     """Build per-split lazy datasets from fixed window CSVs (one path per split).
 
@@ -394,6 +399,7 @@ def _build_lazy_from_csv(
             ic_bag_max_k=ic_bag_max_k,
             ic_bag_sign_normalize=ic_bag_sign_normalize,
             ic_bag_rank_by=ic_bag_rank_by,
+            notch_freqs=notch_freqs,
         )
         out[split_name] = (dataset, plan.drop(columns=['description_row']))
     return out
@@ -422,6 +428,7 @@ def build_lazy_datasets(
     ic_bag_sign_normalize: bool = True,
     ic_bag_rank_by: str = 'variance',
     window_csvs: Optional[dict] = None,
+    notch_freqs: Optional[List[float]] = None,
 ) -> dict:
     """Build ``{split: (WindowDataset, metadata_df)}`` without loading any signal.
 
@@ -443,7 +450,7 @@ def build_lazy_datasets(
             target_name=target_name, pick_channels=pick_channels,
             rename_channels=rename_channels, set_montage=set_montage,
             ic_bag_max_k=ic_bag_max_k, ic_bag_sign_normalize=ic_bag_sign_normalize,
-            ic_bag_rank_by=ic_bag_rank_by,
+            ic_bag_rank_by=ic_bag_rank_by, notch_freqs=notch_freqs,
         )
 
     rng = np.random.RandomState(seed)
@@ -511,6 +518,7 @@ def build_lazy_datasets(
             ic_bag_max_k=ic_bag_max_k,
             ic_bag_sign_normalize=ic_bag_sign_normalize,
             ic_bag_rank_by=ic_bag_rank_by,
+            notch_freqs=notch_freqs,
         )
         meta = (
             split_plan.drop(columns=['description_row'])
