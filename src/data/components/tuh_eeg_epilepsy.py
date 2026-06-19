@@ -565,6 +565,99 @@ class TUHEEGEpilepsy:
         logger.info("IC dipole fitting completed.")
 
     @staticmethod
+    def _generate_psd(
+        file_path: Path,
+        target_sfreq: float = 250.0,
+        win_sec: float = 4.0,
+    ) -> None:
+        """Compute and cache the per-channel Welch PSD for one recording.
+
+        Reads the recording, renames channels to canonical 10-20 names, keeps the
+        EEG channels, resamples to ``target_sfreq`` so every recording shares one
+        frequency grid, and writes ``-psd.npz`` next to the ``.edf`` with arrays
+        ``freqs`` (Hz), ``psd`` (n_channels, n_freqs; V^2/Hz), ``channels``, plus
+        ``sfreq`` and ``n_times`` (the latter for length-weighted aggregation).
+        Idempotent: skips if the ``.npz`` already exists. The 60 Hz line is kept
+        (no notch).
+        """
+        from scipy.signal import welch
+
+        psd_path = file_path.parent / file_path.name.replace(".edf", "-psd.npz")
+        if psd_path.exists():
+            return
+        try:
+            raw = mne.io.read_raw_edf(file_path, preload=True, verbose="error")
+            TUHEEGEpilepsy._rename_channels(raw)
+            eeg = [
+                c for c, t in zip(raw.ch_names, raw.get_channel_types()) if t == "eeg"
+            ]
+            if not eeg:
+                logger.error(f"No EEG channels for {file_path.name}; skipping PSD.")
+                return
+            raw.pick(eeg)
+            if not np.isclose(raw.info["sfreq"], target_sfreq):
+                raw.resample(target_sfreq, verbose="error")
+            nperseg = int(win_sec * target_sfreq)
+            if raw.n_times < nperseg:
+                logger.warning(
+                    f"{file_path.name} shorter than {win_sec}s "
+                    f"({raw.n_times} samples); skipping PSD."
+                )
+                return
+            data = raw.get_data()  # (n_channels, n_times), volts
+            freqs, psd = welch(
+                data, fs=target_sfreq, nperseg=nperseg, noverlap=nperseg // 2, axis=-1
+            )
+            np.savez_compressed(
+                psd_path,
+                freqs=freqs.astype(np.float32),
+                psd=psd.astype(np.float32),
+                channels=np.array(raw.ch_names),
+                sfreq=np.float32(target_sfreq),
+                n_times=np.int64(raw.n_times),
+            )
+        except Exception as e:
+            logger.error(f"Failed PSD for {file_path.name}: {e}")
+
+    def compute_psd(
+        self,
+        n_jobs: int = 1,
+        target_sfreq: float = 250.0,
+        win_sec: float = 4.0,
+    ) -> None:
+        """Compute and cache a per-channel Welch PSD for every recording.
+
+        Writes one ``-psd.npz`` next to each ``.edf`` (see ``_generate_psd``); existing
+        files are skipped, so the pass is idempotent. The PSD is split-independent, so
+        it is computed once and reused for every train/test split; it is far cheaper
+        than the ICA precompute (FFT only, no model fitting). Use the saved files with
+        ``src/plot_psd.py``.
+
+        Parameters
+        ----------
+        n_jobs : int, default=1
+            Number of parallel workers (joblib).
+        target_sfreq : float, default=250.0
+            Resample rate (Hz) so all recordings share one frequency grid.
+        win_sec : float, default=4.0
+            Welch segment length in seconds (``nperseg = win_sec * target_sfreq``).
+        """
+        logger.info(
+            f"Computing PSD for {len(self.descriptions)} recordings "
+            f"(target {target_sfreq:.0f} Hz, {win_sec}s Welch windows)..."
+        )
+        paths = self.descriptions["path"].tolist()
+        if n_jobs == 1:
+            for path in tqdm(paths, desc="Computing PSD"):
+                self._generate_psd(path, target_sfreq, win_sec)
+        else:
+            Parallel(n_jobs=n_jobs)(
+                delayed(self._generate_psd)(path, target_sfreq, win_sec)
+                for path in tqdm(paths, desc="Computing PSD")
+            )
+        logger.info("PSD computation completed.")
+
+    @staticmethod
     def _rename_channels(raw: mne.io.BaseRaw) -> None:
         """
         Renames the EEG channels using mne conventions and sets their type to 'eeg'.
