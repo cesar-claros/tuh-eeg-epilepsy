@@ -86,6 +86,12 @@ class TUHEEGEpilepsy:
     _DIP_Y_FRONTAL = 0.030     # y above this -> frontal
     _DIP_Y_POSTERIOR = -0.020  # y below this -> posterior
 
+    # Seconds of real signal kept on each side of a window when a sensor-space
+    # filter (band-pass / notch) is applied, so the filter sees real neighbouring
+    # data (equivalent to filtering before windowing) and the margin, which carries
+    # the filter edge transient, is trimmed off. Generous for a line-noise notch.
+    _FILTER_PAD_SEC = 4.0
+
     def __init__(
         self,
         data_dir: str = '../../../data/',
@@ -1524,20 +1530,20 @@ class TUHEEGEpilepsy:
                 
                 raw = TUHEEGEpilepsy._read_raw_edf(file_path, include=ch_names, preload=False)
 
-                 # Basic Filter (should be done before cropping ideally to avoid edge artifacts, or crop with margin)
-                 # If we filter AFTER cropping, we need margin. 
-                 # Given user request for "load only necessary", we accept edge artifacts or assume data is clean/prefiltered,
-                 # OR we load with margin. Let's load exact for now to match request strictness, or suggest margin.
-                 # Standard practice: Load, (Filter), Crop. 
-                 # To save memory: Crop then Filter (bad edges).
-                 # To do it right without full load: read_raw_edf allows cropping.
-                
-                # Filter before crop if we want perfect filter, but that requires full load.
-                # Compromise: Crop with margin? 
-                # For this implementation, I will just crop exact window.
-                
-                raw.crop(tmin=row_meta['start'], tmax=row_meta['end'], include_tmax=False)
+                # When a sensor-space filter (band-pass / notch) is applied, crop
+                # with a margin so the filter sees real neighbouring data (equivalent
+                # to filtering the recording before windowing), then trim the margin
+                # off below; otherwise crop the exact window.
+                sensor_filter = mode in ('raw', 'ica_clean') and (
+                    filter_freq is not None or notch_freqs
+                )
+                pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
+                rec_end = (raw.n_times - 1) / raw.info['sfreq']
+                tmin = max(0.0, row_meta['start'] - pad)
+                tmax = min(rec_end, row_meta['end'] + pad)
+                raw.crop(tmin=tmin, tmax=tmax, include_tmax=False)
                 raw.load_data()
+                left = row_meta['start'] - tmin  # window offset within the crop
 
                 # Option 3 (brain_ic): build the fixed K-region time series from
                 # the kept brain ICs and return it directly. The regions are the
@@ -1600,9 +1606,13 @@ class TUHEEGEpilepsy:
                 # To Epoch/Tensor
                 # Resample? Not requested, but raw.get_data() returns numpy
                 data = raw.get_data() # (Channels, Time)
+                sfreq = raw.info['sfreq']
+                if pad > 0.0:  # trim the filter margin back to the exact window
+                    i0 = int(round(left * sfreq))
+                    win_n = int(round((row_meta['end'] - row_meta['start']) * sfreq))
+                    data = data[:, i0:i0 + win_n]
                 # Ensure fixed length (Float rounding issues might give +/- 1 sample)
                 # Check expected samples
-                sfreq = raw.info['sfreq']
                 expected_samples = int(window_len_s * sfreq)
                 
                 if data.shape[1] > expected_samples:

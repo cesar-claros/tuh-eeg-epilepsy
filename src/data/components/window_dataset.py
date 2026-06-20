@@ -241,10 +241,22 @@ class WindowDataset(Dataset):
             include = None
         else:
             include = list(self.montages[desc['montage']]['channels'])
+        # Filtering a sensor-space window per-window would leave edge transients at
+        # the window boundaries. Instead crop with a margin so the filter sees real
+        # neighbouring data (equivalent to filtering the recording before windowing),
+        # then trim the margin off below; without filtering, crop the exact window.
+        sensor_filter = self.mode in ('raw', 'ica_clean') and (
+            self.filter_freq is not None or self.notch_freqs
+        )
+        pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
         try:
             raw = TUHEEGEpilepsy._read_raw_edf(desc['path'], include=include, preload=False)
-            raw.crop(tmin=row['start'], tmax=row['end'], include_tmax=False)
+            rec_end = (raw.n_times - 1) / raw.info['sfreq']
+            tmin = max(0.0, row['start'] - pad)
+            tmax = min(rec_end, row['end'] + pad)
+            raw.crop(tmin=tmin, tmax=tmax, include_tmax=False)
             raw.load_data()
+            left = row['start'] - tmin  # window offset within the (margined) crop
 
             if self.mode == 'brain_ic':
                 out = TUHEEGEpilepsy._brain_ic_regional(
@@ -288,6 +300,10 @@ class WindowDataset(Dataset):
                 data = raw.get_data()
                 ch_names = raw.ch_names
                 sfreq = raw.info['sfreq']
+                if pad > 0.0:  # trim the filter margin back to the exact window
+                    i0 = int(round(left * sfreq))
+                    win_n = int(round((row['end'] - row['start']) * sfreq))
+                    data = data[:, i0:i0 + win_n]
 
             return _harmonize_one(
                 data, ch_names, sfreq, self.target_channels, self.target_sfreq, self.target_len
