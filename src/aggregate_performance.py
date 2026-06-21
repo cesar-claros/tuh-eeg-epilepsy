@@ -135,9 +135,19 @@ def _focused(combined: pd.DataFrame, split: str, level: str, metrics: list[str])
 
 
 def _strip_seed(overrides: object) -> str:
-    """Drop any ``seed=`` / ``data.seed=`` token so seed-only differences group."""
+    """Drop run-location / seed tokens so only config differences group.
+
+    Removes ``seed=`` / ``data.seed=`` (seed-only differences should group) and
+    ``output_dir=`` / ``paths.output_dir=`` (a per-run output path, never a config
+    dimension; sweeps that set a unique output_dir per run would otherwise never
+    group across seeds, especially when the seed is embedded in the path).
+    """
     parts = [p.strip() for p in str(overrides).split(";") if p.strip()]
-    kept = [p for p in parts if not re.match(r"^(data\.)?seed\s*=", p)]
+    kept = [
+        p for p in parts
+        if not re.match(r"^(data\.)?seed\s*=", p)
+        and not re.match(r"^(paths\.)?output_dir\s*=", p)
+    ]
     return "; ".join(kept)
 
 
