@@ -165,36 +165,40 @@ def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
     from matplotlib.gridspec import GridSpec
 
     n = len(kdf)
+    kpr = 2  # kernel cells per row -> 5 rows x 4 columns for 10 kernels
+    n_rows = (n + kpr - 1) // kpr
     fmask = freqs <= fmax
     fx = freqs[fmask]
     input_ref = 0.5 * (rel[0] + rel[1])  # class-mean relative PSD (pre-filter reference)
 
-    fig = plt.figure(figsize=(8.4, 1.18 * n + 0.6))
-    gs = GridSpec(n, 2, width_ratios=[1.0, 2.6], wspace=0.30, hspace=0.45)
+    fig = plt.figure(figsize=(6.6 * kpr, 1.35 * n_rows + 0.6))
+    gs = GridSpec(n_rows, 2 * kpr, width_ratios=[1.0, 2.6] * kpr, wspace=0.34, hspace=0.42)
     rows = list(kdf.iterrows())
     for i, (_, row) in enumerate(rows):
-        last = i == n - 1
+        r, cp = divmod(i, kpr)  # grid row, and which kernel cell within the row
+        top = r == 0            # column titles on the first grid row
+        show_x = (i + kpr) >= n  # x labels only when no kernel sits directly below
         w = np.array([row[f"w{j}"] for j in range(9)], dtype=float)
         dil = int(row["dilation"])
         rep = str(row.get("representation", "raw"))
 
         # --- left: the 9 taps ---
-        axk = fig.add_subplot(gs[i, 0])
+        axk = fig.add_subplot(gs[r, cp * 2])
         axk.stem(np.arange(9), w, basefmt=" ", linefmt="0.4", markerfmt="o")
         axk.axhline(0.0, color="0.7", lw=0.6)
         axk.set_xticks([0, 4, 8])
         axk.tick_params(labelsize=7)
         axk.set_ylabel(f"#{i + 1}", fontsize=8, rotation=0, labelpad=12, va="center")
-        if not last:
+        if not show_x:
             axk.set_xticklabels([])
         else:
             axk.set_xlabel("tap", fontsize=8)
-        if i == 0:
+        if top:
             axk.set_title("kernel taps", fontsize=9)
 
         # --- right: PSD after the kernel is applied to the raw signal ---
         H2 = _kernel_response(row, freqs, sfreq) ** 2
-        axp = fig.add_subplot(gs[i, 1])
+        axp = fig.add_subplot(gs[r, cp * 2 + 1])
         in_db = 10.0 * np.log10(input_ref[fmask] + _EPS)
         axp.plot(fx, in_db, color="0.6", lw=0.8, ls="--", label="input PSD" if i == 0 else None)
         peak = in_db.max()
@@ -212,12 +216,13 @@ def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
         axp.tick_params(labelsize=7)
         axp.text(0.985, 0.90, f"d={dil}, {rep}", transform=axp.transAxes, ha="right", va="top",
                  fontsize=7, color="0.25")
-        if not last:
+        if not show_x:
             axp.set_xticklabels([])
         else:
             axp.set_xlabel("frequency (Hz)", fontsize=8)
-        if i == 0:
+        if top:
             axp.set_title("PSD after kernel applied to raw signal (relative, dB)", fontsize=9)
+        if i == 0:
             axp.legend(fontsize=6.5, loc="lower left", ncol=3, columnspacing=1.0, handlelength=1.2)
 
     fig.suptitle(f"Top {n} classifier kernels: taps and filtered PSD", fontsize=11, y=0.997)
