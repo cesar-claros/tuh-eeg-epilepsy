@@ -1,31 +1,33 @@
-"""Relate the top HYDRA kernels to the training-set PSD (panels A + B).
+"""Relate the top classifier HYDRA kernels to the training-set PSD.
 
 For a run, this reads the training subjects' cached PSDs (``-psd.npz`` from
-``precompute_psd.py``) and a top-kernel CSV (``top_kernels.csv`` /
-``top_discriminative_kernels.csv`` / ``top_classifier_kernels.csv``), recomputes
-each kernel's magnitude response ``|H(f)|`` from its saved weights / dilation /
-representation (View B: the first-difference high-pass is folded into ``diff``
-kernels so every spectrum is the response to the raw signal), and draws, per kernel
-CSV, one figure with:
+``precompute_psd.py``) and the ``top_classifier_kernels.csv`` (kernels ranked by
+classifier ``|coef|``), recomputes each kernel's magnitude response ``|H(f)|`` from
+its saved weights / dilation / representation (View B: the first-difference
+high-pass is folded into ``diff`` kernels, so every spectrum is the response to the
+raw signal x), and writes two figures:
 
-- Panel A: the channel-averaged, class-split **relative** PSD (epilepsy vs
-  no-epilepsy, each normalized to unit total power, in dB) with the kernels'
-  aggregate spectral sensitivity ``sum |H(f)|^2`` overlaid, so you can see where the
-  selected kernels look relative to where the class spectra differ.
-- Panel B: each kernel's class power log-ratio ``10 log10(P_epi / P_noepi)`` where
-  ``P_class = integral |H(f)|^2 * PSD_rel_class(f) df`` (Parseval: the kernel's
-  expected output power under the class spectral shape). Positive = the kernel sees
-  relatively more power in epilepsy.
+1. ``kernel_sensitivity_<csv>.png`` (Panel A): the channel-averaged, class-split
+   **relative** PSD (epilepsy vs no-epilepsy, each normalized to unit total power,
+   dB) with the kernels' classifier-weighted aggregate spectral sensitivity
+   ``sum_k |coef_k| * |H_k(f)|^2`` overlaid -- where the selected kernels look,
+   relative to where the class spectra differ.
 
-PSDs are normalized to unit power PER CLASS first, so the comparison reflects
-spectral SHAPE, not the broadband amplitude/loudness difference between cohorts.
-Kernels are compared against the channel-averaged PSD because multichannel HYDRA
-mixes random channel subsets (the reading is spectral, not spatial).
+2. ``kernel_taps_psd_<csv>.png``: one row per top-N kernel, the kernel's 9 taps on
+   the left and, on the right, the **PSD after that kernel is applied to the raw
+   signal**, per class. The filtered spectrum is ``|H(f)|^2 * PSD_rel_class(f)``
+   (the PSD of the kernel output, by the filter power theorem), renormalized to unit
+   power so it shows how the kernel *reshapes* the spectrum; the dashed grey line is
+   the input (pre-filter) relative PSD for reference.
+
+PSDs are normalized to unit power PER CLASS first, so comparisons reflect spectral
+SHAPE, not the broadband amplitude/loudness difference between cohorts. Kernels are
+compared against the channel-averaged PSD because multichannel HYDRA mixes random
+channel subsets (the reading is spectral, not spatial).
 
 This is a sensitivity / response view: HYDRA features are competition win-counts,
-not filtered power, so ``|H(f)|`` says which frequencies drive a kernel, and
-``P_class`` is a principled proxy for how strongly it responds per class, not the
-literal feature value.
+not filtered power, so ``|H(f)|`` says which frequencies drive a kernel and the
+filtered PSD shows what its output spectrum looks like, not the literal feature.
 
 Example
 -------
@@ -34,7 +36,6 @@ Example
     python src/kernel_psd.py \
         --windows_csv logs/train/runs/<ts>/windows_train.csv \
         --kernels_csv logs/train/runs/<ts>/top_classifier_kernels.csv \
-        --kernels_csv logs/train/runs/<ts>/top_discriminative_kernels.csv \
         --out_dir logs/train/runs/<ts>
 """
 
@@ -48,6 +49,7 @@ import pandas as pd
 
 CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
+_EPS = 1e-30
 
 
 def _load_recording_psd(edf_path: str):
@@ -70,7 +72,7 @@ def _class_relative_psd(windows_csv: str):
     df = pd.read_csv(windows_csv)
     freqs = None
     per_class_subjects: dict = {0: [], 1: []}
-    for subj, g in df.groupby("subject"):
+    for _, g in df.groupby("subject"):
         cls = int(bool(g["epilepsy"].iloc[0]))
         acc = None
         wsum = 0.0
@@ -102,10 +104,9 @@ def _class_relative_psd(windows_csv: str):
 def _kernel_response(row: pd.Series, freqs: np.ndarray, sfreq: float) -> np.ndarray:
     """``|H(f)|`` of one kernel on the PSD grid (View B for 'diff').
 
-    Evaluates over the full band (comb replicas included), so the power integral
-    captures the kernel's true response. For 'diff' kernels the undilated
-    first-difference high-pass ``2|sin(pi f / sfreq)|`` is applied (effective
-    response on the raw signal x).
+    Evaluates over the full band (comb replicas included). For 'diff' kernels the
+    undilated first-difference high-pass ``2|sin(pi f / sfreq)|`` is applied, so the
+    result is the kernel's effective response on the raw signal x.
     """
     w = np.array([row[f"w{i}"] for i in range(9)], dtype=float)
     d = float(row["dilation"])
@@ -117,96 +118,120 @@ def _kernel_response(row: pd.Series, freqs: np.ndarray, sfreq: float) -> np.ndar
     return mag
 
 
-def _kernel_psd_figure(kernels_csv, freqs, rel, counts, sfreq, fmax, top_n, out_path):
-    """Build the A + B figure for one kernel CSV. Returns a summary dict."""
+def _panel_a_figure(kdf, freqs, rel, counts, sfreq, fmax, out_path):
+    """Panel A: class relative PSD (dB) + classifier-weighted kernel sensitivity."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    kdf = pd.read_csv(kernels_csv)
-    is_disc = "favors" in kdf.columns
-    # |H(f)|^2 per kernel on the full grid, and the per-class power integral
-    # (df constant -> drops out of the ratio; this is a weighted mean of |H|^2).
     H2 = np.stack([_kernel_response(r, freqs, sfreq) ** 2 for _, r in kdf.iterrows()])
-    p_epi = (H2 * rel[1][None, :]).sum(axis=1)
-    p_no = (H2 * rel[0][None, :]).sum(axis=1)
-    logratio = 10.0 * np.log10((p_epi + 1e-30) / (p_no + 1e-30))
+    weights = kdf["count"].to_numpy(dtype=float) if "count" in kdf.columns else np.ones(len(kdf))
+    sens = (weights[:, None] * H2).sum(axis=0)
+    sens = sens / sens.max()
 
     fmask = freqs <= fmax
     fx = freqs[fmask]
-    fig, (axA, axB) = plt.subplots(2, 1, figsize=(7.5, 6.4))
-
-    # --- Panel A: relative PSD (dB) + aggregate kernel sensitivity ---
+    fig, axA = plt.subplots(figsize=(7.5, 3.6))
     for cls in (0, 1):
         axA.plot(
-            fx, 10.0 * np.log10(rel[cls][fmask] + 1e-30),
+            fx, 10.0 * np.log10(rel[cls][fmask] + _EPS),
             color=CLASS_COLORS[cls], lw=1.4, label=f"{CLASS_NAMES[cls]} (n={counts[cls]})",
         )
     axA.set_xlabel("frequency (Hz)")
     axA.set_ylabel("relative PSD (dB)")
     axA.set_xlim(0, fmax)
     axA.legend(fontsize=8, loc="upper right")
-    axS = axA.twinx()
-    sens = H2.sum(axis=0)
-    sens = sens / sens.max()
-    axS.fill_between(fx, 0, sens[fmask], color="0.5", alpha=0.18)
-    axS.plot(fx, sens[fmask], color="0.35", lw=1.2, label="kernel sensitivity")
-    for h2 in H2[: min(top_n, len(H2))]:
-        axS.plot(fx, (h2 / h2.max())[fmask], color="0.55", lw=0.4, alpha=0.35)
-    axS.set_ylim(0, 1.05)
-    axS.set_ylabel(r"kernel $\sum|H(f)|^2$ (norm.)")
-    axS.legend(fontsize=8, loc="upper left")
-    axA.set_title(f"A: class relative PSD vs kernel sensitivity ({Path(kernels_csv).stem})", fontsize=9)
 
-    # --- Panel B: per-kernel class power log-ratio ---
-    order = np.argsort(logratio)
-    y = np.arange(len(order))
-    if is_disc:
-        fav = kdf["favors"].to_numpy()[order]
-        colors = [CLASS_COLORS[int(f)] for f in fav]
-    else:
-        colors = [CLASS_COLORS[1] if logratio[i] >= 0 else CLASS_COLORS[0] for i in order]
-    axB.barh(y, logratio[order], color=colors, height=0.8)
-    axB.axvline(0.0, color="0.3", lw=0.7)
-    axB.set_yticks([])
-    axB.set_ylabel("kernels (sorted)")
-    axB.set_xlabel(r"class power log-ratio $10\log_{10}(P_{\mathrm{epi}}/P_{\mathrm{no}})$  (+ = epilepsy)")
-    axB.set_title("B: per-kernel relative-power preference by class", fontsize=9)
+    axS = axA.twinx()
+    axS.fill_between(fx, 0, sens[fmask], color="0.5", alpha=0.18)
+    axS.plot(fx, sens[fmask], color="0.30", lw=1.4, label=r"kernel sensitivity")
+    axS.set_ylim(0, 1.05)
+    axS.set_ylabel(r"classifier $\sum_k|c_k|\,|H_k(f)|^2$ (norm.)")
+    axS.legend(fontsize=8, loc="upper left")
+    axA.set_title("Top classifier kernels: spectral sensitivity vs class PSD", fontsize=10)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
-    summary = {
-        "csv": Path(kernels_csv).name,
-        "n_kernels": len(kdf),
-        "mean_logratio_dB": float(np.mean(logratio)),
-        "frac_favor_epilepsy": float(np.mean(logratio >= 0)),
-    }
-    if is_disc:
-        fav = kdf["favors"].to_numpy()
-        agree = np.mean((logratio >= 0) == (fav == 1))
-        summary["favors_vs_power_agreement"] = float(agree)
-    else:
-        rank = kdf["count"].to_numpy() if "count" in kdf.columns else np.arange(len(kdf))[::-1]
-        if np.std(rank) > 0:
-            summary["corr_rank_vs_abs_logratio"] = float(
-                np.corrcoef(rank, np.abs(logratio))[0, 1]
-            )
-    return summary
+
+def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
+    """One row per kernel: 9 taps (left) + PSD after the kernel filters the raw signal (right)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    n = len(kdf)
+    fmask = freqs <= fmax
+    fx = freqs[fmask]
+    input_ref = 0.5 * (rel[0] + rel[1])  # class-mean relative PSD (pre-filter reference)
+
+    fig = plt.figure(figsize=(8.4, 1.18 * n + 0.6))
+    gs = GridSpec(n, 2, width_ratios=[1.0, 2.6], wspace=0.30, hspace=0.45)
+    rows = list(kdf.iterrows())
+    for i, (_, row) in enumerate(rows):
+        last = i == n - 1
+        w = np.array([row[f"w{j}"] for j in range(9)], dtype=float)
+        dil = int(row["dilation"])
+        rep = str(row.get("representation", "raw"))
+
+        # --- left: the 9 taps ---
+        axk = fig.add_subplot(gs[i, 0])
+        axk.stem(np.arange(9), w, basefmt=" ", linefmt="0.4", markerfmt="o")
+        axk.axhline(0.0, color="0.7", lw=0.6)
+        axk.set_xticks([0, 4, 8])
+        axk.tick_params(labelsize=7)
+        axk.set_ylabel(f"#{i + 1}", fontsize=8, rotation=0, labelpad=12, va="center")
+        if not last:
+            axk.set_xticklabels([])
+        else:
+            axk.set_xlabel("tap", fontsize=8)
+        if i == 0:
+            axk.set_title("kernel taps", fontsize=9)
+
+        # --- right: PSD after the kernel is applied to the raw signal ---
+        H2 = _kernel_response(row, freqs, sfreq) ** 2
+        axp = fig.add_subplot(gs[i, 1])
+        in_db = 10.0 * np.log10(input_ref[fmask] + _EPS)
+        axp.plot(fx, in_db, color="0.6", lw=0.8, ls="--", label="input PSD" if i == 0 else None)
+        peak = in_db.max()
+        for cls in (0, 1):
+            out = H2 * rel[cls]
+            out = out / (out.sum() + _EPS)  # renormalize: how the kernel reshapes the spectrum
+            out_db = 10.0 * np.log10(out[fmask] + _EPS)
+            peak = max(peak, out_db.max())
+            axp.plot(fx, out_db, color=CLASS_COLORS[cls], lw=1.1,
+                     label=CLASS_NAMES[cls] if i == 0 else None)
+        # Clip the floor so the comb nulls (exact zeros -> -inf dB) do not crush the
+        # visible shape; ~45 dB of dynamic range shows the reshaping and the teeth.
+        axp.set_ylim(peak - 45.0, peak + 3.0)
+        axp.set_xlim(0, fmax)
+        axp.tick_params(labelsize=7)
+        axp.text(0.985, 0.90, f"d={dil}, {rep}", transform=axp.transAxes, ha="right", va="top",
+                 fontsize=7, color="0.25")
+        if not last:
+            axp.set_xticklabels([])
+        else:
+            axp.set_xlabel("frequency (Hz)", fontsize=8)
+        if i == 0:
+            axp.set_title("PSD after kernel applied to raw signal (relative, dB)", fontsize=9)
+            axp.legend(fontsize=6.5, loc="lower left", ncol=3, columnspacing=1.0, handlelength=1.2)
+
+    fig.suptitle(f"Top {n} classifier kernels: taps and filtered PSD", fontsize=11, y=0.997)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows_csv", required=True, help="windows_train.csv from a run.")
-    parser.add_argument(
-        "--kernels_csv", action="append", required=True,
-        help="A top-kernel CSV (repeatable: pass once per ranking).",
-    )
+    parser.add_argument("--kernels_csv", required=True, help="top_classifier_kernels.csv from the run.")
     parser.add_argument("--out_dir", default=None, help="Output dir (default: windows_csv dir).")
     parser.add_argument("--fmax", type=float, default=60.0, help="Max frequency to plot (Hz).")
-    parser.add_argument("--top_n", type=int, default=10, help="Individual |H| traces drawn in panel A.")
+    parser.add_argument("--top_taps", type=int, default=10, help="Kernels shown in the taps figure.")
     parser.add_argument(
         "--kernel_sfreq", type=float, default=250.0,
         help="Sample rate (Hz) the kernels were applied at (the resampled window rate).",
@@ -218,15 +243,18 @@ def main() -> None:
         raise SystemExit(f"Need both classes in training PSDs; got counts {counts}.")
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.windows_csv).parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(args.kernels_csv).stem
 
-    for kcsv in args.kernels_csv:
-        out_path = out_dir / f"kernel_psd_{Path(kcsv).stem}.png"
-        summary = _kernel_psd_figure(
-            kcsv, freqs, rel, counts, args.kernel_sfreq, args.fmax, args.top_n, out_path
-        )
-        print(f"wrote {out_path}")
-        print("  " + "  ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
-                               for k, v in summary.items()))
+    kdf = pd.read_csv(args.kernels_csv)
+    a_path = out_dir / f"kernel_sensitivity_{stem}.png"
+    _panel_a_figure(kdf, freqs, rel, counts, args.kernel_sfreq, args.fmax, a_path)
+    print(f"wrote {a_path}")
+
+    taps_path = out_dir / f"kernel_taps_psd_{stem}.png"
+    _kernel_taps_psd_figure(
+        kdf.head(args.top_taps), freqs, rel, args.kernel_sfreq, args.fmax, taps_path
+    )
+    print(f"wrote {taps_path}  (top {min(args.top_taps, len(kdf))} kernels)")
 
 
 if __name__ == "__main__":
