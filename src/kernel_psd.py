@@ -156,8 +156,15 @@ def _panel_a_figure(kdf, freqs, rel, counts, sfreq, fmax, out_path):
     plt.close(fig)
 
 
-def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
-    """One row per kernel: 9 taps (left) + PSD after the kernel filters the raw signal (right)."""
+def _kernel_grid_figure(kdf, freqs, rel, sfreq, fmax, out_path, left_mode):
+    """5x4 grid, one cell per kernel: a left panel + the filtered PSD (right).
+
+    ``left_mode`` selects the left panel:
+      - ``"taps"``     : the kernel's 9 weights (time domain).
+      - ``"response"`` : the kernel's effective magnitude response |H(f)| on the raw
+                         signal (View B, linear, max-normalized), sharing the right
+                         panel's frequency axis.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -171,8 +178,9 @@ def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
     fx = freqs[fmask]
     input_ref = 0.5 * (rel[0] + rel[1])  # class-mean relative PSD (pre-filter reference)
 
-    fig = plt.figure(figsize=(6.6 * kpr, 1.35 * n_rows + 0.6))
-    gs = GridSpec(n_rows, 2 * kpr, width_ratios=[1.0, 2.6] * kpr, wspace=0.34, hspace=0.42)
+    left_w = 1.0 if left_mode == "taps" else 1.7  # response panel needs room for the comb
+    fig = plt.figure(figsize=((5.6 + left_w) * kpr, 1.35 * n_rows + 0.6))
+    gs = GridSpec(n_rows, 2 * kpr, width_ratios=[left_w, 2.6] * kpr, wspace=0.34, hspace=0.42)
     rows = list(kdf.iterrows())
     for i, (_, row) in enumerate(rows):
         r, cp = divmod(i, kpr)  # grid row, and which kernel cell within the row
@@ -181,23 +189,33 @@ def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
         w = np.array([row[f"w{j}"] for j in range(9)], dtype=float)
         dil = int(row["dilation"])
         rep = str(row.get("representation", "raw"))
+        H = _kernel_response(row, freqs, sfreq)  # |H(f)| on the raw signal (View B)
 
-        # --- left: the 9 taps ---
+        # --- left: taps (time domain) or magnitude response (frequency domain) ---
         axk = fig.add_subplot(gs[r, cp * 2])
-        axk.stem(np.arange(9), w, basefmt=" ", linefmt="0.4", markerfmt="o")
-        axk.axhline(0.0, color="0.7", lw=0.6)
-        axk.set_xticks([0, 4, 8])
+        if left_mode == "taps":
+            axk.stem(np.arange(9), w, basefmt=" ", linefmt="0.4", markerfmt="o")
+            axk.axhline(0.0, color="0.7", lw=0.6)
+            axk.set_xticks([0, 4, 8])
+            x_label, left_title = "tap", "kernel taps"
+        else:
+            Hn = H / (H[fmask].max() + _EPS)  # normalize to the in-band peak
+            axk.fill_between(fx, 0, Hn[fmask], color="0.55", alpha=0.20)
+            axk.plot(fx, Hn[fmask], color="0.30", lw=1.1)
+            axk.set_xlim(0, fmax)
+            axk.set_ylim(0, 1.05)
+            x_label, left_title = "frequency (Hz)", r"kernel $|H(f)|$ (norm.)"
         axk.tick_params(labelsize=7)
         axk.set_ylabel(f"#{i + 1}", fontsize=8, rotation=0, labelpad=12, va="center")
         if not show_x:
             axk.set_xticklabels([])
         else:
-            axk.set_xlabel("tap", fontsize=8)
+            axk.set_xlabel(x_label, fontsize=8)
         if top:
-            axk.set_title("kernel taps", fontsize=9)
+            axk.set_title(left_title, fontsize=9)
 
         # --- right: PSD after the kernel is applied to the raw signal ---
-        H2 = _kernel_response(row, freqs, sfreq) ** 2
+        H2 = H ** 2
         axp = fig.add_subplot(gs[r, cp * 2 + 1])
         in_db = 10.0 * np.log10(input_ref[fmask] + _EPS)
         axp.plot(fx, in_db, color="0.6", lw=0.8, ls="--", label="input PSD" if i == 0 else None)
@@ -225,7 +243,8 @@ def _kernel_taps_psd_figure(kdf, freqs, rel, sfreq, fmax, out_path):
         if i == 0:
             axp.legend(fontsize=6.5, loc="lower left", ncol=3, columnspacing=1.0, handlelength=1.2)
 
-    fig.suptitle(f"Top {n} classifier kernels: taps and filtered PSD", fontsize=11, y=0.997)
+    left_name = "taps" if left_mode == "taps" else "frequency response"
+    fig.suptitle(f"Top {n} classifier kernels: {left_name} and filtered PSD", fontsize=11, y=0.997)
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
@@ -255,11 +274,12 @@ def main() -> None:
     _panel_a_figure(kdf, freqs, rel, counts, args.kernel_sfreq, args.fmax, a_path)
     print(f"wrote {a_path}")
 
-    taps_path = out_dir / f"kernel_taps_psd_{stem}.png"
-    _kernel_taps_psd_figure(
-        kdf.head(args.top_taps), freqs, rel, args.kernel_sfreq, args.fmax, taps_path
-    )
-    print(f"wrote {taps_path}  (top {min(args.top_taps, len(kdf))} kernels)")
+    top = kdf.head(args.top_taps)
+    n_top = min(args.top_taps, len(kdf))
+    for left_mode, tag in (("taps", "taps"), ("response", "response")):
+        path = out_dir / f"kernel_{tag}_psd_{stem}.png"
+        _kernel_grid_figure(top, freqs, rel, args.kernel_sfreq, args.fmax, path, left_mode)
+        print(f"wrote {path}  (top {n_top} kernels)")
 
 
 if __name__ == "__main__":
