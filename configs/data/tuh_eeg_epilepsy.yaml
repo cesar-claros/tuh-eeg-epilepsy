@@ -3,9 +3,10 @@ data_dir: ${paths.data_dir}
 version: 'v3.0.0'
 train_val_test_split: [0.6, 0.2, 0.2] # subject-level (stratified by epilepsy); train+val are merged for fitting, so effectively 80/20 train/test
 window_len_min: 5 # 5 minutes
+target_sfreq: 256 # resample every window to this rate (Hz), matching the PSD precompute (--target_sfreq) and the bipolar/BioFundation preprocessing. Set null to fall back to the corpus-min sfreq (no upsampling).
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 build_dict_learning_set: false # load the (currently unused) dictionary-learning short-window set; off saves EDF reads + RAM
-lazy_loading: false # stream windows from disk on demand (O(batch) RAM) instead of materializing all upfront; supports signal_mode raw/ica_clean/brain_ic/ic_bag
+lazy_loading: false # stream windows from disk on demand (O(batch) RAM) instead of materializing all upfront; supports signal_mode raw/bipolar/ica_clean/brain_ic/ic_bag
 # Reuse a fixed window set for reproducibility / identical windows across signal
 # modes: point these at a previous run's windows_{train,val,test}.csv. When all
 # three are set the plan is loaded from them instead of generated (requires
@@ -25,7 +26,7 @@ overlap_pct: 0.0
 # short subjects keep all and long ones are capped. The run log prints a "Window
 # budget: kept / available" line so the effect is visible.
 max_windows_per_subject: null
-signal_mode: raw # 'raw' (sensor EEG) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources) | 'ic_bag' (padded bag of IC sources; pair with feature=ic_bag_transformer)
+signal_mode: raw # 'raw' (sensor EEG) | 'bipolar' (raw re-referenced to the TCP double-banana bipolar montage; ~22 channels, for noise rejection / spike localization) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources) | 'ic_bag' (padded bag of IC sources; pair with feature=ic_bag_transformer)
 # Notch filter (Hz) applied to the sensor-space signal (raw / ica_clean only) per
 # window. null = no notch. Set to [60, 120] to suppress 60 Hz mains line noise and
 # its first harmonic, e.g. data.notch_freqs=[60,120].

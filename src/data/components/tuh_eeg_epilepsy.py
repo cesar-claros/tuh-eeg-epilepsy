@@ -92,6 +92,36 @@ class TUHEEGEpilepsy:
     # the filter edge transient, is trimmed off. Generous for a line-noise notch.
     _FILTER_PAD_SEC = 4.0
 
+    # TCP (double-banana) bipolar montage, in canonical 10-20 names (i.e. AFTER
+    # _rename_channels: "EEG T3-REF" / "EEG T3-LE" -> "T3"). Each entry is
+    # (anode, cathode); the bipolar channel is anode - cathode. Electrodes are reused
+    # across pairs (e.g. T3 appears in four), so the montage is built by differencing
+    # the original data array directly, NOT via mne.set_bipolar_reference (which
+    # mis-derives reused references). Used by signal_mode='bipolar'.
+    #
+    # This single list is the UNION of all four TUH TCP montages (verified equal):
+    # 01_tcp_ar, 02_tcp_le, 03_tcp_ar_a, 04_tcp_le_a. The montages differ only in
+    #   (a) reference suffix -REF (avg ref) vs -LE (linked ears): unified here because
+    #       _rename_channels strips both before this runs; and
+    #   (b) the two ear pairs A1-T3 / T4-A2: present in *_ar / *_le, absent in the
+    #       *_a variants (no A1/A2 electrodes). _apply_bipolar forms a pair only when
+    #       both electrodes are present, so the *_a recordings yield 20 pairs and the
+    #       others 22; cross-recording harmonization then intersects to the common set
+    #       (20 pairs whenever any *_a recording is included). No per-montage dispatch
+    #       is needed. Authoritative source: the parsed montage_info (utils.py) and
+    #       BioFundation/make_datasets/make_tueg_bipolar.py.
+    _TCP_BIPOLAR = (
+        ("Fp1", "F7"), ("F7", "T3"), ("T3", "T5"), ("T5", "O1"),
+        ("Fp2", "F8"), ("F8", "T4"), ("T4", "T6"), ("T6", "O2"),
+        ("A1", "T3"), ("T3", "C3"), ("C3", "Cz"), ("Cz", "C4"),
+        ("C4", "T4"), ("T4", "A2"),
+        ("Fp1", "F3"), ("F3", "C3"), ("C3", "P3"), ("P3", "O1"),
+        ("Fp2", "F4"), ("F4", "C4"), ("C4", "P4"), ("P4", "O2"),
+    )
+    # Minimum bipolar pairs to keep a recording (full TCP = 22; 20 without the ear
+    # electrodes A1/A2). Below this the window/recording is dropped.
+    _BIPOLAR_MIN_CH = 18
+
     def __init__(
         self,
         data_dir: str = '../../../data/',
@@ -252,6 +282,7 @@ class TUHEEGEpilepsy:
         n_jobs: int = 1,
         # New args for balanced windowing
         window_len_s: Optional[float] = None,
+        target_sfreq: Optional[float] = None,
         # Args for dictionary learning
         idx_list: Optional[List[str]] = None,
         dictionary_learning: bool = False,
@@ -271,6 +302,7 @@ class TUHEEGEpilepsy:
         if window_len_s is not None:
             return self._load_balanced_windows(
                     window_len_s=window_len_s,
+                    target_sfreq=target_sfreq,
                     overlap_pct=overlap_pct,
                     balance_per_subject=balance_per_subject,
                     include_seizures=include_seizures,
@@ -573,24 +605,47 @@ class TUHEEGEpilepsy:
         logger.info("IC dipole fitting completed.")
 
     @staticmethod
+    def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+        """Sidecar filename suffix encoding the PSD montage / filtering.
+
+        Encodes the options so variants coexist next to the same ``.edf`` and the
+        idempotency skip is per-config: ``-psd.npz`` (referential, no filter),
+        ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``,
+        ``-psd-bipolar-notch-60-120.npz``, etc. Plotters rebuild the same string to
+        find the right sidecar, so keep this the single source of truth.
+        """
+        s = "-psd"
+        if bipolar:
+            s += "-bipolar"
+        if notch_freqs:
+            s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
+        return s + ".npz"
+
+    @staticmethod
     def _generate_psd(
         file_path: Path,
-        target_sfreq: float = 250.0,
+        target_sfreq: float = 256.0,
         win_sec: float = 4.0,
+        bipolar: bool = False,
+        notch_freqs=None,
     ) -> None:
         """Compute and cache the per-channel Welch PSD for one recording.
 
         Reads the recording, renames channels to canonical 10-20 names, keeps the
         EEG channels, resamples to ``target_sfreq`` so every recording shares one
-        frequency grid, and writes ``-psd.npz`` next to the ``.edf`` with arrays
-        ``freqs`` (Hz), ``psd`` (n_channels, n_freqs; V^2/Hz), ``channels``, plus
-        ``sfreq`` and ``n_times`` (the latter for length-weighted aggregation).
-        Idempotent: skips if the ``.npz`` already exists. The 60 Hz line is kept
-        (no notch).
+        frequency grid, optionally notch-filters (``notch_freqs``, e.g. ``[60, 120]``)
+        and/or re-references to the TCP bipolar montage (``bipolar=True``), and writes
+        the per-channel Welch PSD next to the ``.edf`` with arrays ``freqs`` (Hz),
+        ``psd`` (n_channels, n_freqs; V^2/Hz), ``channels``, plus ``sfreq`` and
+        ``n_times`` (the latter for length-weighted aggregation). The sidecar name
+        encodes montage and filtering (see ``_psd_suffix``), so variants coexist.
+        Idempotent: skips if that ``.npz`` already exists. Without ``notch_freqs`` the
+        60 Hz line is kept.
         """
         from scipy.signal import welch
 
-        psd_path = file_path.parent / file_path.name.replace(".edf", "-psd.npz")
+        suffix = TUHEEGEpilepsy._psd_suffix(bipolar, notch_freqs)
+        psd_path = file_path.parent / file_path.name.replace(".edf", suffix)
         if psd_path.exists():
             return
         try:
@@ -605,6 +660,25 @@ class TUHEEGEpilepsy:
             raw.pick(eeg)
             if not np.isclose(raw.info["sfreq"], target_sfreq):
                 raw.resample(target_sfreq, verbose="error")
+            # Notch at the target rate so the requested lines (and harmonics) are
+            # below Nyquist; drop any >= Nyquist. Applied before the bipolar
+            # re-reference (both linear, so the order does not change the result).
+            if notch_freqs:
+                valid = [f for f in notch_freqs if f < target_sfreq / 2.0]
+                if len(valid) < len(notch_freqs):
+                    logger.warning(
+                        f"{file_path.name}: dropping notch freqs >= Nyquist "
+                        f"({target_sfreq / 2.0:.0f} Hz); keeping {valid}."
+                    )
+                if valid:
+                    raw.notch_filter(valid, verbose="ERROR")
+            # Re-reference to the TCP bipolar montage on the (renamed) sensor channels.
+            # The PSD of a bipolar channel is the spectrum of the anode-minus-cathode
+            # difference; resampling is linear so it commutes with the re-reference.
+            if bipolar:
+                raw = TUHEEGEpilepsy._apply_bipolar(raw)
+                if raw is None:
+                    return  # too few bipolar pairs (already logged)
             nperseg = int(win_sec * target_sfreq)
             if raw.n_times < nperseg:
                 logger.warning(
@@ -630,16 +704,20 @@ class TUHEEGEpilepsy:
     def compute_psd(
         self,
         n_jobs: int = 1,
-        target_sfreq: float = 250.0,
+        target_sfreq: float = 256.0,
         win_sec: float = 4.0,
+        bipolar: bool = False,
+        notch_freqs=None,
     ) -> None:
         """Compute and cache a per-channel Welch PSD for every recording.
 
-        Writes one ``-psd.npz`` next to each ``.edf`` (see ``_generate_psd``); existing
-        files are skipped, so the pass is idempotent. The PSD is split-independent, so
-        it is computed once and reused for every train/test split; it is far cheaper
-        than the ICA precompute (FFT only, no model fitting). Use the saved files with
-        ``src/plot_psd.py``.
+        Writes one sidecar next to each ``.edf`` (see ``_generate_psd``); its name
+        encodes the montage and filtering (``_psd_suffix``), e.g. ``-psd.npz``,
+        ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``. Existing files are skipped, so
+        the pass is idempotent (each config has its own sidecar). The PSD is
+        split-independent, so it is computed once and reused for every train/test
+        split; it is far cheaper than the ICA precompute (FFT only, no model fitting).
+        Plot with ``src/plot_psd.py`` (pass the matching ``--bipolar`` / ``--notch_freqs``).
 
         Parameters
         ----------
@@ -649,19 +727,26 @@ class TUHEEGEpilepsy:
             Resample rate (Hz) so all recordings share one frequency grid.
         win_sec : float, default=4.0
             Welch segment length in seconds (``nperseg = win_sec * target_sfreq``).
+        bipolar : bool, default=False
+            Re-reference to the TCP bipolar montage before the PSD.
+        notch_freqs : list[float] | None, default=None
+            Notch frequencies (e.g. ``[60, 120]``) applied at ``target_sfreq`` before
+            the PSD. None keeps the line noise.
         """
+        montage = "bipolar" if bipolar else "referential"
+        filt = f", notch {notch_freqs}" if notch_freqs else ""
         logger.info(
-            f"Computing PSD for {len(self.descriptions)} recordings "
-            f"(target {target_sfreq:.0f} Hz, {win_sec}s Welch windows)..."
+            f"Computing {montage} PSD for {len(self.descriptions)} recordings "
+            f"(target {target_sfreq:.0f} Hz, {win_sec}s Welch windows{filt})..."
         )
         paths = self.descriptions["path"].tolist()
         if n_jobs == 1:
-            for path in tqdm(paths, desc="Computing PSD"):
-                self._generate_psd(path, target_sfreq, win_sec)
+            for path in tqdm(paths, desc=f"Computing PSD ({montage})"):
+                self._generate_psd(path, target_sfreq, win_sec, bipolar, notch_freqs)
         else:
             Parallel(n_jobs=n_jobs)(
-                delayed(self._generate_psd)(path, target_sfreq, win_sec)
-                for path in tqdm(paths, desc="Computing PSD")
+                delayed(self._generate_psd)(path, target_sfreq, win_sec, bipolar, notch_freqs)
+                for path in tqdm(paths, desc=f"Computing PSD ({montage})")
             )
         logger.info("PSD computation completed.")
 
@@ -710,6 +795,45 @@ class TUHEEGEpilepsy:
     def _set_montage(raw: mne.io.BaseRaw) -> None:
         montage = mne.channels.make_standard_montage("standard_1020")
         raw.set_montage(montage, on_missing="ignore")
+
+    @staticmethod
+    def _bipolar_channel_names(present) -> List[str]:
+        """TCP bipolar channel names ('anode-cathode') formable from ``present``.
+
+        ``present`` is a set/list of canonical (renamed) electrode names. Returns the
+        pairs whose both electrodes are available, in the fixed ``_TCP_BIPOLAR``
+        order. Lets the lazy path precompute the bipolar target-channel set from the
+        common referential channels, matching what ``_apply_bipolar`` produces.
+        """
+        p = set(present)
+        return [f"{a}-{c}" for a, c in TUHEEGEpilepsy._TCP_BIPOLAR if a in p and c in p]
+
+    @staticmethod
+    def _apply_bipolar(raw: mne.io.BaseRaw) -> Optional[mne.io.BaseRaw]:
+        """Re-reference a renamed (canonical 10-20) raw to the TCP bipolar montage.
+
+        Each bipolar channel is ``anode - cathode`` of the referential data; pairs
+        with both electrodes present are kept. Returns a new sensor-space Raw (so the
+        downstream get_data / trim path is unchanged), or ``None`` if fewer than
+        ``_BIPOLAR_MIN_CH`` pairs can be formed. Differences the original data array
+        directly because electrodes are reused across pairs (mne.set_bipolar_reference
+        mis-handles reused references). Requires the channels to be renamed first.
+        """
+        idx = {c: i for i, c in enumerate(raw.ch_names)}
+        data = raw.get_data()
+        rows, names = [], []
+        for a, c in TUHEEGEpilepsy._TCP_BIPOLAR:
+            if a in idx and c in idx:
+                rows.append(data[idx[a]] - data[idx[c]])
+                names.append(f"{a}-{c}")
+        if len(names) < TUHEEGEpilepsy._BIPOLAR_MIN_CH:
+            logger.warning(
+                f"bipolar montage: only {len(names)} pairs formable "
+                f"(< {TUHEEGEpilepsy._BIPOLAR_MIN_CH}); dropping window."
+            )
+            return None
+        info = mne.create_info(names, raw.info["sfreq"], ch_types="eeg")
+        return mne.io.RawArray(np.stack(rows), info, verbose="ERROR")
 
     @staticmethod
     def _apply_ica_cleaning(
@@ -1309,6 +1433,7 @@ class TUHEEGEpilepsy:
     def _load_balanced_windows(
         self,
         window_len_s: float,
+        target_sfreq: Optional[float],
         overlap_pct: float,
         balance_per_subject: bool,
         include_seizures: bool,
@@ -1388,6 +1513,8 @@ class TUHEEGEpilepsy:
             est_channels = len(TUHEEGEpilepsy.CANONICAL_REGIONS)
         elif mode == 'ic_bag':
             est_channels = self.ic_bag_max_k
+        elif mode == 'bipolar':
+            est_channels = len(TUHEEGEpilepsy._TCP_BIPOLAR)  # <=22 TCP bipolar channels
         elif 'montage' in df.columns:
             montage_sets = [
                 set(self.montages[m]['channels'])
@@ -1534,7 +1661,7 @@ class TUHEEGEpilepsy:
                 # with a margin so the filter sees real neighbouring data (equivalent
                 # to filtering the recording before windowing), then trim the margin
                 # off below; otherwise crop the exact window.
-                sensor_filter = mode in ('raw', 'ica_clean') and (
+                sensor_filter = mode in ('raw', 'ica_clean', 'bipolar') and (
                     filter_freq is not None or notch_freqs
                 )
                 pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
@@ -1596,10 +1723,17 @@ class TUHEEGEpilepsy:
 
                 if rename_channels:
                     TUHEEGEpilepsy._rename_channels(raw)
-            
+
+                # Re-reference to the TCP bipolar montage (after rename, so canonical
+                # names match the pairs; commutes with the linear filter above).
+                if mode == 'bipolar':
+                    raw = TUHEEGEpilepsy._apply_bipolar(raw)
+                    if raw is None:
+                        return None
+
                 if set_montage:
                     TUHEEGEpilepsy._set_montage(raw)
-                    
+
                 if pick_channels:
                     raw.pick(pick_channels)
 
@@ -1700,19 +1834,37 @@ class TUHEEGEpilepsy:
         # 5b. Handle variable sampling rates / lengths
         # Determine target parameters
         unique_sfreqs = np.unique(valid_sfreqs)
-        
-        if len(unique_sfreqs) > 1:
+
+        if target_sfreq is not None:
+            # Explicit override: resample EVERY window to target_sfreq (even when all
+            # share one native rate, and even if it means upsampling). Downstream the
+            # target length is derived from min(valid_sfreqs), which is now this rate.
+            forced = float(target_sfreq)
+            if fix_length_mode != 'resample':
+                raise ValueError(
+                    f"target_sfreq={forced} override requires fix_length_mode='resample' "
+                    f"(got {fix_length_mode})."
+                )
+            logger.info(f"Resampling all windows to {forced} Hz (target_sfreq override).")
+            for i in range(len(valid_data_raw)):
+                sf = valid_sfreqs[i]
+                if not np.isclose(sf, forced):
+                    valid_data_raw[i] = mne.filter.resample(
+                        valid_data_raw[i], up=forced, down=sf, axis=-1
+                    )
+                    valid_sfreqs[i] = forced
+        elif len(unique_sfreqs) > 1:
             logger.warning(f"Found multiple sampling frequencies: {unique_sfreqs}")
-            
+
             if fix_length_mode == 'resample':
                 target_sfreq = float(np.min(unique_sfreqs))
                 logger.info(f"Resampling all windows to {target_sfreq} Hz")
-                
+
                 # Resample items that need it
                 for i in range(len(valid_data_raw)):
                     d = valid_data_raw[i]
                     sf = valid_sfreqs[i]
-                    
+
                     if not np.isclose(sf, target_sfreq):
                         # Calculate resampling factor
                         # up/down = sf_target / sf_current
@@ -1721,7 +1873,7 @@ class TUHEEGEpilepsy:
                         resampled_d = mne.filter.resample(d, up=target_sfreq, down=sf, axis=-1)
                         valid_data_raw[i] = resampled_d
                         valid_sfreqs[i] = target_sfreq
-                        
+
             elif fix_length_mode == 'pad':
                # Padding doesn't fix sampling rate, it just fixes shape.
                # If sampling rates are different, padding makes them same size but different time duration.

@@ -12,8 +12,15 @@ Examples
 From the ``code/`` directory inside the container::
 
     python src/precompute_psd.py --n_jobs 8
-    python src/precompute_psd.py --n_jobs 8 --target_sfreq 250 --win_sec 4 \
+    python src/precompute_psd.py --n_jobs 8 --bipolar              # TCP bipolar montage
+    python src/precompute_psd.py --n_jobs 8 --notch_freqs 60 120   # notch before the PSD
+    python src/precompute_psd.py --n_jobs 8 --target_sfreq 256 --win_sec 4 \
         --data_dir /scratch/.../data
+
+The sidecar name encodes the montage / filtering so variants coexist: ``-psd.npz``
+(referential, no notch), ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``,
+``-psd-bipolar-notch-60-120.npz``. Plot with ``src/plot_psd.py`` passing the matching
+``--bipolar`` / ``--notch_freqs`` flags.
 """
 
 from __future__ import annotations
@@ -53,7 +60,7 @@ def main() -> None:
     parser.add_argument(
         "--target_sfreq",
         type=float,
-        default=250.0,
+        default=256.0,
         help="Resample rate (Hz) so every recording shares one frequency grid.",
     )
     parser.add_argument(
@@ -68,6 +75,22 @@ def main() -> None:
         default=None,
         help="Process only the first N recordings (for debugging a single file).",
     )
+    parser.add_argument(
+        "--bipolar",
+        action="store_true",
+        help="Re-reference to the TCP bipolar montage; writes -psd-bipolar.npz "
+        "sidecars (independent of the referential -psd.npz). Plot with "
+        "plot_psd.py --bipolar.",
+    )
+    parser.add_argument(
+        "--notch_freqs",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Notch frequencies (Hz) applied before the PSD, e.g. --notch_freqs 60 120. "
+        "Writes a -notch-... sidecar; plot with plot_psd.py --notch_freqs 60 120. "
+        "Default: no notch (line noise kept).",
+    )
     args = parser.parse_args()
 
     recording_ids = list(range(args.limit)) if args.limit is not None else None
@@ -75,7 +98,8 @@ def main() -> None:
         data_dir=args.data_dir, version=args.version, recording_ids=recording_ids
     )
     tuh.compute_psd(
-        n_jobs=args.n_jobs, target_sfreq=args.target_sfreq, win_sec=args.win_sec
+        n_jobs=args.n_jobs, target_sfreq=args.target_sfreq, win_sec=args.win_sec,
+        bipolar=args.bipolar, notch_freqs=args.notch_freqs,
     )
 
 

@@ -66,6 +66,7 @@ class TUHEEGDataModule(LightningDataModule):
         version: str = 'v3.0.0',
         train_val_test_split: tuple[float, float, float] = (0.6, 0.2, 0.2),
         window_len_min: int = 5, # 5 minutes
+        target_sfreq: float | None = 256.0,
         overlap_pct: float = 0.0,
         batch_size: int = 64,
         num_workers: int = 0,
@@ -102,6 +103,11 @@ class TUHEEGDataModule(LightningDataModule):
             effectively an 80/20 train/test split.
         window_len_min : int, default=5
             Window length in minutes.
+        target_sfreq : float | None, default=256.0
+            Resample every window to this rate (Hz), fixing the rate across the corpus
+            and matching the PSD precompute / bipolar preprocessing (may upsample
+            recordings below it). Set None to fall back to resampling to the
+            corpus-minimum sfreq (so no recording is upsampled).
         overlap_pct : float, default=0.0
             Fractional overlap between consecutive windows.
         batch_size : int, default=64
@@ -148,7 +154,7 @@ class TUHEEGDataModule(LightningDataModule):
             If True, stream windows from disk on demand (a `WindowDataset` read in
             the DataLoader workers) instead of materializing the whole dataset in
             RAM. Resident memory becomes O(batch) instead of O(N). Supports
-            signal_mode 'raw', 'ica_clean', 'brain_ic' and 'ic_bag' (not 'ica');
+            signal_mode 'raw', 'bipolar', 'ica_clean', 'brain_ic' and 'ic_bag' (not 'ica');
             harmonization targets (channel set, resample rate) are fixed up front.
             'ica_clean' shares the same sensor channel target as 'raw'. Draft:
             validate it selects the same windows as the eager path via windows_*.csv.
@@ -184,6 +190,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.version = version
         self.train_val_test_split = train_val_test_split
         self.window_len_min = window_len_min
+        self.target_sfreq = float(target_sfreq) if target_sfreq is not None else None
         self.overlap_pct = overlap_pct
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -312,6 +319,7 @@ class TUHEEGDataModule(LightningDataModule):
                 lazy = build_lazy_datasets(
                     tuh,
                     window_len_s=self.window_len_min * 60,
+                    target_sfreq=self.target_sfreq,
                     overlap_pct=self.overlap_pct,
                     balance_per_subject=True,
                     max_windows_per_subject=self.max_windows_per_subject,
@@ -347,6 +355,7 @@ class TUHEEGDataModule(LightningDataModule):
                     n_jobs = 1,
                     # New args for balanced windowing
                     window_len_s = self.window_len_min*60, # 5 minutes
+                    target_sfreq = self.target_sfreq,
                     overlap_pct = self.overlap_pct,
                     balance_per_subject = True,
                     max_windows_per_subject = self.max_windows_per_subject,

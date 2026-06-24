@@ -11,7 +11,10 @@ resident, only the much smaller feature matrix.
 
 Scope of this draft:
 
-- Supports ``mode='raw'``, ``'ica_clean'``, ``'brain_ic'`` and ``'ic_bag'``.
+- Supports ``mode='raw'``, ``'bipolar'``, ``'ica_clean'``, ``'brain_ic'`` and
+  ``'ic_bag'``. ``'bipolar'`` re-references the renamed raw to the TCP (double-banana)
+  bipolar montage (``_apply_bipolar``), a sensor-space signal that runs the same
+  pipeline as ``'raw'`` (it just changes the channel set to the bipolar pairs).
   ``'ica_clean'`` back-projects each window keeping only the ICs whose ICLabel is
   in ``ica_keep_labels`` (set ``[brain]`` for a brain-IC-only reconstruction) and
   then runs the same sensor-space pipeline as ``'raw'``, so the two share the SAME
@@ -245,7 +248,7 @@ class WindowDataset(Dataset):
         # the window boundaries. Instead crop with a margin so the filter sees real
         # neighbouring data (equivalent to filtering the recording before windowing),
         # then trim the margin off below; without filtering, crop the exact window.
-        sensor_filter = self.mode in ('raw', 'ica_clean') and (
+        sensor_filter = self.mode in ('raw', 'ica_clean', 'bipolar') and (
             self.filter_freq is not None or self.notch_freqs
         )
         pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
@@ -293,6 +296,12 @@ class WindowDataset(Dataset):
                     raw.notch_filter(self.notch_freqs, verbose='ERROR')
                 if self.rename_channels:
                     TUHEEGEpilepsy._rename_channels(raw)
+                # Re-reference to the TCP bipolar montage (after rename so the
+                # canonical names match the pairs; commutes with the linear filter).
+                if self.mode == 'bipolar':
+                    raw = TUHEEGEpilepsy._apply_bipolar(raw)
+                    if raw is None:
+                        return None
                 if self.set_montage:
                     TUHEEGEpilepsy._set_montage(raw)
                 if self.pick_channels:
@@ -367,6 +376,7 @@ def _build_lazy_from_csv(
     window_csvs: dict,
     *,
     window_len_s: float,
+    target_sfreq: Optional[float],
     mode: str,
     filter_freq: Optional[List[float]],
     target_name: str,
@@ -386,12 +396,20 @@ def _build_lazy_from_csv(
     """
     plans = {sp: _plan_from_csv(engine, path) for sp, path in window_csvs.items()}
     all_rows = pd.concat(plans.values(), ignore_index=True)
-    target_sfreq = float(min(d['sfreq'] for d in all_rows['description_row']))
+    target_sfreq = (
+        float(target_sfreq) if target_sfreq is not None
+        else float(min(d['sfreq'] for d in all_rows['description_row']))
+    )
     target_len = int(window_len_s * target_sfreq)
     if mode == 'brain_ic':
         target_channels = sorted(TUHEEGEpilepsy.CANONICAL_REGIONS)
     elif mode == 'ic_bag':
         target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
+    elif mode == 'bipolar':
+        # Bipolar pairs derivable from the common referential channels; matches the
+        # eager intersection of per-window bipolar names (both sorted alphabetically).
+        common = _scan_common_channels(all_rows, engine.montages, rename_channels)
+        target_channels = sorted(TUHEEGEpilepsy._bipolar_channel_names(common))
     else:
         target_channels = _scan_common_channels(all_rows, engine.montages, rename_channels)
     logger.info(
@@ -425,6 +443,7 @@ def build_lazy_datasets(
     engine: TUHEEGEpilepsy,
     *,
     window_len_s: float,
+    target_sfreq: Optional[float] = None,
     overlap_pct: float,
     balance_per_subject: bool,
     max_windows_per_subject: Optional[int],
@@ -462,7 +481,7 @@ def build_lazy_datasets(
     if window_csvs is not None:
         return _build_lazy_from_csv(
             engine, window_csvs,
-            window_len_s=window_len_s, mode=mode, filter_freq=filter_freq,
+            window_len_s=window_len_s, target_sfreq=target_sfreq, mode=mode, filter_freq=filter_freq,
             target_name=target_name, pick_channels=pick_channels,
             rename_channels=rename_channels, set_montage=set_montage,
             ic_bag_max_k=ic_bag_max_k, ic_bag_sign_normalize=ic_bag_sign_normalize,
@@ -498,7 +517,9 @@ def build_lazy_datasets(
 
     split_map = _assign_splits(window_df, splits, stratify_by, rng)
 
-    target_sfreq = float(df['sfreq'].min())
+    target_sfreq = (
+        float(target_sfreq) if target_sfreq is not None else float(df['sfreq'].min())
+    )
     target_len = int(window_len_s * target_sfreq)
     if mode == 'brain_ic':
         # Eager harmonization sorts the common channels alphabetically; match that
@@ -508,6 +529,11 @@ def build_lazy_datasets(
         # Positional IC slots; the ICBagTransformer pools over them, so order does
         # not matter (sorted to match the eager alphabetical harmonization).
         target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
+    elif mode == 'bipolar':
+        # Bipolar pairs derivable from the common referential channels; matches the
+        # eager intersection of per-window bipolar names (both sorted alphabetically).
+        common = _scan_common_channels(window_df, engine.montages, rename_channels)
+        target_channels = sorted(TUHEEGEpilepsy._bipolar_channel_names(common))
     else:
         target_channels = _scan_common_channels(window_df, engine.montages, rename_channels)
     logger.info(

@@ -28,16 +28,26 @@ CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 
 
-def _load_recording_psd(edf_path: str):
-    """Load a recording's ``-psd.npz``, or None if missing."""
-    npz = Path(str(edf_path).replace(".edf", "-psd.npz"))
+def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+    """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
+    s = "-psd"
+    if bipolar:
+        s += "-bipolar"
+    if notch_freqs:
+        s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
+    return s + ".npz"
+
+
+def _load_recording_psd(edf_path: str, suffix: str = "-psd.npz"):
+    """Load a recording's PSD sidecar (``suffix``), or None if missing."""
+    npz = Path(str(edf_path).replace(".edf", suffix))
     if not npz.exists():
         return None
     d = np.load(npz, allow_pickle=False)
     return d["freqs"], d["psd"], [str(c) for c in d["channels"]], int(d["n_times"])
 
 
-def _subject_psd(recordings):
+def _subject_psd(recordings, suffix: str = "-psd.npz"):
     """Length-weighted mean PSD per channel over one subject's recordings.
 
     Returns ``(freqs, {channel: psd})``, or ``(None, {})`` if nothing loaded.
@@ -46,7 +56,7 @@ def _subject_psd(recordings):
     wsum: dict = {}
     freqs = None
     for edf in recordings:
-        out = _load_recording_psd(edf)
+        out = _load_recording_psd(edf, suffix)
         if out is None:
             continue
         f, psd, chans, n = out
@@ -74,7 +84,18 @@ def main() -> None:
     parser.add_argument(
         "--ncols", type=int, default=4, help="Columns in the channel grid."
     )
+    parser.add_argument(
+        "--bipolar", action="store_true",
+        help="Read the bipolar PSD sidecars (-psd-bipolar.npz from "
+        "precompute_psd.py --bipolar) instead of the referential -psd.npz.",
+    )
+    parser.add_argument(
+        "--notch_freqs", type=float, nargs="+", default=None,
+        help="Read the notched sidecars (must match precompute_psd.py --notch_freqs), "
+        "e.g. --notch_freqs 60 120.",
+    )
     args = parser.parse_args()
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs)
 
     import matplotlib
 
@@ -93,7 +114,7 @@ def main() -> None:
     per_class: dict = {0: {}, 1: {}}
     freqs = None
     for subj, recs in recs_by_subject.items():
-        f, subj_psd = _subject_psd(recs)
+        f, subj_psd = _subject_psd(recs, suffix)
         if f is None or not subj_psd:
             continue
         if freqs is None:
@@ -102,7 +123,7 @@ def main() -> None:
         for c, psd in subj_psd.items():
             per_class[cls].setdefault(c, []).append(psd)
     if freqs is None:
-        raise SystemExit("No -psd.npz sidecars found; run precompute_psd.py first.")
+        raise SystemExit(f"No {suffix} sidecars found; run precompute_psd.py with the matching flags first.")
 
     channels = sorted(set(per_class[0]) | set(per_class[1]))
     fmask = np.ones_like(freqs, dtype=bool) if args.fmax is None else (freqs <= args.fmax)
@@ -136,7 +157,10 @@ def main() -> None:
     fig.suptitle("Training-set average PSD per channel (epilepsy n / no-epilepsy n)")
     fig.tight_layout()
 
-    out = Path(args.out) if args.out else Path(args.windows_csv).parent / "psd_by_channel.png"
+    # Name the figure after the sidecar variant (e.g. psd_by_channel-bipolar-notch-60-120.png).
+    tag = suffix.replace("-psd", "").replace(".npz", "")
+    default_name = f"psd_by_channel{tag}.png"
+    out = Path(args.out) if args.out else Path(args.windows_csv).parent / default_name
     fig.savefig(out, dpi=120)
     plt.close(fig)
     print(f"wrote {out}")

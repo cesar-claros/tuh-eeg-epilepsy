@@ -52,9 +52,19 @@ CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 _EPS = 1e-30
 
 
-def _load_recording_psd(edf_path: str):
-    """Load a recording's ``-psd.npz`` channel-averaged, or None if missing."""
-    npz = Path(str(edf_path).replace(".edf", "-psd.npz"))
+def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+    """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
+    s = "-psd"
+    if bipolar:
+        s += "-bipolar"
+    if notch_freqs:
+        s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
+    return s + ".npz"
+
+
+def _load_recording_psd(edf_path: str, suffix: str = "-psd.npz"):
+    """Load a recording's PSD sidecar (``suffix``) channel-averaged, or None."""
+    npz = Path(str(edf_path).replace(".edf", suffix))
     if not npz.exists():
         return None
     d = np.load(npz, allow_pickle=False)
@@ -63,11 +73,12 @@ def _load_recording_psd(edf_path: str):
     return d["freqs"], d["psd"].mean(axis=0), int(d["n_times"])
 
 
-def _class_relative_psd(windows_csv: str):
+def _class_relative_psd(windows_csv: str, suffix: str = "-psd.npz"):
     """Channel-averaged, subject-aggregated, per-class relative PSD.
 
     Returns ``(freqs, {0: psd_rel, 1: psd_rel}, {0: n_subj, 1: n_subj})`` with each
-    class PSD normalized to unit total power over the full frequency grid.
+    class PSD normalized to unit total power over the full frequency grid. ``suffix``
+    selects the sidecar (``-psd.npz`` referential, ``-psd-bipolar.npz`` bipolar).
     """
     df = pd.read_csv(windows_csv)
     freqs = None
@@ -77,7 +88,7 @@ def _class_relative_psd(windows_csv: str):
         acc = None
         wsum = 0.0
         for edf in sorted(set(g["path"])):
-            out = _load_recording_psd(edf)
+            out = _load_recording_psd(edf, suffix)
             if out is None:
                 continue
             f, cm, n = out
@@ -257,12 +268,24 @@ def main() -> None:
     parser.add_argument("--fmax", type=float, default=60.0, help="Max frequency to plot (Hz).")
     parser.add_argument("--top_taps", type=int, default=10, help="Kernels shown in the taps figure.")
     parser.add_argument(
-        "--kernel_sfreq", type=float, default=250.0,
-        help="Sample rate (Hz) the kernels were applied at (the resampled window rate).",
+        "--kernel_sfreq", type=float, default=256.0,
+        help="Sample rate (Hz) the kernels were applied at (the resampled window rate); "
+        "must match the training window rate (the corpus-min sfreq).",
+    )
+    parser.add_argument(
+        "--bipolar", action="store_true",
+        help="Use the bipolar PSD sidecars (-psd-bipolar.npz). Pair with a run / "
+        "kernels CSV trained on data.signal_mode=bipolar.",
+    )
+    parser.add_argument(
+        "--notch_freqs", type=float, nargs="+", default=None,
+        help="Use the notched PSD sidecars (must match precompute_psd.py "
+        "--notch_freqs), e.g. --notch_freqs 60 120.",
     )
     args = parser.parse_args()
 
-    freqs, rel, counts = _class_relative_psd(args.windows_csv)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs)
+    freqs, rel, counts = _class_relative_psd(args.windows_csv, suffix)
     if 0 not in rel or 1 not in rel:
         raise SystemExit(f"Need both classes in training PSDs; got counts {counts}.")
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.windows_csv).parent
