@@ -28,7 +28,7 @@ cd "$(dirname "$0")"           # run from code/
 SEEDS=(0 1 2 3 4)
 WINLENS=(0.5 1 2 5)            # window length in MINUTES (fractional ok: 0.5 = 30 s)
 CAP=20                         # fixed per-subject window budget (held constant)
-OUT_DIR="benchmark_winlen"     # comparison CSVs + per-run artifacts land here
+OUT_DIR="logs/train/window_length_notch"     # comparison CSVs + per-run artifacts land here
 EXTRA="${EXTRA:-}"             # optional uniform overrides, e.g. EXTRA='feature.n_groups=32'
 
 # Overrides applied to every run (raw, balanced, lazy, fixed cap).
@@ -55,3 +55,5 @@ done
 python src/aggregate_performance.py --runs_root "${OUT_DIR}/runs" --split test --level subject \
   --out "${OUT_DIR}/performance_comparison.csv"
 echo "Comparison tables written to ${OUT_DIR}/"
+
+# python src/aggregate_performance.py --runs_root logs/train/window_length_notch/runs --split test --level subject --out logs/train/window_length_notch/performance_comparison.csv
