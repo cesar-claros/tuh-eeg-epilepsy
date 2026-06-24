@@ -75,6 +75,7 @@ class TUHEEGDataModule(LightningDataModule):
         dict_learning_window_len_s: float = 2.0,
         signal_mode: str = 'raw',
         notch_freqs: list[float] | None = None,
+        filter_freq: list[float] | None = None,
         ica_keep_labels: tuple = ('brain', 'other'),
         brain_ic_min_gof: float = 0.0,
         brain_ic_use_dipoles: bool = True,
@@ -126,6 +127,11 @@ class TUHEEGDataModule(LightningDataModule):
             ICLabel is in `ica_keep_labels` (back-projected to sensor space); or
             'brain_ic' to feed the region-binned IC sources directly (each kept IC
             is assigned to a scalp region by its dominant electrode and summed).
+        filter_freq : list[float] | None, default=None
+            Band-pass [l_freq, h_freq] (Hz) applied to the sensor-space signal
+            (raw / bipolar / ica_clean) per window before features. None = full band.
+            Use to equalize bandwidth across recordings of different native sfreq (the
+            >~100 Hz content is a class confound). The IC-labels pipeline uses [1, 100].
         ica_keep_labels : tuple, default=('brain', 'other')
             For 'ica_clean', the ICLabel categories to keep; all others (the
             confident artifacts) are excluded. For 'brain_ic', the categories
@@ -199,6 +205,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.signal_mode = signal_mode
         # Plain list of floats (Hydra passes a ListConfig; MNE wants array-like).
         self.notch_freqs = [float(f) for f in notch_freqs] if notch_freqs else None
+        self.filter_freq = [float(f) for f in filter_freq] if filter_freq else None
         self.ica_keep_labels = ica_keep_labels
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
@@ -329,7 +336,7 @@ class TUHEEGDataModule(LightningDataModule):
                     splits=split_ratios,
                     stratify_by='epilepsy',
                     mode=self.signal_mode,
-                    filter_freq=None,
+                    filter_freq=self.filter_freq,
                     notch_freqs=self.notch_freqs,
                     target_name='epilepsy',
                     pick_channels=None,
@@ -347,6 +354,7 @@ class TUHEEGDataModule(LightningDataModule):
                 # Eager: materialize the whole windowed dataset in RAM.
                 data = tuh.load_data(
                     mode = self.signal_mode,
+                    filter_freq = self.filter_freq,
                     notch_freqs = self.notch_freqs,
                     target_name = 'epilepsy',
                     preload = True,

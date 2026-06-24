@@ -27,10 +27,16 @@ overlap_pct: 0.0
 # budget: kept / available" line so the effect is visible.
 max_windows_per_subject: null
 signal_mode: raw # 'raw' (sensor EEG) | 'bipolar' (raw re-referenced to the TCP double-banana bipolar montage; ~22 channels, for noise rejection / spike localization) | 'ica_clean' (keep ICs in ica_keep_labels, back-projected) | 'brain_ic' (region-binned IC sources) | 'ic_bag' (padded bag of IC sources; pair with feature=ic_bag_transformer)
-# Notch filter (Hz) applied to the sensor-space signal (raw / ica_clean only) per
+# Notch filter (Hz) applied to the sensor-space signal (raw / bipolar / ica_clean) per
 # window. null = no notch. Set to [60, 120] to suppress 60 Hz mains line noise and
 # its first harmonic, e.g. data.notch_freqs=[60,120].
 notch_freqs: null
+# Band-pass [l_freq, h_freq] (Hz) applied to the sensor-space signal (raw / bipolar /
+# ica_clean) per window, before features. null = no band-pass (full band). Use to
+# equalize bandwidth across recordings of different native sfreq (the high-frequency
+# content above ~100 Hz is a class confound; see plot_sfreq.py). The IC-labels pipeline
+# uses [1, 100]; BioFundation uses [0.1, 75]. e.g. data.filter_freq=[1,100].
+filter_freq: null
 ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
 # (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;
 #  brain_ic uses these labels' ICs directly, so set [brain] for brain-only regional sources)
