@@ -607,18 +607,20 @@ class TUHEEGEpilepsy:
         logger.info("IC dipole fitting completed.")
 
     @staticmethod
-    def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
-        """Sidecar filename suffix encoding the PSD montage / filtering.
+    def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
+        """Sidecar filename suffix encoding the PSD montage / filtering / rate.
 
         Encodes the options so variants coexist next to the same ``.edf`` and the
-        idempotency skip is per-config: ``-psd.npz`` (referential, no filter),
-        ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``,
-        ``-psd-bipolar-notch-60-120.npz``, etc. Plotters rebuild the same string to
-        find the right sidecar, so keep this the single source of truth.
+        idempotency skip is per-config: ``-psd.npz`` (referential, resampled, no
+        filter), ``-psd-bipolar.npz``, ``-psd-native.npz`` (no resample, the
+        recording's own rate), ``-psd-notch-60-120.npz``, etc. Plotters rebuild the
+        same string to find the right sidecar, so keep this the single source of truth.
         """
         s = "-psd"
         if bipolar:
             s += "-bipolar"
+        if native:
+            s += "-native"
         if notch_freqs:
             s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
         return s + ".npz"
@@ -626,7 +628,7 @@ class TUHEEGEpilepsy:
     @staticmethod
     def _generate_psd(
         file_path: Path,
-        target_sfreq: float = 256.0,
+        target_sfreq: Optional[float] = 256.0,
         win_sec: float = 4.0,
         bipolar: bool = False,
         notch_freqs=None,
@@ -634,19 +636,22 @@ class TUHEEGEpilepsy:
         """Compute and cache the per-channel Welch PSD for one recording.
 
         Reads the recording, renames channels to canonical 10-20 names, keeps the
-        EEG channels, resamples to ``target_sfreq`` so every recording shares one
-        frequency grid, optionally notch-filters (``notch_freqs``, e.g. ``[60, 120]``)
-        and/or re-references to the TCP bipolar montage (``bipolar=True``), and writes
-        the per-channel Welch PSD next to the ``.edf`` with arrays ``freqs`` (Hz),
-        ``psd`` (n_channels, n_freqs; V^2/Hz), ``channels``, plus ``sfreq`` and
-        ``n_times`` (the latter for length-weighted aggregation). The sidecar name
-        encodes montage and filtering (see ``_psd_suffix``), so variants coexist.
-        Idempotent: skips if that ``.npz`` already exists. Without ``notch_freqs`` the
-        60 Hz line is kept.
+        EEG channels, resamples to ``target_sfreq`` (or keeps the recording's
+        **native** rate when ``target_sfreq`` is None) so the grid is shared across
+        recordings (or shows each recording's true bandwidth up to its own Nyquist),
+        optionally notch-filters (``notch_freqs``, e.g. ``[60, 120]``) and/or
+        re-references to the TCP bipolar montage (``bipolar=True``), and writes the
+        per-channel Welch PSD next to the ``.edf`` with arrays ``freqs`` (Hz), ``psd``
+        (n_channels, n_freqs; V^2/Hz), ``channels``, plus ``sfreq`` and ``n_times``.
+        The sidecar name encodes montage / filtering / rate (see ``_psd_suffix``), so
+        variants coexist. Idempotent: skips if that ``.npz`` already exists. Without
+        ``notch_freqs`` the 60 Hz line is kept. NOTE: native-rate sidecars share a grid
+        only across recordings of the same native sfreq (so aggregate them per-rate).
         """
         from scipy.signal import welch
 
-        suffix = TUHEEGEpilepsy._psd_suffix(bipolar, notch_freqs)
+        native = target_sfreq is None
+        suffix = TUHEEGEpilepsy._psd_suffix(bipolar, notch_freqs, native=native)
         psd_path = file_path.parent / file_path.name.replace(".edf", suffix)
         if psd_path.exists():
             return
@@ -660,17 +665,17 @@ class TUHEEGEpilepsy:
                 logger.error(f"No EEG channels for {file_path.name}; skipping PSD.")
                 return
             raw.pick(eeg)
-            if not np.isclose(raw.info["sfreq"], target_sfreq):
+            if not native and not np.isclose(raw.info["sfreq"], target_sfreq):
                 raw.resample(target_sfreq, verbose="error")
-            # Notch at the target rate so the requested lines (and harmonics) are
-            # below Nyquist; drop any >= Nyquist. Applied before the bipolar
+            fs = float(raw.info["sfreq"])  # native rate, or target after the resample
+            # Notch below Nyquist (drop any >= fs/2). Applied before the bipolar
             # re-reference (both linear, so the order does not change the result).
             if notch_freqs:
-                valid = [f for f in notch_freqs if f < target_sfreq / 2.0]
+                valid = [f for f in notch_freqs if f < fs / 2.0]
                 if len(valid) < len(notch_freqs):
                     logger.warning(
                         f"{file_path.name}: dropping notch freqs >= Nyquist "
-                        f"({target_sfreq / 2.0:.0f} Hz); keeping {valid}."
+                        f"({fs / 2.0:.0f} Hz); keeping {valid}."
                     )
                 if valid:
                     raw.notch_filter(valid, verbose="ERROR")
@@ -681,7 +686,7 @@ class TUHEEGEpilepsy:
                 raw = TUHEEGEpilepsy._apply_bipolar(raw)
                 if raw is None:
                     return  # too few bipolar pairs (already logged)
-            nperseg = int(win_sec * target_sfreq)
+            nperseg = int(win_sec * fs)
             if raw.n_times < nperseg:
                 logger.warning(
                     f"{file_path.name} shorter than {win_sec}s "
@@ -690,14 +695,14 @@ class TUHEEGEpilepsy:
                 return
             data = raw.get_data()  # (n_channels, n_times), volts
             freqs, psd = welch(
-                data, fs=target_sfreq, nperseg=nperseg, noverlap=nperseg // 2, axis=-1
+                data, fs=fs, nperseg=nperseg, noverlap=nperseg // 2, axis=-1
             )
             np.savez_compressed(
                 psd_path,
                 freqs=freqs.astype(np.float32),
                 psd=psd.astype(np.float32),
                 channels=np.array(raw.ch_names),
-                sfreq=np.float32(target_sfreq),
+                sfreq=np.float32(fs),
                 n_times=np.int64(raw.n_times),
             )
         except Exception as e:
@@ -706,7 +711,7 @@ class TUHEEGEpilepsy:
     def compute_psd(
         self,
         n_jobs: int = 1,
-        target_sfreq: float = 256.0,
+        target_sfreq: Optional[float] = 256.0,
         win_sec: float = 4.0,
         bipolar: bool = False,
         notch_freqs=None,
@@ -725,21 +730,23 @@ class TUHEEGEpilepsy:
         ----------
         n_jobs : int, default=1
             Number of parallel workers (joblib).
-        target_sfreq : float, default=250.0
-            Resample rate (Hz) so all recordings share one frequency grid.
+        target_sfreq : float | None, default=256.0
+            Resample rate (Hz) so all recordings share one frequency grid. None keeps
+            each recording's NATIVE rate (no resample; grids match only within a rate).
         win_sec : float, default=4.0
-            Welch segment length in seconds (``nperseg = win_sec * target_sfreq``).
+            Welch segment length in seconds (``nperseg = win_sec * sfreq``).
         bipolar : bool, default=False
             Re-reference to the TCP bipolar montage before the PSD.
         notch_freqs : list[float] | None, default=None
-            Notch frequencies (e.g. ``[60, 120]``) applied at ``target_sfreq`` before
-            the PSD. None keeps the line noise.
+            Notch frequencies (e.g. ``[60, 120]``) applied before the PSD. None keeps
+            the line noise.
         """
         montage = "bipolar" if bipolar else "referential"
         filt = f", notch {notch_freqs}" if notch_freqs else ""
+        rate = "native rate" if target_sfreq is None else f"target {target_sfreq:.0f} Hz"
         logger.info(
             f"Computing {montage} PSD for {len(self.descriptions)} recordings "
-            f"(target {target_sfreq:.0f} Hz, {win_sec}s Welch windows{filt})..."
+            f"({rate}, {win_sec}s Welch windows{filt})..."
         )
         paths = self.descriptions["path"].tolist()
         if n_jobs == 1:

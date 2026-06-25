@@ -28,11 +28,13 @@ CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
+    if native:
+        s += "-native"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -94,8 +96,13 @@ def main() -> None:
         help="Read the notched sidecars (must match precompute_psd.py --notch_freqs), "
         "e.g. --notch_freqs 60 120.",
     )
+    parser.add_argument(
+        "--native", action="store_true",
+        help="Read the native-rate sidecars (precompute_psd.py --native). Only coherent "
+        "when the recordings share one native rate (per-channel aggregation assumes one grid).",
+    )
     args = parser.parse_args()
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
     import matplotlib
 

@@ -91,6 +91,14 @@ def main() -> None:
         "Writes a -notch-... sidecar; plot with plot_psd.py --notch_freqs 60 120. "
         "Default: no notch (line noise kept).",
     )
+    parser.add_argument(
+        "--native",
+        action="store_true",
+        help="Do NOT resample: compute each PSD at the recording's native rate (shows "
+        "its true bandwidth up to its own Nyquist). Writes -psd-native.npz sidecars; "
+        "grids match only WITHIN a native rate, so plot per-rate (plot_psd_subjects.py "
+        "--native --sfreq <rate>). Overrides --target_sfreq.",
+    )
     args = parser.parse_args()
 
     recording_ids = list(range(args.limit)) if args.limit is not None else None
@@ -98,7 +106,9 @@ def main() -> None:
         data_dir=args.data_dir, version=args.version, recording_ids=recording_ids
     )
     tuh.compute_psd(
-        n_jobs=args.n_jobs, target_sfreq=args.target_sfreq, win_sec=args.win_sec,
+        n_jobs=args.n_jobs,
+        target_sfreq=None if args.native else args.target_sfreq,
+        win_sec=args.win_sec,
         bipolar=args.bipolar, notch_freqs=args.notch_freqs,
     )
 

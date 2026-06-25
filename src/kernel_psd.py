@@ -52,11 +52,13 @@ CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 _EPS = 1e-30
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
+    if native:
+        s += "-native"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -282,9 +284,14 @@ def main() -> None:
         help="Use the notched PSD sidecars (must match precompute_psd.py "
         "--notch_freqs), e.g. --notch_freqs 60 120.",
     )
+    parser.add_argument(
+        "--native", action="store_true",
+        help="Use the native-rate sidecars (precompute_psd.py --native); only coherent "
+        "when the run's recordings share one native rate.",
+    )
     args = parser.parse_args()
 
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
     freqs, rel, counts = _class_relative_psd(args.windows_csv, suffix)
     if 0 not in rel or 1 not in rel:
         raise SystemExit(f"Need both classes in training PSDs; got counts {counts}.")

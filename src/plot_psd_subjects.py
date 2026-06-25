@@ -37,11 +37,13 @@ CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 _EPS = 1e-30
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
+    if native:
+        s += "-native"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -118,11 +120,18 @@ def main() -> None:
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     parser.add_argument(
+        "--native", action="store_true",
+        help="Read the native-rate sidecars (-psd-native...; from precompute_psd.py --native). "
+        "Requires --sfreq, since native PSDs share a grid only within one sampling rate.",
+    )
+    parser.add_argument(
         "--normalize", action="store_true",
         help="Per-subject unit power: compare spectral SHAPE, not loudness.",
     )
     args = parser.parse_args()
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs)
+    if args.native and args.sfreq is None:
+        raise SystemExit("--native requires --sfreq <rate>: native-rate PSDs share a grid only within one sampling rate.")
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
     corpus_mode = args.all_recordings or args.sfreq is not None
     if corpus_mode:
