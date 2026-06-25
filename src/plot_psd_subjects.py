@@ -1,18 +1,27 @@
 """Per-subject channel-averaged PSD traces (diagnostic for noisy subjects).
 
-For each training subject, plots its channel-averaged, length-weighted PSD as one
-faint line (colored by class), with the class **mean** (solid) and **median**
-(dashed) overlaid. This reveals whether a few outlier subjects (broadband / line-
-noise / high-frequency tails) dominate the linear cross-subject mean used by
-``plot_psd.py`` and ``kernel_psd.py``: if the mean sits well above the median in a
-band, that band is carried by a handful of subjects, not the cohort.
+For each subject, plots its channel-averaged, length-weighted PSD as one faint line
+(colored by class), with the class **mean** (solid) and **median** (dashed) overlaid.
+This reveals whether a few outlier subjects (broadband / line-noise / high-frequency
+tails) dominate the linear cross-subject mean used by ``plot_psd.py`` and
+``kernel_psd.py``: if the mean sits well above the median in a band, that band is
+carried by a handful of subjects, not the cohort.
 
-Reads the same PSD sidecars as the other PSD tools, so pass the matching
-``--bipolar`` / ``--notch_freqs`` you used at precompute time. ``--normalize`` shows
-each subject at unit power (compare spectral SHAPE, not loudness).
+Two subject sources:
+  - ``--windows_csv``: the training subjects of one run (default).
+  - ``--all-recordings`` / ``--sfreq``: the WHOLE corpus (engine descriptions),
+    optionally filtered to one native sampling rate. Use ``--sfreq 250`` to hold the
+    acquisition bandwidth fixed and check whether the class difference persists within
+    a single sampling-rate group (the confound control). Needs the corpus, like
+    ``plot_sfreq.py``.
+
+Reads the same PSD sidecars as the other PSD tools, so pass the matching ``--bipolar``
+/ ``--notch_freqs`` you used at precompute time. ``--normalize`` shows each subject at
+unit power (compare spectral SHAPE, not loudness).
 
     python src/plot_psd_subjects.py --windows_csv logs/train/runs/<ts>/windows_train.csv \
         --fmax 80 --bipolar --notch_freqs 60 120
+    python src/plot_psd_subjects.py --sfreq 250 --fmax 80 --bipolar --notch_freqs 60 120
 """
 
 from __future__ import annotations
@@ -59,10 +68,52 @@ def _subject_psd(recordings, suffix: str):
     return freqs, acc / wsum
 
 
+def _subjects_from_windows(windows_csv: str) -> dict:
+    """{subject: (recordings, class)} from a run's windows_train.csv."""
+    df = pd.read_csv(windows_csv)
+    return {
+        str(subj): (sorted(set(g["path"].astype(str))), int(bool(g["epilepsy"].iloc[0])))
+        for subj, g in df.groupby("subject")
+    }
+
+
+def _subjects_from_corpus(data_dir: str | None, version: str, sfreq: float | None) -> dict:
+    """{subject: (recordings, class)} from the whole corpus, optionally one native sfreq.
+
+    Reads the engine descriptions (native EDF sampling rate per recording); a subject
+    is kept if it has any recording at ``sfreq`` (None = all rates), and only those
+    recordings are aggregated. Imports the engine lazily so the windows-CSV mode stays
+    light.
+    """
+    import rootutils
+
+    root = rootutils.setup_root(__file__, pythonpath=True)
+    from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: PLC0415
+
+    tuh = TUHEEGEpilepsy(data_dir=data_dir or str(root / "data"), version=version)
+    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq"]].copy()
+    df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
+    if sfreq is not None:
+        df = df[np.isclose(df["sfreq"].astype(float), float(sfreq))]
+        if df.empty:
+            raise SystemExit(f"No recordings at native sfreq {sfreq:g} Hz.")
+    return {
+        str(subj): (sorted(set(g["path"].astype(str))), int(g["epilepsy"].iloc[0]))
+        for subj, g in df.groupby("subject")
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--windows_csv", required=True, help="windows_train.csv from a run.")
-    parser.add_argument("--out", default=None, help="Output PNG (default: <windows_csv dir>/psd_subjects*.png).")
+    parser.add_argument("--windows_csv", default=None, help="windows_train.csv from a run (training-subject source).")
+    parser.add_argument("--all-recordings", action="store_true", dest="all_recordings",
+                        help="Use the WHOLE corpus instead of a windows CSV.")
+    parser.add_argument("--sfreq", type=float, default=None,
+                        help="Corpus mode: keep only recordings at this native sampling rate (Hz), e.g. 250.")
+    parser.add_argument("--data_dir", default=None, help="Corpus mode: parent of the version folder.")
+    parser.add_argument("--version", default="v3.0.0", help="Corpus mode: corpus version subfolder.")
+    parser.add_argument("--out", default=None, help="Output PNG (default: auto-named).")
+    parser.add_argument("--out_dir", default=None, help="Corpus mode: output directory (default: cwd).")
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
@@ -73,18 +124,23 @@ def main() -> None:
     args = parser.parse_args()
     suffix = _psd_suffix(args.bipolar, args.notch_freqs)
 
+    corpus_mode = args.all_recordings or args.sfreq is not None
+    if corpus_mode:
+        subj_recs = _subjects_from_corpus(args.data_dir, args.version, args.sfreq)
+    elif args.windows_csv:
+        subj_recs = _subjects_from_windows(args.windows_csv)
+    else:
+        raise SystemExit("Provide --windows_csv, or --all-recordings / --sfreq for the whole corpus.")
+
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    df = pd.read_csv(args.windows_csv)
     freqs = None
     per_class: dict = {0: [], 1: []}
-    subj_ids: dict = {0: [], 1: []}
-    for subj, g in df.groupby("subject"):
-        cls = int(bool(g["epilepsy"].iloc[0]))
-        f, psd = _subject_psd(sorted(set(g["path"])), suffix)
+    for _subj, (recs, cls) in subj_recs.items():
+        f, psd = _subject_psd(recs, suffix)
         if f is None:
             continue
         if freqs is None:
@@ -92,7 +148,6 @@ def main() -> None:
         if args.normalize:
             psd = psd / (psd.sum() + _EPS)
         per_class[cls].append(psd)
-        subj_ids[cls].append(str(subj))
     if freqs is None:
         raise SystemExit(f"No {suffix} sidecars found; run precompute_psd.py with the matching flags first.")
 
@@ -116,15 +171,24 @@ def main() -> None:
         ax.set_xlim(0, fx[-1] if len(fx) else None)
         ax.legend(fontsize=8, loc="upper right")
     axes[0].set_ylabel(("relative " if args.normalize else "") + "PSD (dB)")
+    scope = f"native {args.sfreq:g} Hz" if args.sfreq is not None else ("whole corpus" if corpus_mode else "training subjects")
     fig.suptitle(
-        "Per-subject channel-averaged PSD"
-        + (" (unit-power)" if args.normalize else "")
+        f"Per-subject channel-averaged PSD ({scope})"
+        + (" [unit-power]" if args.normalize else "")
         + "  -  mean above median = a few subjects carry that band"
     )
     fig.tight_layout()
+
     tag = suffix.replace("-psd", "").replace(".npz", "")
-    name = f"psd_subjects{tag}{'-norm' if args.normalize else ''}.png"
-    out = Path(args.out) if args.out else Path(args.windows_csv).parent / name
+    scope_tag = f"-sfreq{args.sfreq:g}" if args.sfreq is not None else ("-allrates" if corpus_mode else "")
+    name = f"psd_subjects{tag}{scope_tag}{'-norm' if args.normalize else ''}.png"
+    if args.out:
+        out = Path(args.out)
+    elif corpus_mode:
+        out = (Path(args.out_dir) if args.out_dir else Path.cwd()) / name
+    else:
+        out = Path(args.windows_csv).parent / name
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"wrote {out}  ({len(per_class[0])} no-epilepsy + {len(per_class[1])} epilepsy subjects)")
 

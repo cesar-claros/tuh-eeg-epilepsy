@@ -22,8 +22,11 @@ CAPS=(10 20 40)                # per-subject window budgets (comparable to the p
 BASE="logs/train"             # each arm -> $BASE/<arm_name>/runs/...
 EXTRA="${EXTRA:-}"             # optional uniform overrides, e.g. EXTRA='feature.n_groups=32'
 
-# Overrides applied to every run.
-COMMON="data.lazy_loading=true model.class_weight=balanced"
+# Overrides applied to every run. require_keep_labels restricts ALL arms to the same
+# recording pool (those with an ICA solution and a kept brain/other IC), so every arm
+# evaluates the SAME subjects: the seed-based split is over one shared pool, and the
+# ica_clean arm no longer drops recordings at load time.
+COMMON="data.lazy_loading=true model.class_weight=balanced data.require_keep_labels=[brain,other]"
 
 # Arms: "name|extra overrides". The first is the requested config; the others are
 # comparisons for the sfreq-confound question (enable by uncommenting):
