@@ -10,16 +10,16 @@
 # 100 Hz low-pass, so notching only 60 Hz is sufficient.
 #
 # Every run: lazy loading (O(batch) RAM), balanced class weight, the default
-# 256 Hz resample and 60/20/20 subject split. Each run writes under
-# logs/train/bipolar_filtered/runs/<name>/ (output_dir override) so the aggregation
-# reads ONLY this study's runs.
+# 256 Hz resample and 60/20/20 subject split. Each ARM writes its runs under its own
+# directory logs/train/<arm>/runs/ (via the output_dir override); the final step
+# aggregates across all arms into one comparison table.
 
 set -uf -o pipefail            # -f: keep Hydra list args like [1,100] literal (no globbing)
 cd "$(dirname "$0")"           # run from code/
 
 SEEDS=(0 1 2 3 4)
 CAPS=(10 20 40)                # per-subject window budgets (comparable to the prior benchmark)
-OUT_DIR="logs/train/bipolar_filtered"
+BASE="logs/train"             # each arm -> $BASE/<arm_name>/runs/...
 EXTRA="${EXTRA:-}"             # optional uniform overrides, e.g. EXTRA='feature.n_groups=32'
 
 # Overrides applied to every run.
@@ -45,6 +45,7 @@ total=$(( ${#ARMS[@]} * ${#CAPS[@]} * ${#SEEDS[@]} ))
 i=0
 for arm in "${ARMS[@]}"; do
   name="${arm%%|*}"; ov="${arm#*|}"
+  out="${BASE}/${name}"        # this arm's output directory, e.g. logs/train/icaclean_bipolar
   for cap in "${CAPS[@]}"; do
     for s in "${SEEDS[@]}"; do
       i=$((i + 1))
@@ -52,14 +53,13 @@ for arm in "${ARMS[@]}"; do
       # $EXTRA last so a feature.* value override follows any feature= group select.
       python src/train.py $COMMON $ov \
         data.max_windows_per_subject="$cap" data.seed="$s" \
-        output_dir="${OUT_DIR}/runs/${name}_cap${cap}_seed${s}" $EXTRA \
+        output_dir="${out}/runs/cap${cap}_seed${s}" $EXTRA \
         || echo "!!! FAILED: ${name} cap=${cap} seed=${s} (continuing)"
     done
   done
+  # Per-arm seed/cap aggregation -> this arm's own comparison table (reads only its runs).
+  python src/aggregate_performance.py --runs_root "${out}/runs" --split test --level subject \
+    --out "${out}/performance_comparison.csv"
+  echo "--> ${out}/performance_comparison.csv"
 done
-
-# Seed-aggregated comparison (per-config mean +/- std over seeds/caps). Reads ONLY
-# this study's runs; each arm is a separate config row (distinguished by its overrides).
-python src/aggregate_performance.py --runs_root "${OUT_DIR}/runs" --split test --level subject \
-  --out "${OUT_DIR}/performance_comparison.csv"
-echo "Comparison tables written to ${OUT_DIR}/"
+echo "Done. Per-arm comparison tables: ${BASE}/<arm>/performance_comparison*.csv"
