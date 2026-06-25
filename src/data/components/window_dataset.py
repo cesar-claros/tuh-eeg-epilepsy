@@ -204,9 +204,11 @@ class WindowDataset(Dataset):
         ic_bag_sign_normalize: bool = True,
         ic_bag_rank_by: str = 'variance',
         notch_freqs: Optional[List[float]] = None,
+        bipolar: bool = False,
     ) -> None:
         self.plan = plan.reset_index(drop=True)
         self.mode = mode
+        self.bipolar = bool(bipolar)
         self.target_channels = list(target_channels)
         self.target_sfreq = float(target_sfreq)
         self.target_len = int(target_len)
@@ -298,7 +300,9 @@ class WindowDataset(Dataset):
                     TUHEEGEpilepsy._rename_channels(raw)
                 # Re-reference to the TCP bipolar montage (after rename so the
                 # canonical names match the pairs; commutes with the linear filter).
-                if self.mode == 'bipolar':
+                # The bipolar flag composes with any sensor-space source (e.g.
+                # ica_clean + bipolar bipolarizes the reconstructed signal).
+                if self.mode == 'bipolar' or self.bipolar:
                     raw = TUHEEGEpilepsy._apply_bipolar(raw)
                     if raw is None:
                         return None
@@ -387,6 +391,7 @@ def _build_lazy_from_csv(
     ic_bag_sign_normalize: bool,
     ic_bag_rank_by: str,
     notch_freqs: Optional[List[float]] = None,
+    bipolar: bool = False,
 ) -> dict:
     """Build per-split lazy datasets from fixed window CSVs (one path per split).
 
@@ -405,9 +410,10 @@ def _build_lazy_from_csv(
         target_channels = sorted(TUHEEGEpilepsy.CANONICAL_REGIONS)
     elif mode == 'ic_bag':
         target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
-    elif mode == 'bipolar':
+    elif mode == 'bipolar' or bipolar:
         # Bipolar pairs derivable from the common referential channels; matches the
         # eager intersection of per-window bipolar names (both sorted alphabetically).
+        # Covers signal_mode='bipolar' and any sensor-space mode with bipolar=True.
         common = _scan_common_channels(all_rows, engine.montages, rename_channels)
         target_channels = sorted(TUHEEGEpilepsy._bipolar_channel_names(common))
     else:
@@ -434,6 +440,7 @@ def _build_lazy_from_csv(
             ic_bag_sign_normalize=ic_bag_sign_normalize,
             ic_bag_rank_by=ic_bag_rank_by,
             notch_freqs=notch_freqs,
+            bipolar=bipolar,
         )
         out[split_name] = (dataset, plan.drop(columns=['description_row']))
     return out
@@ -444,6 +451,7 @@ def build_lazy_datasets(
     *,
     window_len_s: float,
     target_sfreq: Optional[float] = None,
+    bipolar: bool = False,
     overlap_pct: float,
     balance_per_subject: bool,
     max_windows_per_subject: Optional[int],
@@ -481,7 +489,8 @@ def build_lazy_datasets(
     if window_csvs is not None:
         return _build_lazy_from_csv(
             engine, window_csvs,
-            window_len_s=window_len_s, target_sfreq=target_sfreq, mode=mode, filter_freq=filter_freq,
+            window_len_s=window_len_s, target_sfreq=target_sfreq, bipolar=bipolar,
+            mode=mode, filter_freq=filter_freq,
             target_name=target_name, pick_channels=pick_channels,
             rename_channels=rename_channels, set_montage=set_montage,
             ic_bag_max_k=ic_bag_max_k, ic_bag_sign_normalize=ic_bag_sign_normalize,
@@ -529,9 +538,10 @@ def build_lazy_datasets(
         # Positional IC slots; the ICBagTransformer pools over them, so order does
         # not matter (sorted to match the eager alphabetical harmonization).
         target_channels = sorted(f'ic_{i}' for i in range(ic_bag_max_k))
-    elif mode == 'bipolar':
+    elif mode == 'bipolar' or bipolar:
         # Bipolar pairs derivable from the common referential channels; matches the
         # eager intersection of per-window bipolar names (both sorted alphabetically).
+        # Covers signal_mode='bipolar' and any sensor-space mode with bipolar=True.
         common = _scan_common_channels(window_df, engine.montages, rename_channels)
         target_channels = sorted(TUHEEGEpilepsy._bipolar_channel_names(common))
     else:
@@ -561,6 +571,7 @@ def build_lazy_datasets(
             ic_bag_sign_normalize=ic_bag_sign_normalize,
             ic_bag_rank_by=ic_bag_rank_by,
             notch_freqs=notch_freqs,
+            bipolar=bipolar,
         )
         meta = (
             split_plan.drop(columns=['description_row'])

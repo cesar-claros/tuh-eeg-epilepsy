@@ -30,9 +30,14 @@ COMMON="data.lazy_loading=true model.class_weight=balanced"
 #   raw_filt        : same filtering, referential montage (isolates bipolar vs raw).
 #   bipolar_nofilt  : bipolar without the band-pass (does dropping 1-100 Hz change AUC?
 #                     a drop means the >100 Hz acquisition band was carrying signal).
+#   icaclean_bipolar: ICA reconstruction keeping only brain+other ICs, THEN bipolar
+#                     (same filter/notch as bipolar_filt, so it isolates ICA cleaning).
+#                     Requires the ICA precompute (precompute_ica.py); recordings
+#                     without an -ica.fif are skipped.
 ARMS=(
   "bipolar_filt|data.signal_mode=bipolar data.filter_freq=[1,100] data.notch_freqs=[60]"
   "bipolar_nofilt|data.signal_mode=bipolar data.notch_freqs=[60]"
+  "icaclean_bipolar|data.signal_mode=ica_clean data.ica_keep_labels=[brain,other] data.bipolar=true data.filter_freq=[1,100] data.notch_freqs=[60]"
   # "raw_filt|data.signal_mode=raw data.filter_freq=[1,100] data.notch_freqs=[60]"
 )
 

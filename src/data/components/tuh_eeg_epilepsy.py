@@ -283,6 +283,7 @@ class TUHEEGEpilepsy:
         # New args for balanced windowing
         window_len_s: Optional[float] = None,
         target_sfreq: Optional[float] = None,
+        bipolar: bool = False,
         # Args for dictionary learning
         idx_list: Optional[List[str]] = None,
         dictionary_learning: bool = False,
@@ -303,6 +304,7 @@ class TUHEEGEpilepsy:
             return self._load_balanced_windows(
                     window_len_s=window_len_s,
                     target_sfreq=target_sfreq,
+                    bipolar=bipolar,
                     overlap_pct=overlap_pct,
                     balance_per_subject=balance_per_subject,
                     include_seizures=include_seizures,
@@ -1434,6 +1436,7 @@ class TUHEEGEpilepsy:
         self,
         window_len_s: float,
         target_sfreq: Optional[float],
+        bipolar: bool,
         overlap_pct: float,
         balance_per_subject: bool,
         include_seizures: bool,
@@ -1513,7 +1516,7 @@ class TUHEEGEpilepsy:
             est_channels = len(TUHEEGEpilepsy.CANONICAL_REGIONS)
         elif mode == 'ic_bag':
             est_channels = self.ic_bag_max_k
-        elif mode == 'bipolar':
+        elif mode == 'bipolar' or bipolar:
             est_channels = len(TUHEEGEpilepsy._TCP_BIPOLAR)  # <=22 TCP bipolar channels
         elif 'montage' in df.columns:
             montage_sets = [
@@ -1725,8 +1728,10 @@ class TUHEEGEpilepsy:
                     TUHEEGEpilepsy._rename_channels(raw)
 
                 # Re-reference to the TCP bipolar montage (after rename, so canonical
-                # names match the pairs; commutes with the linear filter above).
-                if mode == 'bipolar':
+                # names match the pairs; commutes with the linear filter above). The
+                # bipolar flag composes with any sensor-space source, so e.g.
+                # signal_mode='ica_clean' + bipolar bipolarizes the reconstructed signal.
+                if mode == 'bipolar' or bipolar:
                     raw = TUHEEGEpilepsy._apply_bipolar(raw)
                     if raw is None:
                         return None

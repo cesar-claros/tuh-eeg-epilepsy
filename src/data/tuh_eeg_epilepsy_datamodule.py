@@ -74,6 +74,7 @@ class TUHEEGDataModule(LightningDataModule):
         seed: int = 42,
         dict_learning_window_len_s: float = 2.0,
         signal_mode: str = 'raw',
+        bipolar: bool = False,
         notch_freqs: list[float] | None = None,
         filter_freq: list[float] | None = None,
         ica_keep_labels: tuple = ('brain', 'other'),
@@ -204,6 +205,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.dict_learning_window_len_s = dict_learning_window_len_s
         self.signal_mode = signal_mode
         # Plain list of floats (Hydra passes a ListConfig; MNE wants array-like).
+        self.bipolar = bool(bipolar)
         self.notch_freqs = [float(f) for f in notch_freqs] if notch_freqs else None
         self.filter_freq = [float(f) for f in filter_freq] if filter_freq else None
         self.ica_keep_labels = ica_keep_labels
@@ -327,6 +329,7 @@ class TUHEEGDataModule(LightningDataModule):
                     tuh,
                     window_len_s=self.window_len_min * 60,
                     target_sfreq=self.target_sfreq,
+                    bipolar=self.bipolar,
                     overlap_pct=self.overlap_pct,
                     balance_per_subject=True,
                     max_windows_per_subject=self.max_windows_per_subject,
@@ -354,6 +357,7 @@ class TUHEEGDataModule(LightningDataModule):
                 # Eager: materialize the whole windowed dataset in RAM.
                 data = tuh.load_data(
                     mode = self.signal_mode,
+                    bipolar = self.bipolar,
                     filter_freq = self.filter_freq,
                     notch_freqs = self.notch_freqs,
                     target_name = 'epilepsy',
