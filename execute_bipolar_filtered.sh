@@ -35,8 +35,8 @@ COMMON="data.lazy_loading=true model.class_weight=balanced"
 #                     Requires the ICA precompute (precompute_ica.py); recordings
 #                     without an -ica.fif are skipped.
 ARMS=(
-  "bipolar_filt|data.signal_mode=bipolar data.filter_freq=[1,100] data.notch_freqs=[60]"
-  "bipolar_nofilt|data.signal_mode=bipolar data.notch_freqs=[60]"
+  # "bipolar_filt|data.signal_mode=bipolar data.filter_freq=[1,100] data.notch_freqs=[60]"
+  # "bipolar_nofilt|data.signal_mode=bipolar data.notch_freqs=[60]"
   "icaclean_bipolar|data.signal_mode=ica_clean data.ica_keep_labels=[brain,other] data.bipolar=true data.filter_freq=[1,100] data.notch_freqs=[60]"
   # "raw_filt|data.signal_mode=raw data.filter_freq=[1,100] data.notch_freqs=[60]"
 )
