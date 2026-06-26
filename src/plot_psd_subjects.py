@@ -24,6 +24,8 @@ unit power (compare spectral SHAPE, not loudness).
     python src/plot_psd_subjects.py --sfreq 250 --fmax 80 --bipolar --notch_freqs 60 120
     # rank the highlighted subjects by power AND roughness simultaneously
     python src/plot_psd_subjects.py --sfreq 250 --rank_by power roughness --highlight_top 10
+    # fuse the two metrics by rank instead of summed z-scores (robust to a heavy tail)
+    python src/plot_psd_subjects.py --sfreq 250 --rank_by power roughness --combine rrf
 """
 
 from __future__ import annotations
@@ -79,6 +81,47 @@ def _robust_z(x: np.ndarray) -> np.ndarray:
     med = float(np.median(x))
     mad = float(np.median(np.abs(x - med))) + _EPS
     return (x - med) / (1.4826 * mad)
+
+
+# How the per-metric anomaly scores are fused into one ranking. Each method returns a
+# composite where higher = more anomalous, so the caller can argsort descending.
+_COMBINE = ("l1", "l2", "borda", "rrf")
+
+
+def _desc_rank(s: np.ndarray) -> np.ndarray:
+    """1-based descending rank of s (rank 1 = largest value = most anomalous). Ties
+    broken arbitrarily but consistently; fine for our continuous z-scores."""
+    return np.argsort(np.argsort(-s)) + 1
+
+
+def _combine_scores(scores: dict, metrics, method: str, rrf_k: float = 60.0) -> np.ndarray:
+    """Fuse per-metric anomaly scores (each oriented so higher = more anomalous) into a
+    single composite, higher = more anomalous.
+
+    scores[m] is the per-subject score array for metric m (|robust z| for two-sided
+    metrics, signed robust z for one-sided). Methods:
+      - l1   : sum of scores (the original default). Signed, so an unusually-low
+               one-sided score partially cancels; a subject must accumulate evidence.
+      - l2   : Euclidean norm of the non-negative (anomalous-direction) scores; rewards
+               being extreme on any single axis more than l1. Negatives are clipped to 0
+               so 'less anomalous than typical' never inflates the magnitude.
+      - borda: sum across metrics of the within-metric rank (Borda count); scale-free
+               and robust to one metric's heavy tail (a rank is bounded by n).
+      - rrf  : reciprocal rank fusion, sum_m 1 / (rrf_k + rank_m); like borda but
+               down-weights all but the top of each metric, very robust to outliers.
+    """
+    mats = [scores[m] for m in metrics]
+    if method == "l1":
+        return np.sum(mats, axis=0)
+    if method == "l2":
+        pos = [np.maximum(m, 0.0) for m in mats]
+        return np.sqrt(np.sum([m ** 2 for m in pos], axis=0))
+    if method == "borda":
+        # ascending rank (0..n-1): largest score -> largest points -> most anomalous.
+        return np.sum([np.argsort(np.argsort(m)) for m in mats], axis=0).astype(float)
+    if method == "rrf":
+        return np.sum([1.0 / (rrf_k + _desc_rank(m)) for m in mats], axis=0)
+    raise ValueError(f"unknown combine method: {method}")
 
 
 def _subject_psd(recordings, suffix: str):
@@ -184,6 +227,18 @@ def main() -> None:
         "shows each chosen metric's value per subject. Default: roughness.",
     )
     parser.add_argument(
+        "--combine", default="l1", choices=list(_COMBINE),
+        help="How to fuse >1 --rank_by metric into one ranking (no effect on a single "
+        "metric). l1=sum of robust z (default), l2=Euclidean norm of the anomalous-side "
+        "scores (rewards any single extreme), borda=sum of within-metric ranks "
+        "(scale-free, robust), rrf=reciprocal rank fusion (most robust to a heavy tail).",
+    )
+    parser.add_argument(
+        "--rrf_k", type=float, default=60.0,
+        help="Reciprocal rank fusion constant for --combine rrf (larger = flatter "
+        "weighting across ranks). Default 60.",
+    )
+    parser.add_argument(
         "--hf_cut", type=float, default=None,
         help="Frequency (Hz) above which power is 'high-frequency' for the hf metric "
         "(default: grid Nyquist / 2).",
@@ -230,7 +285,7 @@ def main() -> None:
     mv = [_subject_metrics(freqs, psd, hf_cut) for _cls, _subj, psd in all_subj]
     raw = {m: np.array([d[m] for d in mv]) for m in _METRICS}
     z = {m: (np.abs(_robust_z(raw[m])) if m in _ABS_METRICS else _robust_z(raw[m])) for m in _METRICS}
-    composite = np.sum([z[m] for m in args.rank_by], axis=0) if all_subj else np.array([])
+    composite = _combine_scores(z, args.rank_by, args.combine, args.rrf_k) if all_subj else np.array([])
     order = np.argsort(composite)[::-1] if len(composite) else []
     single = args.rank_by[0] if len(args.rank_by) == 1 else None
     hl_rank: dict = {}  # (cls, subj) -> (rank 1-based, color index, label tag)
@@ -273,7 +328,8 @@ def main() -> None:
         ax.legend(fontsize=6, loc="upper right", ncol=1)
     axes[0].set_ylabel(("relative " if args.normalize else "") + "PSD (dB)")
     scope = f"native {args.sfreq:g} Hz" if args.sfreq is not None else ("whole corpus" if corpus_mode else "training subjects")
-    hl_note = f"; top {len(hl_rank)} by {'+'.join(args.rank_by)} highlighted (#rank ID metric)" if hl_rank else ""
+    by = "+".join(args.rank_by) + (f" [{args.combine}]" if len(args.rank_by) > 1 else "")
+    hl_note = f"; top {len(hl_rank)} by {by} highlighted (#rank ID metric)" if hl_rank else ""
     fig.suptitle(
         f"Per-subject channel-averaged PSD ({scope})"
         + (" [unit-power]" if args.normalize else "")
