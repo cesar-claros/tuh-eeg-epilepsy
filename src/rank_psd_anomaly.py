@@ -74,19 +74,23 @@ def _records_from_windows(windows_csv: str):
     return [(str(r["path"]), str(r["subject"]), int(bool(r["epilepsy"]))) for _, r in df.iterrows()]
 
 
-def _records_from_corpus(data_dir, version, sfreq):
+def _records_from_corpus(data_dir, version, sfreq, exclude_seizures=False, min_duration_s=None):
     import rootutils
 
     root = rootutils.setup_root(__file__, pythonpath=True)
     from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: PLC0415
 
     tuh = TUHEEGEpilepsy(data_dir=data_dir or str(root / "data"), version=version)
-    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq"]].copy()
+    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq", "n_seizure", "duration"]].copy()
     df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
     if sfreq is not None:
         df = df[np.isclose(df["sfreq"].astype(float), float(sfreq))]
-        if df.empty:
-            raise SystemExit(f"No recordings at native sfreq {sfreq:g} Hz.")
+    if exclude_seizures:
+        df = df[df["n_seizure"] == 0]
+    if min_duration_s is not None:
+        df = df[df["duration"].astype(float) >= float(min_duration_s)]
+    if df.empty:
+        raise SystemExit("No recordings left after the sfreq/seizure/duration filters.")
     return [(str(r["path"]), str(r["subject"]), int(r["epilepsy"])) for _, r in df.iterrows()]
 
 
@@ -98,6 +102,10 @@ def main() -> None:
     parser.add_argument("--sfreq", type=float, default=None, help="Corpus mode: keep only this native rate.")
     parser.add_argument("--data_dir", default=None, help="Corpus mode: parent of the version folder.")
     parser.add_argument("--version", default="v3.0.0", help="Corpus mode: version subfolder.")
+    parser.add_argument("--exclude_seizures", action="store_true",
+                        help="Corpus mode: drop recordings with a seizure annotation.")
+    parser.add_argument("--min_duration_min", type=float, default=None,
+                        help="Corpus mode: drop recordings shorter than this many minutes.")
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     parser.add_argument("--native", action="store_true", help="Read the native-rate sidecars.")
@@ -109,7 +117,11 @@ def main() -> None:
     suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
     if args.all_recordings or args.sfreq is not None:
-        records = _records_from_corpus(args.data_dir, args.version, args.sfreq)
+        records = _records_from_corpus(
+            args.data_dir, args.version, args.sfreq,
+            exclude_seizures=args.exclude_seizures,
+            min_duration_s=None if args.min_duration_min is None else args.min_duration_min * 60.0,
+        )
     elif args.windows_csv:
         records = _records_from_windows(args.windows_csv)
     else:

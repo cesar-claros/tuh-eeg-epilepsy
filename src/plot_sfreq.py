@@ -38,17 +38,25 @@ def main() -> None:
         "--windows_csv", default=None,
         help="Restrict to the recordings named in this run's windows CSV (match a PSD figure).",
     )
+    parser.add_argument("--exclude_seizures", action="store_true",
+                        help="Drop recordings with a seizure annotation (n_seizure>0).")
+    parser.add_argument("--min_duration_min", type=float, default=None,
+                        help="Drop recordings shorter than this many minutes (e.g. 2 = the training window).")
     parser.add_argument("--out", default=None, help="Output PNG (default: <cwd>/sfreq_by_class.png).")
     args = parser.parse_args()
 
     tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version)
-    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq"]].copy()
+    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq", "n_seizure", "duration"]].copy()
     df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
     if args.windows_csv:
         used = set(pd.read_csv(args.windows_csv)["path"].astype(str))
         df = df[df["path"].astype(str).isin(used)]
-        if df.empty:
-            raise SystemExit("No descriptions matched the windows CSV paths.")
+    if args.exclude_seizures:
+        df = df[df["n_seizure"] == 0]
+    if args.min_duration_min is not None:
+        df = df[df["duration"].astype(float) >= args.min_duration_min * 60.0]
+    if df.empty:
+        raise SystemExit("No recordings left after the windows/seizure/duration filters.")
 
     # Recording-level and subject-level crosstabs (a subject is counted once per
     # distinct native rate it has).

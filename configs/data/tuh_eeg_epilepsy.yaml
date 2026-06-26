@@ -2,7 +2,8 @@ _target_: src.data.tuh_eeg_epilepsy_datamodule.TUHEEGDataModule
 data_dir: ${paths.data_dir}
 version: 'v3.0.0'
 train_val_test_split: [0.6, 0.2, 0.2] # subject-level (stratified by epilepsy); train+val are merged for fitting, so effectively 80/20 train/test
-window_len_min: 5 # 5 minutes
+window_len_min: 2 # 2 minutes
+include_seizures: false # include recordings that contain seizures in the window plan/split. false = interictal only (drop any recording with a seizure annotation, n_seizure>0); the classification task is epilepsy diagnosis, not seizure detection.
 target_sfreq: 256 # resample every window to this rate (Hz), matching the PSD precompute (--target_sfreq) and the bipolar/BioFundation preprocessing. Set null to fall back to the corpus-min sfreq (no upsampling).
 dict_learning_window_len_s: 2.0 # window length (seconds) for the dictionary-learning pass
 build_dict_learning_set: false # load the (currently unused) dictionary-learning short-window set; off saves EDF reads + RAM

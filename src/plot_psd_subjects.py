@@ -109,13 +109,14 @@ def _subjects_from_windows(windows_csv: str) -> dict:
     }
 
 
-def _subjects_from_corpus(data_dir: str | None, version: str, sfreq: float | None) -> dict:
-    """{subject: (recordings, class)} from the whole corpus, optionally one native sfreq.
+def _subjects_from_corpus(data_dir, version, sfreq, exclude_seizures=False, min_duration_s=None) -> dict:
+    """{subject: (recordings, class)} from the whole corpus, optionally filtered.
 
-    Reads the engine descriptions (native EDF sampling rate per recording); a subject
-    is kept if it has any recording at ``sfreq`` (None = all rates), and only those
-    recordings are aggregated. Imports the engine lazily so the windows-CSV mode stays
-    light.
+    Reads the engine descriptions; a subject is kept if it has any recording passing
+    the filters, and only those recordings are aggregated. ``sfreq`` keeps one native
+    rate; ``exclude_seizures`` drops recordings with a seizure annotation;
+    ``min_duration_s`` drops recordings shorter than that. Imports the engine lazily so
+    the windows-CSV mode stays light.
     """
     import rootutils
 
@@ -123,12 +124,16 @@ def _subjects_from_corpus(data_dir: str | None, version: str, sfreq: float | Non
     from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: PLC0415
 
     tuh = TUHEEGEpilepsy(data_dir=data_dir or str(root / "data"), version=version)
-    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq"]].copy()
+    df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq", "n_seizure", "duration"]].copy()
     df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
     if sfreq is not None:
         df = df[np.isclose(df["sfreq"].astype(float), float(sfreq))]
-        if df.empty:
-            raise SystemExit(f"No recordings at native sfreq {sfreq:g} Hz.")
+    if exclude_seizures:
+        df = df[df["n_seizure"] == 0]
+    if min_duration_s is not None:
+        df = df[df["duration"].astype(float) >= float(min_duration_s)]
+    if df.empty:
+        raise SystemExit("No recordings left after the sfreq/seizure/duration filters.")
     return {
         str(subj): (sorted(set(g["path"].astype(str))), int(g["epilepsy"].iloc[0]))
         for subj, g in df.groupby("subject")
@@ -144,6 +149,10 @@ def main() -> None:
                         help="Corpus mode: keep only recordings at this native sampling rate (Hz), e.g. 250.")
     parser.add_argument("--data_dir", default=None, help="Corpus mode: parent of the version folder.")
     parser.add_argument("--version", default="v3.0.0", help="Corpus mode: corpus version subfolder.")
+    parser.add_argument("--exclude_seizures", action="store_true",
+                        help="Corpus mode: drop recordings with a seizure annotation (matters for the means).")
+    parser.add_argument("--min_duration_min", type=float, default=None,
+                        help="Corpus mode: drop recordings shorter than this many minutes (e.g. 2 = training window).")
     parser.add_argument("--out", default=None, help="Output PNG (default: auto-named).")
     parser.add_argument("--out_dir", default=None, help="Corpus mode: output directory (default: cwd).")
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
@@ -181,7 +190,11 @@ def main() -> None:
 
     corpus_mode = args.all_recordings or args.sfreq is not None
     if corpus_mode:
-        subj_recs = _subjects_from_corpus(args.data_dir, args.version, args.sfreq)
+        subj_recs = _subjects_from_corpus(
+            args.data_dir, args.version, args.sfreq,
+            exclude_seizures=args.exclude_seizures,
+            min_duration_s=None if args.min_duration_min is None else args.min_duration_min * 60.0,
+        )
     elif args.windows_csv:
         subj_recs = _subjects_from_windows(args.windows_csv)
     else:

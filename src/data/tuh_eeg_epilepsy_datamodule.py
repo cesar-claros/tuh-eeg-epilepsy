@@ -65,7 +65,8 @@ class TUHEEGDataModule(LightningDataModule):
         data_dir: str = "../../data/",
         version: str = 'v3.0.0',
         train_val_test_split: tuple[float, float, float] = (0.6, 0.2, 0.2),
-        window_len_min: int = 5, # 5 minutes
+        window_len_min: int = 2, # 2 minutes
+        include_seizures: bool = False,
         target_sfreq: float | None = 256.0,
         overlap_pct: float = 0.0,
         batch_size: int = 64,
@@ -103,8 +104,12 @@ class TUHEEGDataModule(LightningDataModule):
             The subject-level train, validation and test split ratios (stratified by
             epilepsy). The trainer merges train + val before fitting, so this is
             effectively an 80/20 train/test split.
-        window_len_min : int, default=5
+        window_len_min : int, default=2
             Window length in minutes.
+        include_seizures : bool, default=False
+            Include recordings that contain seizures in the window plan/split. False =
+            interictal only (drop any recording with n_seizure>0); the task is epilepsy
+            diagnosis, not seizure detection.
         target_sfreq : float | None, default=256.0
             Resample every window to this rate (Hz), fixing the rate across the corpus
             and matching the PSD precompute / bipolar preprocessing (may upsample
@@ -197,6 +202,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.version = version
         self.train_val_test_split = train_val_test_split
         self.window_len_min = window_len_min
+        self.include_seizures = bool(include_seizures)
         self.target_sfreq = float(target_sfreq) if target_sfreq is not None else None
         self.overlap_pct = overlap_pct
         self.batch_size = batch_size
@@ -333,7 +339,7 @@ class TUHEEGDataModule(LightningDataModule):
                     overlap_pct=self.overlap_pct,
                     balance_per_subject=True,
                     max_windows_per_subject=self.max_windows_per_subject,
-                    include_seizures=False,
+                    include_seizures=self.include_seizures,
                     shuffle_windows=True,
                     seed=self.seed,
                     splits=split_ratios,
@@ -371,7 +377,7 @@ class TUHEEGDataModule(LightningDataModule):
                     overlap_pct = self.overlap_pct,
                     balance_per_subject = True,
                     max_windows_per_subject = self.max_windows_per_subject,
-                    include_seizures = False,
+                    include_seizures = self.include_seizures,
                     fix_length_mode = 'resample', # 'resample', 'pad', or None
                     shuffle_windows = True,
                     seed = self.seed,
@@ -406,7 +412,7 @@ class TUHEEGDataModule(LightningDataModule):
                     n_windows_per_subject=10, # limit to 10 windows per subject for dictionary learning to manage memory and training time. These will be randomly selected from the full set of possible windows for each subject.
                     overlap_pct = self.overlap_pct,
                     balance_per_subject = True,
-                    include_seizures = False,
+                    include_seizures = self.include_seizures,
                     fix_length_mode = 'resample', # 'resample', 'pad', or None
                     shuffle_windows = True,
                     seed = self.seed,

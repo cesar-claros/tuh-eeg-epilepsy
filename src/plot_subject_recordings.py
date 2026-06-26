@@ -39,8 +39,8 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
-def _records_for_subject(data_dir, version, subject, sfreq):
-    """(list of edf paths, class) for one subject, optionally at one native rate."""
+def _records_for_subject(data_dir, version, subject, sfreq, exclude_seizures=False, min_duration_s=None):
+    """(list of edf paths, class) for one subject, optionally filtered."""
     import rootutils
 
     root = rootutils.setup_root(__file__, pythonpath=True)
@@ -54,8 +54,12 @@ def _records_for_subject(data_dir, version, subject, sfreq):
     cls = int(bool(df["epilepsy"].iloc[0]))
     if sfreq is not None:
         df = df[np.isclose(df["sfreq"].astype(float), float(sfreq))]
-        if df.empty:
-            raise SystemExit(f"Subject {subject} has no recordings at {sfreq:g} Hz.")
+    if exclude_seizures:
+        df = df[df["n_seizure"] == 0]
+    if min_duration_s is not None:
+        df = df[df["duration"].astype(float) >= float(min_duration_s)]
+    if df.empty:
+        raise SystemExit(f"Subject {subject} has no recordings after the sfreq/seizure/duration filters.")
     return sorted(str(p) for p in df["path"]), cls
 
 
@@ -65,6 +69,10 @@ def main() -> None:
     parser.add_argument("--sfreq", type=float, default=None, help="Restrict to this native sampling rate (Hz).")
     parser.add_argument("--data_dir", default=None, help="Parent of the version folder.")
     parser.add_argument("--version", default="v3.0.0", help="Corpus version subfolder.")
+    parser.add_argument("--exclude_seizures", action="store_true",
+                        help="Drop this subject's recordings that contain a seizure annotation.")
+    parser.add_argument("--min_duration_min", type=float, default=None,
+                        help="Drop recordings shorter than this many minutes (e.g. 2 = training window).")
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     parser.add_argument("--native", action="store_true", help="Read the native-rate sidecars.")
@@ -75,7 +83,11 @@ def main() -> None:
         raise SystemExit("--native requires --sfreq: native-rate sidecars share a grid only within one rate.")
     suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
-    paths, cls = _records_for_subject(args.data_dir, args.version, args.subject, args.sfreq)
+    paths, cls = _records_for_subject(
+        args.data_dir, args.version, args.subject, args.sfreq,
+        exclude_seizures=args.exclude_seizures,
+        min_duration_s=None if args.min_duration_min is None else args.min_duration_min * 60.0,
+    )
 
     freqs = None
     recs = []  # (stem, channel-avg psd, n_times, sfreq)
