@@ -49,6 +49,20 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
+def _roughness(freqs, psd) -> float:
+    """Spectral roughness (ripple RMS, dB): RMS of log-PSD minus a smoothed log-PSD.
+
+    Matches ``rank_psd_anomaly.py``; high = wiggly. Invariant to overall scale (a
+    constant log shift cancels), so normalization does not change it.
+    """
+    df = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 1.0
+    lp = 10.0 * np.log10(psd + _EPS)
+    w = max(5, int(round(5.0 / df)))
+    w += 1 - (w % 2)
+    smooth = np.convolve(lp, np.ones(w) / w, mode="same")
+    return float(np.sqrt(np.mean((lp - smooth) ** 2)))
+
+
 def _subject_psd(recordings, suffix: str):
     """Length-weighted, channel-averaged mean PSD over a subject's recordings."""
     acc = None
@@ -128,6 +142,11 @@ def main() -> None:
         "--normalize", action="store_true",
         help="Per-subject unit power: compare spectral SHAPE, not loudness.",
     )
+    parser.add_argument(
+        "--highlight_top", type=int, default=10,
+        help="Highlight the N most anomalous (wiggliest, by spectral roughness) subject "
+        "traces with distinct colors and their IDs in the legend. 0 disables.",
+    )
     args = parser.parse_args()
     if args.native and args.sfreq is None:
         raise SystemExit("--native requires --sfreq <rate>: native-rate PSDs share a grid only within one sampling rate.")
@@ -147,8 +166,8 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     freqs = None
-    per_class: dict = {0: [], 1: []}
-    for _subj, (recs, cls) in subj_recs.items():
+    per_class: dict = {0: [], 1: []}  # cls -> list of (subject_id, psd)
+    for subj, (recs, cls) in subj_recs.items():
         f, psd = _subject_psd(recs, suffix)
         if f is None:
             continue
@@ -156,35 +175,53 @@ def main() -> None:
             freqs = f
         if args.normalize:
             psd = psd / (psd.sum() + _EPS)
-        per_class[cls].append(psd)
+        per_class[cls].append((str(subj), psd))
     if freqs is None:
         raise SystemExit(f"No {suffix} sidecars found; run precompute_psd.py with the matching flags first.")
 
+    # Rank ALL subjects by roughness; the top-N (global) are highlighted with rank colors.
+    ranked = sorted(
+        ((cls, subj, psd, _roughness(freqs, psd)) for cls in (0, 1) for subj, psd in per_class[cls]),
+        key=lambda r: r[3], reverse=True,
+    )
+    hl_rank: dict = {}  # (cls, subj) -> (rank 1-based, color index, roughness)
+    for idx, (cls, subj, _psd, rough) in enumerate(ranked[: max(0, args.highlight_top)]):
+        hl_rank[(cls, subj)] = (idx + 1, idx, rough)
+
     fmask = np.ones_like(freqs, dtype=bool) if args.fmax is None else (freqs <= args.fmax)
     fx = freqs[fmask]
+    cmap = plt.get_cmap("tab10")
 
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.6), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharex=True, sharey=True)
     for cls in (0, 1):
         ax = axes[cls]
-        arrs = per_class[cls]
-        for psd in arrs:
-            ax.plot(fx, 10.0 * np.log10(psd[fmask] + _EPS), color=CLASS_COLORS[cls], lw=0.4, alpha=0.25)
-        if arrs:
-            stack = np.stack(arrs)
-            mean_db = 10.0 * np.log10(np.mean(stack, axis=0)[fmask] + _EPS)
-            med_db = 10.0 * np.log10(np.median(stack, axis=0)[fmask] + _EPS)
-            ax.plot(fx, mean_db, color="k", lw=1.8, label="class mean")
-            ax.plot(fx, med_db, color="k", lw=1.3, ls="--", label="class median")
-        ax.set_title(f"{CLASS_NAMES[cls]} (n={len(arrs)})")
+        subj_psd = per_class[cls]
+        for subj, psd in subj_psd:  # faint background = non-highlighted subjects
+            if (cls, subj) in hl_rank:
+                continue
+            ax.plot(fx, 10.0 * np.log10(psd[fmask] + _EPS), color=CLASS_COLORS[cls], lw=0.4, alpha=0.16)
+        for subj, psd in sorted(  # highlighted, in rank order, distinct colors + IDs
+            (sp for sp in subj_psd if (cls, sp[0]) in hl_rank), key=lambda sp: hl_rank[(cls, sp[0])][0]
+        ):
+            rk, ci, rough = hl_rank[(cls, subj)]
+            ax.plot(fx, 10.0 * np.log10(psd[fmask] + _EPS), color=cmap(ci % 10), lw=1.2, alpha=0.95,
+                    label=f"#{rk} {subj} (r={rough:.2f})")
+        if subj_psd:  # mean / median over ALL subjects in the class
+            stack = np.stack([psd for _subj, psd in subj_psd])
+            ax.plot(fx, 10.0 * np.log10(np.mean(stack, axis=0)[fmask] + _EPS), color="k", lw=1.8, label="class mean")
+            ax.plot(fx, 10.0 * np.log10(np.median(stack, axis=0)[fmask] + _EPS), color="k", lw=1.3, ls="--", label="class median")
+        ax.set_title(f"{CLASS_NAMES[cls]} (n={len(subj_psd)})")
         ax.set_xlabel("frequency (Hz)")
         ax.set_xlim(0, fx[-1] if len(fx) else None)
-        ax.legend(fontsize=8, loc="upper right")
+        ax.legend(fontsize=6, loc="upper right", ncol=1)
     axes[0].set_ylabel(("relative " if args.normalize else "") + "PSD (dB)")
     scope = f"native {args.sfreq:g} Hz" if args.sfreq is not None else ("whole corpus" if corpus_mode else "training subjects")
+    hl_note = f"; top {len(hl_rank)} by roughness highlighted (#rank ID r=roughness)" if hl_rank else ""
     fig.suptitle(
         f"Per-subject channel-averaged PSD ({scope})"
         + (" [unit-power]" if args.normalize else "")
         + "  -  mean above median = a few subjects carry that band"
+        + hl_note
     )
     fig.tight_layout()
 
