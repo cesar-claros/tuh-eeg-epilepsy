@@ -22,6 +22,8 @@ unit power (compare spectral SHAPE, not loudness).
     python src/plot_psd_subjects.py --windows_csv logs/train/runs/<ts>/windows_train.csv \
         --fmax 80 --bipolar --notch_freqs 60 120
     python src/plot_psd_subjects.py --sfreq 250 --fmax 80 --bipolar --notch_freqs 60 120
+    # rank the highlighted subjects by power AND roughness simultaneously
+    python src/plot_psd_subjects.py --sfreq 250 --rank_by power roughness --highlight_top 10
 """
 
 from __future__ import annotations
@@ -175,9 +177,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--rank_by", nargs="+", default=["roughness"], choices=list(_METRICS),
-        help="Metric(s) the highlight ranks by; >1 = composite robust z-score. "
-        "roughness=wiggliness, power=energy outlier (loud OR quiet), flatness=tonality "
-        "outlier, hf=high-frequency power fraction. Default: roughness.",
+        help="Metric(s) the highlight ranks by; pass >1 to rank by them simultaneously "
+        "(sum of robust z-scores), e.g. '--rank_by power roughness' for subjects that are "
+        "both energy outliers AND wiggly. roughness=wiggliness, power=energy outlier (loud "
+        "OR quiet), flatness=tonality outlier, hf=high-frequency power fraction. The legend "
+        "shows each chosen metric's value per subject. Default: roughness.",
     )
     parser.add_argument(
         "--hf_cut", type=float, default=None,
@@ -232,7 +236,13 @@ def main() -> None:
     hl_rank: dict = {}  # (cls, subj) -> (rank 1-based, color index, label tag)
     for rank, i in enumerate(order[: max(0, args.highlight_top)]):
         cls, subj, _psd = all_subj[i]
-        tag = f"{_TAG[single]}={raw[single][i]:.2f}" if single else f"a={composite[i]:.1f}"
+        # Single metric: show its raw value. Multiple metrics (e.g. power+roughness):
+        # the order is the composite robust z, but show each metric's raw value so the
+        # combined ranking is interpretable (which subjects are loud AND wiggly).
+        tag = (
+            f"{_TAG[single]}={raw[single][i]:.2f}" if single
+            else " ".join(f"{_TAG[m]}={raw[m][i]:.2f}" for m in args.rank_by)
+        )
         hl_rank[(cls, subj)] = (rank + 1, rank, tag)
 
     fmask = np.ones_like(freqs, dtype=bool) if args.fmax is None else (freqs <= args.fmax)
