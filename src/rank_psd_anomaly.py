@@ -80,7 +80,8 @@ def _records_from_corpus(data_dir, version, sfreq, exclude_seizures=False, min_d
     root = rootutils.setup_root(__file__, pythonpath=True)
     from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: PLC0415
 
-    tuh = TUHEEGEpilepsy(data_dir=data_dir or str(root / "data"), version=version)
+    # add_annotations=True so descriptions carries n_seizure / duration (needed below).
+    tuh = TUHEEGEpilepsy(data_dir=data_dir or str(root / "data"), version=version, add_annotations=True)
     df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq", "n_seizure", "duration"]].copy()
     df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
     if sfreq is not None:

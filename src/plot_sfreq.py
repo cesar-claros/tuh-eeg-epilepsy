@@ -45,7 +45,8 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Output PNG (default: <cwd>/sfreq_by_class.png).")
     args = parser.parse_args()
 
-    tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version)
+    # add_annotations=True so descriptions carries n_seizure / duration (needed below).
+    tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version, add_annotations=True)
     df = tuh.descriptions[["path", "subject", "epilepsy", "sfreq", "n_seizure", "duration"]].copy()
     df["epilepsy"] = df["epilepsy"].astype(bool).astype(int)
     if args.windows_csv:
