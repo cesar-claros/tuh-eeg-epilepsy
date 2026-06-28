@@ -26,6 +26,10 @@ unit power (compare spectral SHAPE, not loudness).
     python src/plot_psd_subjects.py --sfreq 250 --rank_by power roughness --highlight_top 10
     # fuse the two metrics by rank instead of summed z-scores (robust to a heavy tail)
     python src/plot_psd_subjects.py --sfreq 250 --rank_by power roughness --combine rrf
+    # drop the 20 most anomalous recordings (from a rank_psd_anomaly.py CSV) before averaging
+    python src/rank_psd_anomaly.py --sfreq 250 --bipolar --notch_freqs 60 120 --out anom.csv
+    python src/plot_psd_subjects.py --sfreq 250 --bipolar --notch_freqs 60 120 \
+        --exclude_anomaly_csv anom.csv --exclude_top 20
 """
 
 from __future__ import annotations
@@ -186,6 +190,25 @@ def _subjects_from_corpus(data_dir, version, sfreq, exclude_seizures=False, min_
     }
 
 
+def _anomaly_excludes(csv_path: str, top: int, anomaly_min) -> set:
+    """Recording paths to drop, read from a rank_psd_anomaly.py CSV.
+
+    Selects the ``top`` most anomalous recordings (by the ``anomaly`` column) and/or all
+    with ``anomaly >= anomaly_min``. Returns normalized path strings for membership tests
+    (the CSV ranks every recording, so a selector is required, else nothing is dropped).
+    """
+    df = pd.read_csv(csv_path)
+    if "anomaly" not in df.columns or "path" not in df.columns:
+        raise SystemExit(f"{csv_path} is not a rank_psd_anomaly.py CSV (needs 'anomaly' and 'path' columns).")
+    df = df.sort_values("anomaly", ascending=False).reset_index(drop=True)
+    mask = pd.Series(False, index=df.index)
+    if top:
+        mask.iloc[:top] = True
+    if anomaly_min is not None:
+        mask |= df["anomaly"].astype(float) >= float(anomaly_min)
+    return {str(Path(p)) for p in df.loc[mask, "path"].astype(str)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows_csv", default=None, help="windows_train.csv from a run (training-subject source).")
@@ -199,6 +222,15 @@ def main() -> None:
                         help="Corpus mode: drop recordings with a seizure annotation (matters for the means).")
     parser.add_argument("--min_duration_min", type=float, default=None,
                         help="Corpus mode: drop recordings shorter than this many minutes (e.g. 2 = training window).")
+    parser.add_argument("--exclude_anomaly_csv", default=None,
+                        help="rank_psd_anomaly.py CSV; drop the recordings it flags from each "
+                        "subject's mean (use --exclude_top and/or --exclude_anomaly_min to pick which).")
+    parser.add_argument("--exclude_top", type=int, default=0,
+                        help="With --exclude_anomaly_csv: drop the N most anomalous recordings (by the "
+                        "'anomaly' column). 0 = none.")
+    parser.add_argument("--exclude_anomaly_min", type=float, default=None,
+                        help="With --exclude_anomaly_csv: drop every recording whose 'anomaly' score is "
+                        ">= this value.")
     parser.add_argument("--out", default=None, help="Output PNG (default: auto-named).")
     parser.add_argument("--out_dir", default=None, help="Corpus mode: output directory (default: cwd).")
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
@@ -246,6 +278,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.native and args.sfreq is None:
         raise SystemExit("--native requires --sfreq <rate>: native-rate PSDs share a grid only within one sampling rate.")
+    if (args.exclude_top or args.exclude_anomaly_min is not None) and not args.exclude_anomaly_csv:
+        raise SystemExit("--exclude_top / --exclude_anomaly_min need --exclude_anomaly_csv.")
+    if args.exclude_anomaly_csv and not args.exclude_top and args.exclude_anomaly_min is None:
+        raise SystemExit("--exclude_anomaly_csv needs a selector: --exclude_top N and/or --exclude_anomaly_min X.")
     suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
     corpus_mode = args.all_recordings or args.sfreq is not None
@@ -259,6 +295,26 @@ def main() -> None:
         subj_recs = _subjects_from_windows(args.windows_csv)
     else:
         raise SystemExit("Provide --windows_csv, or --all-recordings / --sfreq for the whole corpus.")
+
+    # Drop the recordings flagged anomalous (from a rank_psd_anomaly.py CSV) out of each
+    # subject's recording list, so its length-weighted mean is recomputed without them; a
+    # subject left with no recordings is dropped entirely.
+    n_excluded = 0
+    if args.exclude_anomaly_csv:
+        excluded = _anomaly_excludes(args.exclude_anomaly_csv, args.exclude_top, args.exclude_anomaly_min)
+        kept_recs: dict = {}
+        for subj, (recs, cls) in subj_recs.items():
+            kept = [r for r in recs if str(Path(r)) not in excluded]
+            n_excluded += len(recs) - len(kept)
+            if kept:
+                kept_recs[subj] = (kept, cls)
+        dropped_subjects = len(subj_recs) - len(kept_recs)
+        subj_recs = kept_recs
+        print(f"anomaly exclusion: dropped {n_excluded} recording(s) listed in "
+              f"{args.exclude_anomaly_csv} ({len(excluded)} selected); "
+              f"{dropped_subjects} subject(s) left empty and removed.")
+        if not subj_recs:
+            raise SystemExit("No subjects left after the anomaly exclusion.")
 
     import matplotlib
 
@@ -330,17 +386,19 @@ def main() -> None:
     scope = f"native {args.sfreq:g} Hz" if args.sfreq is not None else ("whole corpus" if corpus_mode else "training subjects")
     by = "+".join(args.rank_by) + (f" [{args.combine}]" if len(args.rank_by) > 1 else "")
     hl_note = f"; top {len(hl_rank)} by {by} highlighted (#rank ID metric)" if hl_rank else ""
+    excl_note = f"; {n_excluded} anomalous rec(s) excluded" if n_excluded else ""
     fig.suptitle(
         f"Per-subject channel-averaged PSD ({scope})"
         + (" [unit-power]" if args.normalize else "")
         + "  -  mean above median = a few subjects carry that band"
-        + hl_note
+        + hl_note + excl_note
     )
     fig.tight_layout()
 
     tag = suffix.replace("-psd", "").replace(".npz", "")
     scope_tag = f"-sfreq{args.sfreq:g}" if args.sfreq is not None else ("-allrates" if corpus_mode else "")
-    name = f"psd_subjects{tag}{scope_tag}{'-norm' if args.normalize else ''}.png"
+    excl_tag = f"-excl{n_excluded}" if n_excluded else ""
+    name = f"psd_subjects{tag}{scope_tag}{'-norm' if args.normalize else ''}{excl_tag}.png"
     if args.out:
         out = Path(args.out)
     elif corpus_mode:
