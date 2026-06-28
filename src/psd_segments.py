@@ -42,6 +42,15 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
+def _default_psd_dir() -> Path:
+    """Default output location: <project root>/diagnostics/psd (created if missing)."""
+    import rootutils
+
+    out = rootutils.setup_root(__file__, pythonpath=True) / "diagnostics" / "psd"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _auto_band(freqs, cm, smooth_hz=5.0, bw=4.0, fmin=1.0):
     """Target band = window around the biggest positive deviation from a smooth 1/f fit."""
     df = float(freqs[1] - freqs[0])
@@ -105,7 +114,8 @@ def main() -> None:
                         help="Target band (Hz); default auto-detect the biggest 1/f deviation.")
     parser.add_argument("--bandwidth", type=float, default=4.0, help="Auto-band width (Hz) around the peak.")
     parser.add_argument("--seg_sec", type=float, default=6.0, help="Segment length (s).")
-    parser.add_argument("--out", default=None, help="Output PNG (default: <edf dir>/<rec>_segments.png).")
+    parser.add_argument("--out", default=None,
+                        help="Output PNG (default: <root>/diagnostics/psd/<rec>_segments.png).")
     args = parser.parse_args()
 
     suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
@@ -193,7 +203,8 @@ def main() -> None:
         axes[b].tick_params(labelsize=5)
 
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    out = Path(args.out) if args.out else Path(args.edf).with_name(Path(args.edf).stem + "_segments.png")
+    out = Path(args.out) if args.out else _default_psd_dir() / f"{Path(args.edf).stem}_segments.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"wrote {out}  (band {band[0]:.1f}-{band[1]:.1f} Hz, worst channel {ch_names[worst]})")
 

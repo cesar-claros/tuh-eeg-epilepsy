@@ -39,6 +39,15 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
+def _default_psd_dir() -> Path:
+    """Default output location: <project root>/diagnostics/psd (created if missing)."""
+    import rootutils
+
+    out = rootutils.setup_root(__file__, pythonpath=True) / "diagnostics" / "psd"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _records_for_subject(data_dir, version, subject, sfreq, exclude_seizures=False, min_duration_s=None):
     """(list of edf paths, class) for one subject, optionally filtered."""
     import rootutils
@@ -78,7 +87,8 @@ def main() -> None:
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     parser.add_argument("--native", action="store_true", help="Read the native-rate sidecars.")
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
-    parser.add_argument("--out", default=None, help="Output PNG (default: ./psd_recordings-<subject>...png).")
+    parser.add_argument("--out", default=None,
+                        help="Output PNG (default: <root>/diagnostics/psd/psd_recordings-<subject>...png).")
     args = parser.parse_args()
     if args.native and args.sfreq is None:
         raise SystemExit("--native requires --sfreq: native-rate sidecars share a grid only within one rate.")
@@ -134,7 +144,7 @@ def main() -> None:
     fig.tight_layout()
     tag = suffix.replace("-psd", "").replace(".npz", "")
     scope = f"-sfreq{args.sfreq:g}" if args.sfreq is not None else ""
-    out = Path(args.out) if args.out else Path.cwd() / f"psd_recordings-{args.subject}{scope}{tag}.png"
+    out = Path(args.out) if args.out else _default_psd_dir() / f"psd_recordings-{args.subject}{scope}{tag}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"wrote {out}  ({len(recs)} recordings for subject {args.subject})")

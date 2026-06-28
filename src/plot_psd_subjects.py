@@ -57,6 +57,15 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
+def _default_psd_dir() -> Path:
+    """Default output location: <project root>/diagnostics/psd (created if missing)."""
+    import rootutils
+
+    out = rootutils.setup_root(__file__, pythonpath=True) / "diagnostics" / "psd"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 # Per-subject anomaly metrics (higher metric value -> more extreme). power and
 # flatness are two-sided outliers (loud OR quiet, peaky OR white), so they are scored
 # by |robust z|; roughness and hf are one-sided (high = anomalous).
@@ -231,8 +240,9 @@ def main() -> None:
     parser.add_argument("--exclude_anomaly_min", type=float, default=None,
                         help="With --exclude_anomaly_csv: drop every recording whose 'anomaly' score is "
                         ">= this value.")
-    parser.add_argument("--out", default=None, help="Output PNG (default: auto-named).")
-    parser.add_argument("--out_dir", default=None, help="Corpus mode: output directory (default: cwd).")
+    parser.add_argument("--out", default=None, help="Output PNG (default: auto-named under diagnostics/psd).")
+    parser.add_argument("--out_dir", default=None,
+                        help="Directory for the auto-named PNG (default: <root>/diagnostics/psd).")
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
@@ -401,10 +411,8 @@ def main() -> None:
     name = f"psd_subjects{tag}{scope_tag}{'-norm' if args.normalize else ''}{excl_tag}.png"
     if args.out:
         out = Path(args.out)
-    elif corpus_mode:
-        out = (Path(args.out_dir) if args.out_dir else Path.cwd()) / name
     else:
-        out = Path(args.windows_csv).parent / name
+        out = (Path(args.out_dir) if args.out_dir else _default_psd_dir()) / name
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"wrote {out}  ({len(per_class[0])} no-epilepsy + {len(per_class[1])} epilepsy subjects)")

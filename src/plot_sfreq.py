@@ -42,7 +42,7 @@ def main() -> None:
                         help="Drop recordings with a seizure annotation (n_seizure>0).")
     parser.add_argument("--min_duration_min", type=float, default=None,
                         help="Drop recordings shorter than this many minutes (e.g. 2 = the training window).")
-    parser.add_argument("--out", default=None, help="Output PNG (default: <cwd>/sfreq_by_class.png).")
+    parser.add_argument("--out", default=None, help="Output PNG (default: <root>/diagnostics/psd/sfreq_by_class.png).")
     args = parser.parse_args()
 
     # add_annotations=True so descriptions carries n_seizure / duration (needed below).
@@ -87,7 +87,11 @@ def main() -> None:
     ax.set_title("Native sampling rate per class" + (" (windows subset)" if args.windows_csv else ""))
     ax.legend()
     fig.tight_layout()
-    out = Path(args.out) if args.out else Path.cwd() / "sfreq_by_class.png"
+    if args.out:
+        out = Path(args.out)
+    else:
+        out = root / "diagnostics" / "psd" / "sfreq_by_class.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"\nwrote {out}")
 

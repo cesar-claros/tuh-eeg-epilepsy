@@ -52,6 +52,15 @@ def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -
     return s + ".npz"
 
 
+def _default_psd_dir() -> Path:
+    """Default output location: <project root>/diagnostics/psd (created if missing)."""
+    import rootutils
+
+    out = rootutils.setup_root(__file__, pythonpath=True) / "diagnostics" / "psd"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 # Per-recording metrics and how they are scored. power and flatness are two-sided
 # outliers (loud OR silent, tonal OR white), so they are scored by |robust z|;
 # roughness is one-sided (high = wiggly = anomalous). Same names/units as
@@ -180,7 +189,8 @@ def main() -> None:
     parser.add_argument("--rrf_k", type=float, default=60.0,
                         help="Reciprocal rank fusion constant for --combine rrf. Default 60.")
     parser.add_argument("--top", type=int, default=15, help="Rows to print at each end.")
-    parser.add_argument("--out", default=None, help="Output CSV (default: ./psd_anomaly<scope>.csv).")
+    parser.add_argument("--out", default=None,
+                        help="Output CSV (default: <root>/diagnostics/psd/psd_anomaly<scope>.csv).")
     args = parser.parse_args()
     suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
 
@@ -216,7 +226,7 @@ def main() -> None:
     out = out.sort_values("anomaly", ascending=False).reset_index(drop=True)
 
     scope = f"sfreq{args.sfreq:g}" if args.sfreq is not None else ("allrates" if args.all_recordings else "windows")
-    csv_path = Path(args.out) if args.out else Path.cwd() / f"psd_anomaly-{scope}{suffix.replace('.npz','')}.csv"
+    csv_path = Path(args.out) if args.out else _default_psd_dir() / f"psd_anomaly-{scope}{suffix.replace('.npz','')}.csv"
     out.to_csv(csv_path, index=False)
 
     by = "+".join(args.rank_by) + (f" [{args.combine}]" if len(args.rank_by) > 1 else "")
