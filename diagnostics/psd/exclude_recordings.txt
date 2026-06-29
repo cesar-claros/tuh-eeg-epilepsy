@@ -1,0 +1,67 @@
+# PSD-anomaly training exclusion list (one EDF path per line; '#' lines ignored).
+# sources: diagnostics/psd/psd_anomaly-sfreq250-psd-bipolar-native-notch-60-120.csv, diagnostics/psd/psd_anomaly-sfreq256-psd-bipolar-native-notch-60-120.csv, diagnostics/psd/psd_anomaly-sfreq400-psd-bipolar-native-notch-60-120.csv, diagnostics/psd/psd_anomaly-sfreq1000-psd-bipolar-native-notch-60-120.csv
+# rate 250 Hz: requested top 30, available 593, selected 30
+# rate 256 Hz: requested top 30, available 1563, selected 30
+# rate 400 Hz: requested top 0, available 51, selected 0
+# rate 1000 Hz: requested top 0, available 20, selected 0
+# total excluded: 60
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapsj/s001_2013/01_tcp_ar/aaaaapsj_s001_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaankd/s002_2012/01_tcp_ar/aaaaankd_s002_t006.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t017.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t018.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t016.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaandb/s002_2012/01_tcp_ar/aaaaandb_s002_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaalpi/s002_2011/02_tcp_le/aaaaalpi_s002_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaalpi/s002_2011/02_tcp_le/aaaaalpi_s002_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t013.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaalpi/s001_2011/02_tcp_le/aaaaalpi_s001_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaankd/s002_2012/01_tcp_ar/aaaaankd_s002_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaandb/s002_2012/01_tcp_ar/aaaaandb_s002_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t019.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaappj/s002_2013/01_tcp_ar/aaaaappj_s002_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaanky/s001_2012/01_tcp_ar/aaaaanky_s001_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaangg/s002_2012/01_tcp_ar/aaaaangg_s002_t017.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaalpi/s001_2011/02_tcp_le/aaaaalpi_s001_t000.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaappj/s002_2013/01_tcp_ar/aaaaappj_s002_t008.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaappj/s002_2013/01_tcp_ar/aaaaappj_s002_t007.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaaifp/s003_2011/01_tcp_ar/aaaaaifp_s003_t006.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaappj/s002_2013/01_tcp_ar/aaaaappj_s002_t006.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmi/s001_2013/01_tcp_ar/aaaaapmi_s001_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaakgb/s001_2010/02_tcp_le/aaaaakgb_s001_t000.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaakvz/s001_2010/01_tcp_ar/aaaaakvz_s001_t001.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaankd/s002_2012/01_tcp_ar/aaaaankd_s002_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaaeqq/s001_2006/02_tcp_le/aaaaaeqq_s001_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaaoyt/s001_2013/01_tcp_ar/aaaaaoyt_s001_t000.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaandb/s002_2012/01_tcp_ar/aaaaandb_s002_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/01_no_epilepsy/aaaaapmu/s002_2013/01_tcp_ar/aaaaapmu_s002_t014.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaaifn/s005_2011/01_tcp_ar/aaaaaifn_s005_t007.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaamhb/s004_2012/01_tcp_ar/aaaaamhb_s004_t009.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaamhb/s004_2012/01_tcp_ar/aaaaamhb_s004_t008.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t000.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajud/s009_2010/03_tcp_ar_a/aaaaajud_s009_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t001.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaakoq/s003_2012/01_tcp_ar/aaaaakoq_s003_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t011.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t008.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajud/s011_2010/03_tcp_ar_a/aaaaajud_s011_t000.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t009.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaaovm/s003_2013/01_tcp_ar/aaaaaovm_s003_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanjh/s002_2012/01_tcp_ar/aaaaanjh_s002_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t014.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajqo/s016_2010/03_tcp_ar_a/aaaaajqo_s016_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajqo/s016_2010/03_tcp_ar_a/aaaaajqo_s016_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajqo/s016_2010/03_tcp_ar_a/aaaaajqo_s016_t003.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t015.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaajqo/s016_2010/03_tcp_ar_a/aaaaajqo_s016_t002.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaakoq/s003_2012/01_tcp_ar/aaaaakoq_s003_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t016.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t004.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaannz/s006_2015/01_tcp_ar/aaaaannz_s006_t005.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t007.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaaifn/s005_2011/01_tcp_ar/aaaaaifn_s005_t006.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaamhb/s004_2012/01_tcp_ar/aaaaamhb_s004_t007.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t017.edf
+/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0/00_epilepsy/aaaaanwn/s004_2014/01_tcp_ar/aaaaanwn_s004_t013.edf
