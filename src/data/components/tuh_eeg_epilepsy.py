@@ -135,6 +135,7 @@ class TUHEEGEpilepsy:
         ic_bag_sign_normalize: bool = True,
         ic_bag_rank_by: str = 'variance',
         require_keep_labels: Optional[tuple] = None,
+        exclude_paths: Optional[Iterable[str]] = None,
     ):
 
         self.data_dir = data_dir
@@ -157,6 +158,10 @@ class TUHEEGEpilepsy:
         # (applied before windowing, independent of ica_keep_labels). Used to make
         # the window set identical across signal modes.
         self.require_keep_labels = require_keep_labels
+        # Recording EDF paths to drop from the window pool before windowing (e.g. the
+        # PSD anomalies picked by build_psd_exclusion.py). Stored as a normalized
+        # path-string set for matching against descriptions['path'].
+        self.exclude_paths = {str(Path(p)) for p in exclude_paths} if exclude_paths else None
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -1249,6 +1254,27 @@ class TUHEEGEpilepsy:
         return df[mask]
 
     @staticmethod
+    def _filter_excluded_paths(df: pd.DataFrame, exclude_paths) -> pd.DataFrame:
+        """Drop recordings whose EDF path is in ``exclude_paths`` (normalized str set).
+
+        Used to remove flagged recordings (e.g. PSD anomalies from
+        build_psd_exclusion.py) from the pool before windowing. Matching is on the
+        normalized path string, the same identity the exclusion file and the anomaly
+        CSVs use.
+        """
+        if not exclude_paths:
+            return df
+        keep = ~df['path'].map(lambda p: str(Path(p))).isin(exclude_paths)
+        n_drop = int((~keep).sum())
+        logger.info(
+            f"exclude_paths: dropped {n_drop}/{len(df)} recording(s) listed in the "
+            f"exclusion file ({len(exclude_paths)} paths requested)."
+        )
+        if not keep.any():
+            raise ValueError("All recordings were excluded by exclude_paths.")
+        return df[keep]
+
+    @staticmethod
     def _read_raw_edf(
         file_path: Path,
         include: Optional[List[str]] = None,
@@ -1483,6 +1509,8 @@ class TUHEEGEpilepsy:
         # independent, so the window set matches across signal modes).
         if self.require_keep_labels is not None:
             df = TUHEEGEpilepsy._filter_recordings_by_labels(df, self.require_keep_labels)
+        if self.exclude_paths:
+            df = TUHEEGEpilepsy._filter_excluded_paths(df, self.exclude_paths)
 
         if df.empty:
             raise ValueError("No data available after filtering.")

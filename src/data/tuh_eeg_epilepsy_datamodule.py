@@ -91,6 +91,7 @@ class TUHEEGDataModule(LightningDataModule):
         windows_val_csv: str | None = None,
         windows_test_csv: str | None = None,
         require_keep_labels: tuple | None = None,
+        exclude_recordings_file: str | None = None,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -190,6 +191,12 @@ class TUHEEGDataModule(LightningDataModule):
             ``ica_keep_labels``; set the same value across signal modes so they all
             train/evaluate on the identical window set (a recording either has a
             matching IC or it doesn't, so this is representation-independent).
+        exclude_recordings_file : str | None, default=None
+            Path to a text file of EDF paths to drop from the pool before windowing
+            (one path per line; '#' comments and blanks ignored), as produced by
+            ``build_psd_exclusion.py`` from the PSD-anomaly rankings. None = no
+            exclusion. Applied alongside the seizure / duration / label filters in both
+            the eager and lazy loaders.
 
         """
         super().__init__()
@@ -227,6 +234,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.windows_val_csv = windows_val_csv
         self.windows_test_csv = windows_test_csv
         self.require_keep_labels = require_keep_labels
+        self.exclude_recordings_file = exclude_recordings_file
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -254,7 +262,23 @@ class TUHEEGDataModule(LightningDataModule):
 
         """
         return 2
-    
+
+    def _load_exclusion_paths(self) -> list | None:
+        """Read data.exclude_recordings_file into a list of EDF paths to drop.
+
+        The file (from build_psd_exclusion.py) lists one path per line; blank lines and
+        '#' comments are ignored. Returns None when no file is configured so the engine
+        applies no exclusion.
+        """
+        if not self.exclude_recordings_file:
+            return None
+        path = Path(self.exclude_recordings_file)
+        if not path.exists():
+            raise FileNotFoundError(f"data.exclude_recordings_file not found: {path}")
+        paths = [ln.strip() for ln in path.read_text().splitlines()]
+        paths = [ln for ln in paths if ln and not ln.startswith("#")]
+        logger.info(f"Loaded {len(paths)} recording path(s) to exclude from {path}.")
+        return paths or None
 
     def prepare_data(self) -> None:
         """Make sure dataset has been placed in the data folder and create dataframes.
@@ -302,6 +326,7 @@ class TUHEEGDataModule(LightningDataModule):
                 ic_bag_sign_normalize=self.ic_bag_sign_normalize,
                 ic_bag_rank_by=self.ic_bag_rank_by,
                 require_keep_labels=self.require_keep_labels,
+                exclude_paths=self._load_exclusion_paths(),
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

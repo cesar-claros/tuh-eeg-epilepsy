@@ -20,6 +20,11 @@ windows_test_csv: null
 # signal modes (e.g. [brain]) so raw / brain_ic / ic_bag use identical windows.
 # null = no filter. Independent of ica_keep_labels.
 require_keep_labels: null
+# Drop specific recordings from the pool before windowing: path to a text file of EDF
+# paths (one per line, '#' comments ignored), e.g. the PSD anomalies selected by
+# build_psd_exclusion.py. null = no exclusion. e.g.
+# data.exclude_recordings_file=diagnostics/psd/exclude_recordings.txt
+exclude_recordings_file: null
 overlap_pct: 0.0
 # Per-subject window cap. null = strict balancing (every subject clamped to the
 # global-minimum subject's window count, which discards most of the corpus). Set

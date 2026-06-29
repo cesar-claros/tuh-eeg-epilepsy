@@ -42,6 +42,7 @@ the windows_*.csv dump (lazy vs eager) before relying on it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import mne
@@ -400,6 +401,15 @@ def _build_lazy_from_csv(
     runs sharing the same CSVs get identical windows and targets.
     """
     plans = {sp: _plan_from_csv(engine, path) for sp, path in window_csvs.items()}
+    if engine.exclude_paths:
+        # Honor data.exclude_recordings_file even when reusing a fixed window set: drop
+        # every window whose recording is in the exclusion list (per split).
+        for sp, plan in plans.items():
+            before = len(plan)
+            plans[sp] = plan[~plan['path'].map(lambda p: str(Path(p))).isin(engine.exclude_paths)]
+            dropped = before - len(plans[sp])
+            if dropped:
+                logger.info(f"exclude_paths: {sp} split dropped {dropped}/{before} windows (excluded recordings).")
     all_rows = pd.concat(plans.values(), ignore_index=True)
     target_sfreq = (
         float(target_sfreq) if target_sfreq is not None
@@ -505,6 +515,8 @@ def build_lazy_datasets(
         df = df[df['subject'].isin(idx_list)]
     if engine.require_keep_labels is not None:
         df = TUHEEGEpilepsy._filter_recordings_by_labels(df, engine.require_keep_labels)
+    if engine.exclude_paths:
+        df = TUHEEGEpilepsy._filter_excluded_paths(df, engine.exclude_paths)
     if df.empty:
         raise ValueError("No data available after filtering.")
 
