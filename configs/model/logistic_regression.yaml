@@ -1,4 +1,8 @@
 _target_: sklearn.linear_model.LogisticRegressionCV
+# CV objective for selecting C. balanced_accuracy = mean(sensitivity, specificity),
+# robust to the window-level class imbalance. Set scoring=recall to optimize epilepsy
+# sensitivity, or scoring=accuracy for the sklearn default.
+scoring: balanced_accuracy
 cv: 5
 Cs:
   _target_: numpy.logspace

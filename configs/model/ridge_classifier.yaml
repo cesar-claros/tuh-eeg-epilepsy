@@ -4,6 +4,10 @@ alphas:
   start: -3
   stop: 3
   num: 10
+# CV objective for selecting alpha. balanced_accuracy = mean(sensitivity, specificity),
+# robust to the window-level class imbalance. Set scoring=recall to optimize epilepsy
+# sensitivity instead (works here because cv is set explicitly).
+scoring: balanced_accuracy
 cv: 5
 # null = unweighted (default); 'balanced' counteracts window-level class imbalance.
 # Override on the CLI with model.class_weight=balanced.

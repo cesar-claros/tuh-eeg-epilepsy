@@ -7,7 +7,7 @@ defaults:
   - data: tuh_eeg_epilepsy
   - feature: hydra_transformer
   - scaler: sparse_scaler
-  - model: logistic_regression
+  - model: logistic_regression_l1
   - trainer: sklearn
   - paths: default
   - extras: default
