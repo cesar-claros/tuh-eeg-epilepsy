@@ -22,8 +22,8 @@ SEG_FLAGS=(--bipolar --native --notch_freqs 60 120)   # MUST match the CSVs' PSD
 # a count above the number available just plots all of them. (Available as of writing:
 # 250 -> 593, 256 -> 1563, 400 -> 51, 1000 -> 20.)
 TOPS=(
-  "250:50"
-  "256:50"
+  "250:100"
+  "256:100"
   "400:0"
   "1000:0"
 )
