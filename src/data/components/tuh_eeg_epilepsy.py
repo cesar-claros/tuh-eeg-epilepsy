@@ -136,6 +136,8 @@ class TUHEEGEpilepsy:
         ic_bag_rank_by: str = 'variance',
         require_keep_labels: Optional[tuple] = None,
         exclude_paths: Optional[Iterable[str]] = None,
+        interpolate_bad_channels: bool = False,
+        drop_bad_segments: bool = False,
     ):
 
         self.data_dir = data_dir
@@ -162,6 +164,12 @@ class TUHEEGEpilepsy:
         # PSD anomalies picked by build_psd_exclusion.py). Stored as a normalized
         # path-string set for matching against descriptions['path'].
         self.exclude_paths = {str(Path(p)) for p in exclude_paths} if exclude_paths else None
+        # Bad-channel / bad-segment repair driven by the -bads.json sidecars from
+        # precompute_badchannels.py: interpolate flagged channels (spherical spline, before the
+        # bipolar montage) and/or drop windows overlapping flagged segments. Read in the lazy
+        # window builders (window_dataset.py).
+        self.interpolate_bad_channels = bool(interpolate_bad_channels)
+        self.drop_bad_segments = bool(drop_bad_segments)
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():

@@ -25,6 +25,13 @@ require_keep_labels: null
 # build_psd_exclusion.py. null = no exclusion. e.g.
 # data.exclude_recordings_file=diagnostics/psd/exclude_recordings.txt
 exclude_recordings_file: null
+# Bad-channel / bad-segment repair from the -bads.json sidecars (precompute_badchannels.py).
+# interpolate_bad_channels: spherical-spline interpolate flagged channels before the bipolar
+# montage (recordings with too many bad channels are dropped instead). drop_bad_segments: drop
+# windows overlapping a flagged high-amplitude/flat segment. Both require lazy_loading=true and
+# a prior `python src/precompute_badchannels.py` pass. Both null/false = no repair.
+interpolate_bad_channels: false
+drop_bad_segments: false
 overlap_pct: 0.0
 # Per-subject window cap. null = strict balancing (every subject clamped to the
 # global-minimum subject's window count, which discards most of the corpus). Set

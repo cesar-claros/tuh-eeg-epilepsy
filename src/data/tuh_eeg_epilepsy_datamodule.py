@@ -92,6 +92,8 @@ class TUHEEGDataModule(LightningDataModule):
         windows_test_csv: str | None = None,
         require_keep_labels: tuple | None = None,
         exclude_recordings_file: str | None = None,
+        interpolate_bad_channels: bool = False,
+        drop_bad_segments: bool = False,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -235,6 +237,8 @@ class TUHEEGDataModule(LightningDataModule):
         self.windows_test_csv = windows_test_csv
         self.require_keep_labels = require_keep_labels
         self.exclude_recordings_file = exclude_recordings_file
+        self.interpolate_bad_channels = interpolate_bad_channels
+        self.drop_bad_segments = drop_bad_segments
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -327,6 +331,8 @@ class TUHEEGDataModule(LightningDataModule):
                 ic_bag_rank_by=self.ic_bag_rank_by,
                 require_keep_labels=self.require_keep_labels,
                 exclude_paths=self._load_exclusion_paths(),
+                interpolate_bad_channels=self.interpolate_bad_channels,
+                drop_bad_segments=self.drop_bad_segments,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

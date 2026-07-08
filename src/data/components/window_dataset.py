@@ -42,6 +42,8 @@ the windows_*.csv dump (lazy vs eager) before relying on it.
 
 from __future__ import annotations
 
+import functools
+import json
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -53,6 +55,51 @@ from loguru import logger
 from torch.utils.data import Dataset
 
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy
+
+
+@functools.cache
+def _read_bads(path: str) -> tuple[tuple, tuple, bool]:
+    """Read a recording's ``-bads.json`` sidecar (from ``precompute_badchannels.py``).
+
+    Returns ``(bad_channels, bad_segments, too_many_bad_channels)``: bad_channels a tuple of
+    canonical 10-20 names, bad_segments a tuple of ``(start_s, end_s)`` pairs. Missing sidecar
+    -> ``((), (), False)``. Cached, so each recording's sidecar is read once per worker process.
+    """
+    sidecar = Path(str(path).replace('.edf', '-bads.json'))
+    if not sidecar.exists():
+        return (), (), False
+    try:
+        with open(sidecar) as f:
+            d = json.load(f)
+        segs = tuple((float(s), float(e)) for s, e in d.get('bad_segments', []))
+        return tuple(d.get('bad_channels', [])), segs, bool(d.get('too_many_bad_channels', False))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read {sidecar.name}: {e}")
+        return (), (), False
+
+
+def _filter_plan_by_bads(plan: pd.DataFrame, interpolate: bool, drop_segments: bool) -> pd.DataFrame:
+    """Drop plan windows a bad-channel/segment sidecar marks unusable.
+
+    With ``interpolate`` on, recordings flagged ``too_many_bad_channels`` cannot be reliably
+    repaired, so all their windows are dropped. With ``drop_segments`` on, any window whose
+    ``[start, end)`` overlaps a bad segment of its recording is dropped. No-op if neither flag is
+    set (or no sidecars exist).
+    """
+    if not (interpolate or drop_segments) or plan.empty:
+        return plan
+    keep = []
+    for _, r in plan.iterrows():
+        _chans, segs, too_many = _read_bads(str(r['path']))
+        drop = (interpolate and too_many) or (
+            drop_segments and any(s < float(r['end']) and e > float(r['start']) for s, e in segs)
+        )
+        keep.append(not drop)
+    mask = pd.Series(keep, index=plan.index)
+    dropped = int((~mask).sum())
+    if dropped:
+        logger.info(f"bad-channel/segment filter: dropped {dropped}/{len(plan)} windows.")
+    return plan[mask].reset_index(drop=True)
 
 
 def _assign_splits(
@@ -206,10 +253,12 @@ class WindowDataset(Dataset):
         ic_bag_rank_by: str = 'variance',
         notch_freqs: Optional[List[float]] = None,
         bipolar: bool = False,
+        interpolate_bad_channels: bool = False,
     ) -> None:
         self.plan = plan.reset_index(drop=True)
         self.mode = mode
         self.bipolar = bool(bipolar)
+        self.interpolate_bad_channels = bool(interpolate_bad_channels)
         self.target_channels = list(target_channels)
         self.target_sfreq = float(target_sfreq)
         self.target_len = int(target_len)
@@ -299,6 +348,17 @@ class WindowDataset(Dataset):
                     raw.notch_filter(self.notch_freqs, verbose='ERROR')
                 if self.rename_channels:
                     TUHEEGEpilepsy._rename_channels(raw)
+                # Interpolate bad channels (referential, spherical spline) BEFORE the bipolar
+                # re-reference, using the precomputed -bads.json sidecar. Needs the montage; a
+                # too_many_bad_channels recording is skipped here (its windows are already dropped
+                # from the plan by _filter_plan_by_bads).
+                if self.interpolate_bad_channels:
+                    bad_ch, _segs, too_many = _read_bads(str(desc['path']))
+                    present = [c for c in bad_ch if c in raw.ch_names]
+                    if present and not too_many:
+                        TUHEEGEpilepsy._set_montage(raw)
+                        raw.info['bads'] = present
+                        raw.interpolate_bads(reset_bads=True, verbose='ERROR')
                 # Re-reference to the TCP bipolar montage (after rename so the
                 # canonical names match the pairs; commutes with the linear filter).
                 # The bipolar flag composes with any sensor-space source (e.g.
@@ -347,11 +407,20 @@ def _plan_from_csv(engine: TUHEEGEpilepsy, csv_path: str) -> pd.DataFrame:
     """
     plan_csv = pd.read_csv(csv_path)
     desc_by_path = {str(row['path']): row for _, row in engine.descriptions.iterrows()}
+    # Fallback index by the recording's relative tail (subject/session/montage/file.edf) so a
+    # window CSV produced against a DIFFERENT absolute corpus prefix (e.g. the LuMamba/
+    # BioFoundation preprocessor's root_dir) still matches this engine's descriptions. Lets HYDRA
+    # reuse another model's exact windows for a same-windows comparison without path surgery.
+    def _tail(p: object) -> str:
+        return '/'.join(Path(str(p)).parts[-4:])
+    desc_by_tail = {_tail(row['path']): row for _, row in engine.descriptions.iterrows()}
     has_idx = 'window_idx_within_subject' in plan_csv.columns
     records = []
     missing = 0
     for _, r in plan_csv.iterrows():
         desc = desc_by_path.get(str(r['path']))
+        if desc is None:
+            desc = desc_by_tail.get(_tail(r['path']))
         if desc is None:
             missing += 1
             continue
@@ -410,6 +479,9 @@ def _build_lazy_from_csv(
             dropped = before - len(plans[sp])
             if dropped:
                 logger.info(f"exclude_paths: {sp} split dropped {dropped}/{before} windows (excluded recordings).")
+    if engine.interpolate_bad_channels or engine.drop_bad_segments:
+        plans = {sp: _filter_plan_by_bads(plan, engine.interpolate_bad_channels, engine.drop_bad_segments)
+                 for sp, plan in plans.items()}
     all_rows = pd.concat(plans.values(), ignore_index=True)
     target_sfreq = (
         float(target_sfreq) if target_sfreq is not None
@@ -451,6 +523,7 @@ def _build_lazy_from_csv(
             ic_bag_rank_by=ic_bag_rank_by,
             notch_freqs=notch_freqs,
             bipolar=bipolar,
+            interpolate_bad_channels=engine.interpolate_bad_channels,
         )
         out[split_name] = (dataset, plan.drop(columns=['description_row']))
     return out
@@ -574,6 +647,9 @@ def build_lazy_datasets(
     for split_name in splits:
         subjects = {s for s, sp in split_map.items() if sp == split_name}
         split_plan = window_df[window_df['subject'].isin(subjects)].reset_index(drop=True)
+        if engine.interpolate_bad_channels or engine.drop_bad_segments:
+            split_plan = _filter_plan_by_bads(
+                split_plan, engine.interpolate_bad_channels, engine.drop_bad_segments)
         dataset = WindowDataset(
             split_plan, mode, target_channels, target_sfreq, target_len,
             engine.montages, filter_freq, rename_channels, set_montage, pick_channels,
@@ -584,6 +660,7 @@ def build_lazy_datasets(
             ic_bag_rank_by=ic_bag_rank_by,
             notch_freqs=notch_freqs,
             bipolar=bipolar,
+            interpolate_bad_channels=engine.interpolate_bad_channels,
         )
         meta = (
             split_plan.drop(columns=['description_row'])

@@ -56,16 +56,45 @@ def _classification_metrics(y_true, y_pred, y_score) -> dict:
     }
 
 
+def _best_subject_threshold(subject_true, subject_score) -> float:
+    """Decision threshold on subject scores that maximizes balanced accuracy (val calibration)."""
+    subject_true = np.asarray(subject_true).astype(int)
+    subject_score = np.asarray(subject_score, dtype=float)
+    if len(np.unique(subject_true)) < 2:
+        return 0.0
+    edges = np.unique(subject_score)
+    cands = np.concatenate([[edges[0] - 1e-6], (edges[:-1] + edges[1:]) / 2.0, [edges[-1] + 1e-6]])
+    best_thr, best_bal = 0.0, -1.0
+    for t in cands:
+        bal = skm.balanced_accuracy_score(subject_true, (subject_score > t).astype(int))
+        if bal > best_bal:
+            best_bal, best_thr = bal, float(t)
+    return best_thr
+
+
 class Trainer:
     """
     Trainer class to handle feature extraction, training, and testing.
     Operates similarly to PyTorch Lightning's Trainer.
+
+    Parameters
+    ----------
+    merge_train_val : bool, default=True
+        If True, fit the classifier on train + val combined (original behavior). If False,
+        fit on train only and keep val held out (e.g. for threshold calibration).
+    calibrate_threshold : bool, default=False
+        If True (and ``merge_train_val`` is False), pick the subject-level decision threshold
+        that maximizes balanced accuracy on the held-out val set, and apply it at test time
+        (instead of the default 0). Enables a fair same-calibration comparison with LuMamba.
     """
-    def __init__(self,  ):
+    def __init__(self, merge_train_val: bool = True, calibrate_threshold: bool = False):
         self.feature_extractor = None
         self.trained_pipeline = None
+        self.merge_train_val = merge_train_val
+        self.calibrate_threshold = calibrate_threshold
+        self.subject_threshold = 0.0
 
-    def _get_scores(self, pipeline, data, metadata_df, split_name):
+    def _get_scores(self, pipeline, data, metadata_df, split_name, subject_threshold=0.0):
         log.info(f"Calculating scores for {split_name} data")
         # Window-level: signed decision value per window, thresholded at 0.
         window_score = pipeline.decision_function(data["X"])
@@ -79,7 +108,7 @@ class Trainer:
         grouped = df.groupby('subject')
         subject_score = grouped['score'].mean().to_numpy()
         subject_true = grouped['epilepsy'].first().astype(int).to_numpy()
-        subject_pred = (subject_score > 0).astype(int)
+        subject_pred = (subject_score > subject_threshold).astype(int)
         metrics_subject = _classification_metrics(subject_true, subject_pred, subject_score)
 
         name = split_name.capitalize()
@@ -170,11 +199,17 @@ class Trainer:
         val_dataloader = datamodule.val_dataloader()
         val_data = self._extract_features(feature_extractor, val_dataloader, "val")
 
-        # Combine train and val data for training the sklearn model, or use val for early stopping if desired (not implemented here)
-        log.info("Combining training and validation data for final training!")
-        train_data["X"] = torch.cat([train_data["X"], val_data["X"]], dim=0)
-        train_data["y"] = torch.cat([train_data["y"], val_data["y"]], dim=0)
-        log.info(f"Training data shape after combining train and val: X={train_data['X'].shape}, y={train_data['y'].shape}")
+        if self.merge_train_val:
+            # Original behavior: fit on train + val combined (no held-out val).
+            log.info("Combining training and validation data for final training!")
+            train_data["X"] = torch.cat([train_data["X"], val_data["X"]], dim=0)
+            train_data["y"] = torch.cat([train_data["y"], val_data["y"]], dim=0)
+            log.info(f"Combined train+val: X={train_data['X'].shape}, y={train_data['y'].shape}")
+            metadata_df = pd.concat([datamodule.train_df, datamodule.val_df], ignore_index=True)
+        else:
+            # Keep val held out (for threshold calibration / a proper val split).
+            log.info("Fitting on TRAIN only; validation held out.")
+            metadata_df = datamodule.train_df
 
         log.info("Starting classifier training!")
         pipeline = make_pipeline(
@@ -182,10 +217,25 @@ class Trainer:
             model
         )
         pipeline.fit(train_data["X"], train_data["y"])
-
         log.info("Classifier training completed!")
-        metadata_df = pd.concat([datamodule.train_df, datamodule.val_df], ignore_index=True)
-        train_scores = self._get_scores(pipeline, train_data, metadata_df, "train")
+
+        # Subject-level threshold calibration on the held-out val set (max balanced accuracy),
+        # applied at test time; window-level scoring stays at the default 0 threshold.
+        if self.calibrate_threshold:
+            if self.merge_train_val:
+                log.warning("calibrate_threshold ignored: val was merged into train (set merge_train_val=false).")
+            else:
+                val_score = pipeline.decision_function(val_data["X"])
+                vdf = datamodule.val_df[['subject', 'epilepsy']].copy()
+                vdf['score'] = val_score
+                vg = vdf.groupby('subject')
+                self.subject_threshold = _best_subject_threshold(
+                    vg['epilepsy'].first().astype(int).to_numpy(), vg['score'].mean().to_numpy()
+                )
+                log.info(f"Calibrated subject threshold on val: {self.subject_threshold:.6f}")
+
+        train_scores = self._get_scores(pipeline, train_data, metadata_df, "train",
+                                        subject_threshold=self.subject_threshold)
 
         if save:
             self.output_path = Path(output_path)
@@ -224,5 +274,6 @@ class Trainer:
         test_dataloader = datamodule.test_dataloader()
         test_data = self._extract_features(feature_extractor, test_dataloader, "test")
         log.info("Starting evaluation!")
-        test_scores = self._get_scores(pipeline, test_data, datamodule.test_df, "test")
+        test_scores = self._get_scores(pipeline, test_data, datamodule.test_df, "test",
+                                       subject_threshold=self.subject_threshold)
         return test_scores
