@@ -27,6 +27,7 @@ From the ``code/`` directory inside the container::
     python src/precompute_badchannels.py --n_jobs 8
     python src/precompute_badchannels.py --n_jobs 8 --no_ransac          # faster, less thorough
     python src/precompute_badchannels.py --n_jobs 8 --peak_uv 400 --flat_uv 1 --data_dir /scratch/.../data
+    python src/precompute_badchannels.py --edf /path/a.edf /path/b.edf   # only these recordings
 """
 
 from __future__ import annotations
@@ -130,6 +131,9 @@ def main() -> None:
     parser.add_argument("--version", type=str, default="v3.0.0", help="Corpus version subfolder (default: v3.0.0).")
     parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers (joblib).")
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N recordings (debugging).")
+    parser.add_argument("--edf", nargs="+", default=None,
+                        help="Explicit EDF path(s) to process directly, bypassing the corpus scan (e.g. specific "
+                        "recordings you flagged). Overrides --data_dir / --version / --limit.")
     parser.add_argument("--flat_uv", type=float, default=1.0,
                         help="Peak-to-peak (uV) below which a channel/segment is flat/railed (default 1).")
     parser.add_argument("--peak_uv", type=float, default=500.0,
@@ -150,9 +154,16 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true", help="Recompute even if the -bads.json exists.")
     args = parser.parse_args()
 
-    recording_ids = list(range(args.limit)) if args.limit is not None else None
-    tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version, recording_ids=recording_ids)
-    paths = [Path(p) for p in tuh.descriptions["path"].tolist()]
+    if args.edf:
+        # Direct paths: skip the (slow) corpus scan entirely and detect on exactly these files.
+        paths = [Path(p) for p in args.edf]
+        missing = [str(p) for p in paths if not p.exists()]
+        if missing:
+            raise SystemExit(f"--edf path(s) not found: {missing}")
+    else:
+        recording_ids = list(range(args.limit)) if args.limit is not None else None
+        tuh = TUHEEGEpilepsy(data_dir=args.data_dir, version=args.version, recording_ids=recording_ids)
+        paths = [Path(p) for p in tuh.descriptions["path"].tolist()]
     params = {
         "flat_uv": args.flat_uv, "peak_uv": args.peak_uv, "hp": args.hp,
         "notch": (args.notch if args.notch and args.notch > 0 else None),
