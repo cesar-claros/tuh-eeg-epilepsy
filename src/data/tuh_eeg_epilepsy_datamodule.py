@@ -94,6 +94,7 @@ class TUHEEGDataModule(LightningDataModule):
         exclude_recordings_file: str | None = None,
         interpolate_bad_channels: bool = False,
         drop_bad_segments: bool = False,
+        drop_seizure_segments: bool = False,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -239,6 +240,7 @@ class TUHEEGDataModule(LightningDataModule):
         self.exclude_recordings_file = exclude_recordings_file
         self.interpolate_bad_channels = interpolate_bad_channels
         self.drop_bad_segments = drop_bad_segments
+        self.drop_seizure_segments = drop_seizure_segments
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -333,6 +335,7 @@ class TUHEEGDataModule(LightningDataModule):
                 exclude_paths=self._load_exclusion_paths(),
                 interpolate_bad_channels=self.interpolate_bad_channels,
                 drop_bad_segments=self.drop_bad_segments,
+                drop_seizure_segments=self.drop_seizure_segments,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

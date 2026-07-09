@@ -138,6 +138,7 @@ class TUHEEGEpilepsy:
         exclude_paths: Optional[Iterable[str]] = None,
         interpolate_bad_channels: bool = False,
         drop_bad_segments: bool = False,
+        drop_seizure_segments: bool = False,
     ):
 
         self.data_dir = data_dir
@@ -170,6 +171,10 @@ class TUHEEGEpilepsy:
         # window builders (window_dataset.py).
         self.interpolate_bad_channels = bool(interpolate_bad_channels)
         self.drop_bad_segments = bool(drop_bad_segments)
+        # Drop windows overlapping a seizure span (.csv_bi label 'seiz'). Paired with
+        # include_seizures=True, keeps a seizure recording's interictal (bckg) windows instead of
+        # dropping the whole recording (the include_seizures=False behavior).
+        self.drop_seizure_segments = bool(drop_seizure_segments)
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():

@@ -78,27 +78,58 @@ def _read_bads(path: str) -> tuple[tuple, tuple, bool]:
         return (), (), False
 
 
-def _filter_plan_by_bads(plan: pd.DataFrame, interpolate: bool, drop_segments: bool) -> pd.DataFrame:
-    """Drop plan windows a bad-channel/segment sidecar marks unusable.
+@functools.cache
+def _read_seizure_segments(path: str) -> tuple:
+    """Seizure spans ``[(start_s, end_s), ...]`` from the sibling ``.csv_bi`` (label == 'seiz').
+
+    Lets seizure segments be dropped like bad segments, so the interictal (bckg) stretches of a
+    seizure recording stay usable instead of discarding the whole recording. Missing/unreadable
+    ``.csv_bi`` -> ``()``. Cached per worker process.
+    """
+    csv_bi = Path(str(path).replace('.edf', '.csv_bi'))
+    if not csv_bi.exists():
+        return ()
+    try:
+        df = pd.read_csv(csv_bi, comment='#')
+        seiz = df[df['label'].astype(str).str.strip() == 'seiz']
+        return tuple((float(s), float(e)) for s, e in zip(seiz['start_time'], seiz['stop_time']))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read seizure spans from {csv_bi.name}: {e}")
+        return ()
+
+
+def _win_overlaps(start: float, end: float, segs) -> bool:
+    """True if window ``[start, end)`` overlaps any ``(s, e)`` span."""
+    return any(s < end and e > start for s, e in segs)
+
+
+def _filter_plan_by_bads(plan: pd.DataFrame, interpolate: bool, drop_segments: bool,
+                         drop_seizures: bool) -> pd.DataFrame:
+    """Drop plan windows a bad-channel/segment or seizure annotation marks unusable.
 
     With ``interpolate`` on, recordings flagged ``too_many_bad_channels`` cannot be reliably
-    repaired, so all their windows are dropped. With ``drop_segments`` on, any window whose
-    ``[start, end)`` overlaps a bad segment of its recording is dropped. No-op if neither flag is
-    set (or no sidecars exist).
+    repaired, so all their windows are dropped. With ``drop_segments`` on, any window overlapping
+    a bad artifact segment (``-bads.json``) is dropped. With ``drop_seizures`` on, any window
+    overlapping a seizure span (``.csv_bi``) is dropped, which (paired with include_seizures=true)
+    keeps a seizure recording's interictal windows instead of dropping the whole recording. No-op
+    if none of the flags is set.
     """
-    if not (interpolate or drop_segments) or plan.empty:
+    if not (interpolate or drop_segments or drop_seizures) or plan.empty:
         return plan
     keep = []
     for _, r in plan.iterrows():
-        _chans, segs, too_many = _read_bads(str(r['path']))
-        drop = (interpolate and too_many) or (
-            drop_segments and any(s < float(r['end']) and e > float(r['start']) for s, e in segs)
-        )
+        start, end = float(r['start']), float(r['end'])
+        drop = False
+        if interpolate or drop_segments:
+            _chans, segs, too_many = _read_bads(str(r['path']))
+            drop = (interpolate and too_many) or (drop_segments and _win_overlaps(start, end, segs))
+        if not drop and drop_seizures:
+            drop = _win_overlaps(start, end, _read_seizure_segments(str(r['path'])))
         keep.append(not drop)
     mask = pd.Series(keep, index=plan.index)
     dropped = int((~mask).sum())
     if dropped:
-        logger.info(f"bad-channel/segment filter: dropped {dropped}/{len(plan)} windows.")
+        logger.info(f"bad/seizure segment filter: dropped {dropped}/{len(plan)} windows.")
     return plan[mask].reset_index(drop=True)
 
 
@@ -479,8 +510,9 @@ def _build_lazy_from_csv(
             dropped = before - len(plans[sp])
             if dropped:
                 logger.info(f"exclude_paths: {sp} split dropped {dropped}/{before} windows (excluded recordings).")
-    if engine.interpolate_bad_channels or engine.drop_bad_segments:
-        plans = {sp: _filter_plan_by_bads(plan, engine.interpolate_bad_channels, engine.drop_bad_segments)
+    if engine.interpolate_bad_channels or engine.drop_bad_segments or engine.drop_seizure_segments:
+        plans = {sp: _filter_plan_by_bads(plan, engine.interpolate_bad_channels,
+                                          engine.drop_bad_segments, engine.drop_seizure_segments)
                  for sp, plan in plans.items()}
     all_rows = pd.concat(plans.values(), ignore_index=True)
     target_sfreq = (
@@ -647,9 +679,10 @@ def build_lazy_datasets(
     for split_name in splits:
         subjects = {s for s, sp in split_map.items() if sp == split_name}
         split_plan = window_df[window_df['subject'].isin(subjects)].reset_index(drop=True)
-        if engine.interpolate_bad_channels or engine.drop_bad_segments:
+        if engine.interpolate_bad_channels or engine.drop_bad_segments or engine.drop_seizure_segments:
             split_plan = _filter_plan_by_bads(
-                split_plan, engine.interpolate_bad_channels, engine.drop_bad_segments)
+                split_plan, engine.interpolate_bad_channels, engine.drop_bad_segments,
+                engine.drop_seizure_segments)
         dataset = WindowDataset(
             split_plan, mode, target_channels, target_sfreq, target_len,
             engine.montages, filter_freq, rename_channels, set_montage, pick_channels,
