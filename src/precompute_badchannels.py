@@ -94,19 +94,20 @@ def _detect_one(edf_path: Path, params: dict) -> str:
         flat_v = params["flat_uv"] * 1e-6
         peak_v = params["peak_uv"] * 1e-6
 
-        # 1) Noisy/dead channels (PyPREP) + flat/railed channels (amplitude).
+        # 1) Bad channels: PyPREP NoisyChannels only (deviation/correlation/HF/RANSAC PLUS its
+        #    own robust flat/NaN/dropout checks, which catch railed/dead channels). We do NOT add
+        #    a separate absolute-threshold flat check: on low-amplitude recordings a fixed uV
+        #    threshold marks normal quiet EEG as "flat" and over-rejects (it was flagging every
+        #    channel on a 6 uV-ptp recording).
         nc = NoisyChannels(det, random_state=params["seed"], do_detrend=False)
         nc.find_all_bads(ransac=params["ransac"])
         bad = set(nc.get_bads())
-        _, flat_ch = mne.preprocessing.annotate_amplitude(
-            det, flat=flat_v, peak=None, bad_percent=params["flat_bad_percent"],
-            min_duration=params["min_seg_s"], picks="eeg", verbose="error")
-        bad |= set(flat_ch)
         bad_channels = sorted(bad)
         n_eeg = len(eeg)
         too_many = (len(bad_channels) / n_eeg) > params["max_bad_frac"]
 
-        # 2) High-amplitude / flat artifact segments on the GOOD channels only.
+        # 2) High-amplitude (peak) and railed (flat) artifact segments on the GOOD channels only.
+        #    flat is a near-zero threshold so only true railing/clipping is caught, not quiet EEG.
         good = [c for c in det.ch_names if c not in bad]
         bad_segments = []
         if good:
@@ -134,8 +135,10 @@ def main() -> None:
     parser.add_argument("--edf", nargs="+", default=None,
                         help="Explicit EDF path(s) to process directly, bypassing the corpus scan (e.g. specific "
                         "recordings you flagged). Overrides --data_dir / --version / --limit.")
-    parser.add_argument("--flat_uv", type=float, default=1.0,
-                        help="Peak-to-peak (uV) below which a channel/segment is flat/railed (default 1).")
+    parser.add_argument("--flat_uv", type=float, default=0.1,
+                        help="Peak-to-peak (uV) below which a SEGMENT is flat/railed (default 0.1; near-zero, so "
+                        "only true railing/clipping is caught, not low-amplitude EEG). Dead channels are handled "
+                        "by PyPREP, not this threshold.")
     parser.add_argument("--peak_uv", type=float, default=500.0,
                         help="Peak-to-peak (uV) above which a segment is a high-amplitude artifact (default 500).")
     parser.add_argument("--hp", type=float, default=1.0, help="High-pass (Hz) applied before detection (default 1).")
@@ -146,8 +149,6 @@ def main() -> None:
                         help="Flag the recording too_many_bad_channels if > this fraction of channels is bad "
                         "(interpolation then unreliable; default 0.3).")
     parser.add_argument("--min_seg_s", type=float, default=0.2, help="Minimum bad-segment duration in seconds.")
-    parser.add_argument("--flat_bad_percent", type=float, default=5.0,
-                        help="A channel flat for > this %% of the recording is marked bad (default 5).")
     parser.add_argument("--seg_bad_percent", type=float, default=5.0,
                         help="annotate_amplitude bad_percent for segment detection (default 5).")
     parser.add_argument("--seed", type=int, default=42, help="RANSAC random state (reproducibility).")
@@ -168,7 +169,7 @@ def main() -> None:
         "flat_uv": args.flat_uv, "peak_uv": args.peak_uv, "hp": args.hp,
         "notch": (args.notch if args.notch and args.notch > 0 else None),
         "ransac": not args.no_ransac, "max_bad_frac": args.max_bad_frac,
-        "min_seg_s": args.min_seg_s, "flat_bad_percent": args.flat_bad_percent,
+        "min_seg_s": args.min_seg_s,
         "seg_bad_percent": args.seg_bad_percent, "seed": args.seed, "overwrite": args.overwrite,
     }
     logger.info(f"Detecting bad channels/segments for {len(paths)} recordings "
