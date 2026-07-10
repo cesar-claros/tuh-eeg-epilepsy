@@ -46,6 +46,9 @@ def main() -> None:
     p.add_argument("--notch", type=float, default=0.0, help="Notch (Hz); 0 = off (show the raw comb).")
     p.add_argument("--fmin_hz", type=float, default=0.5, help="Min fundamental searched (Hz).")
     p.add_argument("--fmax_hz", type=float, default=6.0, help="Max fundamental searched (Hz).")
+    p.add_argument("--fundamental_hz", type=float, default=None,
+                   help="Override the auto-detected fundamental (Hz) for the template/markers, e.g. if you read a "
+                   "different rate off the autocorrelation panel.")
     p.add_argument("--out", default=None, help="Output PNG (default: diagnostics/psd/<stem>_periodic.png).")
     args = p.parse_args()
 
@@ -60,6 +63,8 @@ def main() -> None:
     data = raw.get_data()  # (C, T) volts
 
     per = estimate_periodicity(data, fs, fmin_hz=args.fmin_hz, fmax_hz=args.fmax_hz)
+    if args.fundamental_hz:
+        per["fundamental_hz"], per["period_s"] = args.fundamental_hz, 1.0 / args.fundamental_hz
     f0, period_s, strength = per["fundamental_hz"], per["period_s"], per["comb_strength"]
 
     # PSD (mean across channels), dB.

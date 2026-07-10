@@ -87,9 +87,25 @@ def estimate_periodicity(data: np.ndarray, fs: float, fmin_hz: float = 0.5,
     out = {"fundamental_hz": float("nan"), "period_s": float("nan"),
            "comb_strength": 0.0, "cardiac_like": False, "lags_s": lags_s, "acf": acf}
     if hi > lo + 1:
+        # comb_strength = strongest periodic peak in the band (stable flag). The dominant peak
+        # (argmax) can lock onto a MULTIPLE of the true period (subharmonic/octave error: acf at 2T
+        # or 3T slightly exceeds acf at T), so step down to the fundamental if a divisor period T/d
+        # has a comparably strong autocorrelation peak. (A plain argmax already ignores the fine
+        # high-frequency ripples, so we only probe divisors of the winning lag, not every short lag.)
+        comb_strength = float(acf[lo:hi].max())
         k = lo + int(np.argmax(acf[lo:hi]))
+        # Probe divisors largest-first (shortest candidate period first) so a genuine subharmonic
+        # error steps all the way down to the true fundamental T, not an intermediate multiple.
+        for div in (5, 4, 3, 2):
+            kk = int(round(k / div))
+            if kk < lo:
+                continue
+            near = acf[max(kk - 1, 0): kk + 2]
+            if near.size and near.max() >= 0.6 * acf[k]:
+                k = max(kk - 1, 0) + int(np.argmax(near))
+                break
         out.update(fundamental_hz=float(fs / k), period_s=float(k / fs),
-                   comb_strength=float(acf[k]), cardiac_like=bool(0.7 <= fs / k <= 2.0))
+                   comb_strength=comb_strength, cardiac_like=bool(0.7 <= fs / k <= 2.0))
     return out
 
 
