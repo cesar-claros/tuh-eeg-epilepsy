@@ -37,6 +37,7 @@ import json
 from pathlib import Path
 
 import mne
+import numpy as np
 import rootutils
 from joblib import Parallel, delayed
 from loguru import logger
@@ -53,16 +54,71 @@ def _sidecar_path(edf_path: Path) -> Path:
     return edf_path.parent / edf_path.name.replace(".edf", BADS_SUFFIX)
 
 
-def _write_sidecar(path: Path, bad_channels, bad_segments, n_eeg, too_many, note, params) -> None:
+def _autocorr_fft(x: np.ndarray, max_lag: int) -> np.ndarray:
+    """Biased autocorrelation of 1-D ``x`` for lags 0..max_lag via FFT (O(n log n))."""
+    n = x.size
+    fx = np.fft.rfft(x - x.mean(), n=2 * n)
+    return np.fft.irfft(fx * np.conj(fx))[: max_lag + 1]
+
+
+def estimate_periodicity(data: np.ndarray, fs: float, fmin_hz: float = 0.5,
+                         fmax_hz: float = 6.0) -> dict:
+    """Detect a periodic (harmonic-comb) artifact by averaged autocorrelation.
+
+    A periodic artifact shows up as a comb of harmonics in the PSD and a strong autocorrelation
+    peak at its period. ``data`` is (C, T) in volts. Per-channel normalized autocorrelations are
+    averaged (phase-invariant, so a comb with channel-varying phase still reinforces), and the
+    dominant peak in the period band ``[1/fmax_hz, 1/fmin_hz]`` gives the fundamental. Returns
+    fundamental_hz, period_s, comb_strength (peak height ~0-1; higher = more periodic),
+    cardiac_like (fundamental in the 0.7-2 Hz heart-rate band), and lags_s / acf for plotting.
+    """
+    x = np.asarray(data, dtype=float)
+    n = x.shape[1]
+    max_lag = int(min(n - 1, fs / fmin_hz * 1.5))
+    acc, used = np.zeros(max_lag + 1), 0
+    for ch in x:
+        ac = _autocorr_fft(ch, max_lag)
+        if ac[0] > 0:
+            acc += ac / ac[0]
+            used += 1
+    acf = acc / max(used, 1)
+    lags_s = np.arange(max_lag + 1) / fs
+    lo, hi = int(fs / fmax_hz), min(max_lag, int(fs / fmin_hz))
+    out = {"fundamental_hz": float("nan"), "period_s": float("nan"),
+           "comb_strength": 0.0, "cardiac_like": False, "lags_s": lags_s, "acf": acf}
+    if hi > lo + 1:
+        k = lo + int(np.argmax(acf[lo:hi]))
+        out.update(fundamental_hz=float(fs / k), period_s=float(k / fs),
+                   comb_strength=float(acf[k]), cardiac_like=bool(0.7 <= fs / k <= 2.0))
+    return out
+
+
+def period_average(x: np.ndarray, fs: float, period_s: float, max_periods: int = 400):
+    """Average successive one-period segments of 1-D ``x`` -> ``(t, template)``.
+
+    Reveals the artifact waveform: the phase-locked periodic component reinforces while the
+    (non-locked) neural signal averages out. Returns ``(None, None)`` if too few periods.
+    """
+    period = int(round(period_s * fs))
+    k = min(x.size // period, max_periods) if period >= 2 else 0
+    if k < 2:
+        return None, None
+    return np.arange(period) / fs, x[: k * period].reshape(k, period).mean(0)
+
+
+def _write_sidecar(path: Path, bad_channels, bad_segments, n_eeg, too_many, note, params,
+                   periodic=None) -> None:
     payload = {
         "bad_channels": bad_channels,               # canonical 10-20 names, e.g. ["T3", "O2"]
         "bad_segments": bad_segments,               # [[start_s, end_s], ...] on the recording clock
         "n_eeg": n_eeg,
         "n_bad_channels": len(bad_channels),
         "too_many_bad_channels": bool(too_many),
+        "periodic_artifact": periodic,              # {fundamental_hz, comb_strength, cardiac_like, flagged}
         "note": note,
         "params": {k: params[k] for k in
-                   ("flat_uv", "peak_uv", "hp", "notch", "ransac", "max_bad_frac", "min_seg_s")},
+                   ("flat_uv", "peak_uv", "hp", "notch", "ransac", "max_bad_frac", "min_seg_s",
+                    "periodic_strength_thr")},
     }
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -118,7 +174,20 @@ def _detect_one(edf_path: Path, params: dict) -> str:
             bad_segments = [[round(float(o), 4), round(float(o + d), 4)]
                             for o, d in zip(annots.onset, annots.duration)]
 
-        _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, "", params)
+        # 3) Periodic (harmonic-comb) artifact: a whole-recording, all-channel periodic signal
+        #    (e.g. cardiac or a device) that interpolation/segment-drop cannot fix. Measured on the
+        #    same detection copy; recorded for triage (repair vs exclude) corpus-wide.
+        per = estimate_periodicity(det.get_data(), float(det.info["sfreq"]),
+                                   fmin_hz=params["periodic_fmin"], fmax_hz=params["periodic_fmax"])
+        f0 = per["fundamental_hz"]
+        periodic = {
+            "fundamental_hz": round(f0, 4) if not np.isnan(f0) else None,
+            "comb_strength": round(per["comb_strength"], 4),
+            "cardiac_like": per["cardiac_like"],
+            "flagged": bool(per["comb_strength"] >= params["periodic_strength_thr"]),
+        }
+
+        _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, "", params, periodic)
         return "ok"
     except Exception as e:  # noqa: BLE001
         logger.error(f"bad-channel detection failed for {edf_path.name}: {type(e).__name__}: {e}")
@@ -152,6 +221,13 @@ def main() -> None:
     parser.add_argument("--seg_bad_percent", type=float, default=5.0,
                         help="annotate_amplitude bad_percent for segment detection (default 5).")
     parser.add_argument("--seed", type=int, default=42, help="RANSAC random state (reproducibility).")
+    parser.add_argument("--periodic_strength_thr", type=float, default=0.3,
+                        help="comb_strength (normalized autocorrelation at the fundamental) >= this flags a "
+                        "periodic (harmonic-comb) artifact (default 0.3).")
+    parser.add_argument("--periodic_fmin", type=float, default=0.5,
+                        help="Min fundamental (Hz) searched for the periodic artifact (default 0.5).")
+    parser.add_argument("--periodic_fmax", type=float, default=6.0,
+                        help="Max fundamental (Hz) searched for the periodic artifact (default 6).")
     parser.add_argument("--overwrite", action="store_true", help="Recompute even if the -bads.json exists.")
     args = parser.parse_args()
 
@@ -169,8 +245,9 @@ def main() -> None:
         "flat_uv": args.flat_uv, "peak_uv": args.peak_uv, "hp": args.hp,
         "notch": (args.notch if args.notch and args.notch > 0 else None),
         "ransac": not args.no_ransac, "max_bad_frac": args.max_bad_frac,
-        "min_seg_s": args.min_seg_s,
-        "seg_bad_percent": args.seg_bad_percent, "seed": args.seed, "overwrite": args.overwrite,
+        "min_seg_s": args.min_seg_s, "seg_bad_percent": args.seg_bad_percent, "seed": args.seed,
+        "periodic_strength_thr": args.periodic_strength_thr, "periodic_fmin": args.periodic_fmin,
+        "periodic_fmax": args.periodic_fmax, "overwrite": args.overwrite,
     }
     logger.info(f"Detecting bad channels/segments for {len(paths)} recordings "
                 f"(ransac={params['ransac']}, flat<{args.flat_uv}uV, peak>{args.peak_uv}uV)...")
