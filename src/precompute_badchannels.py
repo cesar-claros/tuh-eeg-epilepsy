@@ -18,6 +18,12 @@ Detection runs on the referential 10-20 channels (before bipolar) of a high-pass
 - Bad segments: ``annotate_amplitude`` peak/flat detection on the GOOD channels only (so a bad
   channel's railing does not flag segments that interpolation would otherwise fix).
 
+A whole-recording periodic (harmonic-comb) artifact is also characterized (fundamental_hz,
+comb_strength, cardiac_like) and written under ``periodic_artifact``. With ``--aas`` a flagged
+cardiac-band comb is subtracted (Average Artifact Subtraction) BEFORE the channel/segment flagging
+above, so a global comb (which makes channels look mutually correlated/predictable and distorts
+PyPREP's statistics) does not cause a channel to be flagged only for carrying the shared artifact.
+
 Idempotent: a recording whose ``-bads.json`` exists is skipped unless ``--overwrite``. CPU-only.
 
 Examples
@@ -27,6 +33,7 @@ From the ``code/`` directory inside the container::
     python src/precompute_badchannels.py --n_jobs 8
     python src/precompute_badchannels.py --n_jobs 8 --no_ransac          # faster, less thorough
     python src/precompute_badchannels.py --n_jobs 8 --peak_uv 400 --flat_uv 1 --data_dir /scratch/.../data
+    python src/precompute_badchannels.py --n_jobs 8 --aas                # AAS-clean combs before flagging
     python src/precompute_badchannels.py --edf /path/a.edf /path/b.edf   # only these recordings
 """
 
@@ -45,6 +52,7 @@ from tqdm import tqdm
 
 root = rootutils.setup_root(__file__, pythonpath=True)
 
+from src.data.components.aas import apply_aas  # noqa: E402
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: E402
 
 BADS_SUFFIX = "-bads.json"
@@ -166,38 +174,15 @@ def _detect_one(edf_path: Path, params: dict) -> str:
         det = raw.copy().filter(l_freq=params["hp"], h_freq=None, verbose="error")
         if params["notch"]:
             det.notch_filter(params["notch"], verbose="error")
+        fs = float(det.info["sfreq"])
 
         flat_v = params["flat_uv"] * 1e-6
         peak_v = params["peak_uv"] * 1e-6
 
-        # 1) Bad channels: PyPREP NoisyChannels only (deviation/correlation/HF/RANSAC PLUS its
-        #    own robust flat/NaN/dropout checks, which catch railed/dead channels). We do NOT add
-        #    a separate absolute-threshold flat check: on low-amplitude recordings a fixed uV
-        #    threshold marks normal quiet EEG as "flat" and over-rejects (it was flagging every
-        #    channel on a 6 uV-ptp recording).
-        nc = NoisyChannels(det, random_state=params["seed"], do_detrend=False)
-        nc.find_all_bads(ransac=params["ransac"])
-        bad = set(nc.get_bads())
-        bad_channels = sorted(bad)
-        n_eeg = len(eeg)
-        too_many = (len(bad_channels) / n_eeg) > params["max_bad_frac"]
-
-        # 2) High-amplitude (peak) and railed (flat) artifact segments on the GOOD channels only.
-        #    flat is a near-zero threshold so only true railing/clipping is caught, not quiet EEG.
-        good = [c for c in det.ch_names if c not in bad]
-        bad_segments = []
-        if good:
-            annots, _ = mne.preprocessing.annotate_amplitude(
-                det.copy().pick(good), peak=peak_v, flat=flat_v,
-                bad_percent=params["seg_bad_percent"], min_duration=params["min_seg_s"],
-                picks="eeg", verbose="error")
-            bad_segments = [[round(float(o), 4), round(float(o + d), 4)]
-                            for o, d in zip(annots.onset, annots.duration)]
-
-        # 3) Periodic (harmonic-comb) artifact: a whole-recording, all-channel periodic signal
-        #    (e.g. cardiac or a device) that interpolation/segment-drop cannot fix. Measured on the
-        #    same detection copy; recorded for triage (repair vs exclude) corpus-wide.
-        per = estimate_periodicity(det.get_data(), float(det.info["sfreq"]),
+        # 1) Periodic (harmonic-comb) artifact: a whole-recording, all-channel periodic signal
+        #    (e.g. cardiac or a device) that interpolation/segment-drop cannot fix. Measured FIRST,
+        #    on the raw detection copy, so it can optionally be AAS-cleaned before flagging channels.
+        per = estimate_periodicity(det.get_data(), fs,
                                    fmin_hz=params["periodic_fmin"], fmax_hz=params["periodic_fmax"])
         f0 = per["fundamental_hz"]
         periodic = {
@@ -209,6 +194,41 @@ def _detect_one(edf_path: Path, params: dict) -> str:
             # band-edge peak is a normal fast rhythm (alpha/beta), so it is not flagged.
             "flagged": bool(per["comb_strength"] >= params["periodic_strength_thr"] and not per["band_edge"]),
         }
+
+        # 2) Optionally subtract that periodic artifact BEFORE flagging channels/segments. A global,
+        #    phase-locked comb makes channels look more mutually correlated/predictable, which
+        #    distorts PyPREP's deviation/correlation/RANSAC statistics and the amplitude thresholds;
+        #    a channel flagged only because of the shared comb should not be interpolated. Gated the
+        #    same way as the train-time AAS (flagged AND fundamental in the cardiac band <= aas_fmax),
+        #    so it never reaches the 3 Hz spike-wave band.
+        periodic["aas_applied"] = False
+        if params["aas"] and periodic["flagged"] and f0 and 0 < f0 <= params["aas_fmax"]:
+            det = mne.io.RawArray(apply_aas(det.get_data(), fs, 1.0 / f0), det.info, verbose="error")
+            periodic["aas_applied"] = True
+
+        # 3) Bad channels: PyPREP NoisyChannels only (deviation/correlation/HF/RANSAC PLUS its
+        #    own robust flat/NaN/dropout checks, which catch railed/dead channels). We do NOT add
+        #    a separate absolute-threshold flat check: on low-amplitude recordings a fixed uV
+        #    threshold marks normal quiet EEG as "flat" and over-rejects (it was flagging every
+        #    channel on a 6 uV-ptp recording).
+        nc = NoisyChannels(det, random_state=params["seed"], do_detrend=False)
+        nc.find_all_bads(ransac=params["ransac"])
+        bad = set(nc.get_bads())
+        bad_channels = sorted(bad)
+        n_eeg = len(eeg)
+        too_many = (len(bad_channels) / n_eeg) > params["max_bad_frac"]
+
+        # 4) High-amplitude (peak) and railed (flat) artifact segments on the GOOD channels only.
+        #    flat is a near-zero threshold so only true railing/clipping is caught, not quiet EEG.
+        good = [c for c in det.ch_names if c not in bad]
+        bad_segments = []
+        if good:
+            annots, _ = mne.preprocessing.annotate_amplitude(
+                det.copy().pick(good), peak=peak_v, flat=flat_v,
+                bad_percent=params["seg_bad_percent"], min_duration=params["min_seg_s"],
+                picks="eeg", verbose="error")
+            bad_segments = [[round(float(o), 4), round(float(o + d), 4)]
+                            for o, d in zip(annots.onset, annots.duration)]
 
         _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, "", params, periodic)
         return "ok"
@@ -251,6 +271,15 @@ def main() -> None:
                         help="Min fundamental (Hz) searched for the periodic artifact (default 0.5).")
     parser.add_argument("--periodic_fmax", type=float, default=6.0,
                         help="Max fundamental (Hz) searched for the periodic artifact (default 6).")
+    parser.add_argument("--aas", action="store_true",
+                        help="Subtract a flagged periodic (cardiac/pulse) artifact with Average Artifact "
+                        "Subtraction BEFORE flagging bad channels/segments, so a global comb does not distort "
+                        "PyPREP's statistics (a channel flagged only because of the shared comb is not "
+                        "interpolated). Only applied when the artifact is flagged and its fundamental is "
+                        "<= --aas_fmax; records periodic_artifact.aas_applied in the sidecar.")
+    parser.add_argument("--aas_fmax", type=float, default=2.5,
+                        help="Only AAS-clean before detection when the fundamental is <= this (Hz); matches the "
+                        "train-time data.aas_fmax cardiac band, below the 3 Hz spike-wave band (default 2.5).")
     parser.add_argument("--overwrite", action="store_true", help="Recompute even if the -bads.json exists.")
     args = parser.parse_args()
 
@@ -270,7 +299,8 @@ def main() -> None:
         "ransac": not args.no_ransac, "max_bad_frac": args.max_bad_frac,
         "min_seg_s": args.min_seg_s, "seg_bad_percent": args.seg_bad_percent, "seed": args.seed,
         "periodic_strength_thr": args.periodic_strength_thr, "periodic_fmin": args.periodic_fmin,
-        "periodic_fmax": args.periodic_fmax, "overwrite": args.overwrite,
+        "periodic_fmax": args.periodic_fmax, "aas": args.aas, "aas_fmax": args.aas_fmax,
+        "overwrite": args.overwrite,
     }
     logger.info(f"Detecting bad channels/segments for {len(paths)} recordings "
                 f"(ransac={params['ransac']}, flat<{args.flat_uv}uV, peak>{args.peak_uv}uV)...")
