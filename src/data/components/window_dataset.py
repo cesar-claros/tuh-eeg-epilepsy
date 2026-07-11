@@ -54,7 +54,26 @@ import torch
 from loguru import logger
 from torch.utils.data import Dataset
 
+from src.data.components.aas import apply_aas
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy
+
+
+@functools.cache
+def _read_periodic(path: str) -> tuple:
+    """(flagged, fundamental_hz, cardiac_like) from a recording's ``-bads.json`` periodic_artifact.
+
+    Missing sidecar / field -> ``(False, None, False)``. Cached per worker process.
+    """
+    sidecar = Path(str(path).replace('.edf', '-bads.json'))
+    if not sidecar.exists():
+        return False, None, False
+    try:
+        with open(sidecar) as f:
+            pa = (json.load(f) or {}).get('periodic_artifact') or {}
+        return bool(pa.get('flagged')), pa.get('fundamental_hz'), bool(pa.get('cardiac_like'))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read periodic_artifact from {sidecar.name}: {e}")
+        return False, None, False
 
 
 @functools.cache
@@ -285,11 +304,15 @@ class WindowDataset(Dataset):
         notch_freqs: Optional[List[float]] = None,
         bipolar: bool = False,
         interpolate_bad_channels: bool = False,
+        apply_aas: bool = False,
+        aas_fmax: float = 2.5,
     ) -> None:
         self.plan = plan.reset_index(drop=True)
         self.mode = mode
         self.bipolar = bool(bipolar)
         self.interpolate_bad_channels = bool(interpolate_bad_channels)
+        self.apply_aas = bool(apply_aas)
+        self.aas_fmax = float(aas_fmax)
         self.target_channels = list(target_channels)
         self.target_sfreq = float(target_sfreq)
         self.target_len = int(target_len)
@@ -390,6 +413,15 @@ class WindowDataset(Dataset):
                         TUHEEGEpilepsy._set_montage(raw)
                         raw.info['bads'] = present
                         raw.interpolate_bads(reset_bads=True, verbose='ERROR')
+                # Average Artifact Subtraction of a periodic (cardiac/pulse) artifact, on the
+                # referential channels before bipolar. Restricted to flagged recordings with a
+                # fundamental in the cardiac band (<= aas_fmax), so it never touches the ~3 Hz
+                # spike-wave band / neural rhythms.
+                if self.apply_aas:
+                    flagged, f0, _cardiac = _read_periodic(str(desc['path']))
+                    if flagged and f0 and 0 < f0 <= self.aas_fmax:
+                        cleaned = apply_aas(raw.get_data(), float(raw.info['sfreq']), 1.0 / f0)
+                        raw = mne.io.RawArray(cleaned, raw.info, verbose='ERROR')
                 # Re-reference to the TCP bipolar montage (after rename so the
                 # canonical names match the pairs; commutes with the linear filter).
                 # The bipolar flag composes with any sensor-space source (e.g.
@@ -556,6 +588,8 @@ def _build_lazy_from_csv(
             notch_freqs=notch_freqs,
             bipolar=bipolar,
             interpolate_bad_channels=engine.interpolate_bad_channels,
+            apply_aas=engine.apply_aas,
+            aas_fmax=engine.aas_fmax,
         )
         out[split_name] = (dataset, plan.drop(columns=['description_row']))
     return out
@@ -694,6 +728,8 @@ def build_lazy_datasets(
             notch_freqs=notch_freqs,
             bipolar=bipolar,
             interpolate_bad_channels=engine.interpolate_bad_channels,
+            apply_aas=engine.apply_aas,
+            aas_fmax=engine.aas_fmax,
         )
         meta = (
             split_plan.drop(columns=['description_row'])

@@ -95,6 +95,8 @@ class TUHEEGDataModule(LightningDataModule):
         interpolate_bad_channels: bool = False,
         drop_bad_segments: bool = False,
         drop_seizure_segments: bool = False,
+        apply_aas: bool = False,
+        aas_fmax: float = 2.5,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -241,6 +243,8 @@ class TUHEEGDataModule(LightningDataModule):
         self.interpolate_bad_channels = interpolate_bad_channels
         self.drop_bad_segments = drop_bad_segments
         self.drop_seizure_segments = drop_seizure_segments
+        self.apply_aas = apply_aas
+        self.aas_fmax = aas_fmax
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -336,6 +340,8 @@ class TUHEEGDataModule(LightningDataModule):
                 interpolate_bad_channels=self.interpolate_bad_channels,
                 drop_bad_segments=self.drop_bad_segments,
                 drop_seizure_segments=self.drop_seizure_segments,
+                apply_aas=self.apply_aas,
+                aas_fmax=self.aas_fmax,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

@@ -27,6 +27,7 @@ from scipy.signal import welch  # noqa: E402
 
 root = rootutils.setup_root(__file__, pythonpath=True)
 
+from src.data.components.aas import apply_aas  # noqa: E402
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: E402
 
 
@@ -49,6 +50,10 @@ def main() -> None:
     p.add_argument("--bipolar", action="store_true",
                    help="Form the TCP bipolar montage AFTER repair and plot the bipolar-channel PSDs (what the "
                    "model sees). Pairs involving an interpolated electrode are highlighted.")
+    p.add_argument("--aas", action="store_true",
+                   help="Also apply Average Artifact Subtraction of the periodic artifact (using the sidecar's "
+                   "periodic_artifact.fundamental_hz) in the 'after' signal, to check the comb is removed.")
+    p.add_argument("--aas_fmax", type=float, default=2.5, help="Only AAS a fundamental <= this (Hz).")
     p.add_argument("--ncols", type=int, default=5, help="Subplot columns.")
     p.add_argument("--out", default=None, help="Output PNG (default: diagnostics/psd/<stem>_psd_repair.png).")
     args = p.parse_args()
@@ -83,6 +88,14 @@ def main() -> None:
     if present_bad:
         after_ref.info["bads"] = present_bad
         after_ref.interpolate_bads(reset_bads=True, verbose="error")
+    if args.aas:
+        f0 = (meta.get("periodic_artifact") or {}).get("fundamental_hz")
+        if f0 and 0 < f0 <= args.aas_fmax:
+            after_ref = mne.io.RawArray(apply_aas(after_ref.get_data(), fs, 1.0 / f0),
+                                        after_ref.info, verbose="error")
+            print(f"applied AAS at fundamental {f0:.3f} Hz")
+        else:
+            print(f"--aas: no cardiac-band fundamental in sidecar (f0={f0}); skipped")
 
     if args.bipolar:
         before_r = TUHEEGEpilepsy._apply_bipolar(raw.copy())

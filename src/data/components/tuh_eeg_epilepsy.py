@@ -139,6 +139,8 @@ class TUHEEGEpilepsy:
         interpolate_bad_channels: bool = False,
         drop_bad_segments: bool = False,
         drop_seizure_segments: bool = False,
+        apply_aas: bool = False,
+        aas_fmax: float = 2.5,
     ):
 
         self.data_dir = data_dir
@@ -175,6 +177,11 @@ class TUHEEGEpilepsy:
         # include_seizures=True, keeps a seizure recording's interictal (bckg) windows instead of
         # dropping the whole recording (the include_seizures=False behavior).
         self.drop_seizure_segments = bool(drop_seizure_segments)
+        # Average Artifact Subtraction of a periodic cardiac/pulse artifact, applied (in the lazy
+        # loader) to recordings whose -bads.json flags a periodic artifact with a fundamental in
+        # the cardiac band (<= aas_fmax Hz). Removes the comb without touching neural/epileptiform.
+        self.apply_aas = bool(apply_aas)
+        self.aas_fmax = float(aas_fmax)
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():

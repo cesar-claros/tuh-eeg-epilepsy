@@ -84,8 +84,8 @@ def estimate_periodicity(data: np.ndarray, fs: float, fmin_hz: float = 0.5,
     acf = acc / max(used, 1)
     lags_s = np.arange(max_lag + 1) / fs
     lo, hi = int(fs / fmax_hz), min(max_lag, int(fs / fmin_hz))
-    out = {"fundamental_hz": float("nan"), "period_s": float("nan"),
-           "comb_strength": 0.0, "cardiac_like": False, "lags_s": lags_s, "acf": acf}
+    out = {"fundamental_hz": float("nan"), "period_s": float("nan"), "comb_strength": 0.0,
+           "cardiac_like": False, "band_edge": False, "lags_s": lags_s, "acf": acf}
     if hi > lo + 1:
         # comb_strength = strongest periodic peak in the band (stable flag). The dominant peak
         # (argmax) can lock onto a MULTIPLE of the true period (subharmonic/octave error: acf at 2T
@@ -104,8 +104,12 @@ def estimate_periodicity(data: np.ndarray, fs: float, fmin_hz: float = 0.5,
             if near.size and near.max() >= 0.6 * acf[k]:
                 k = max(kk - 1, 0) + int(np.argmax(near))
                 break
-        out.update(fundamental_hz=float(fs / k), period_s=float(k / fs),
-                   comb_strength=comb_strength, cardiac_like=bool(0.7 <= fs / k <= 2.0))
+        f0 = fs / k
+        # band_edge: the dominant period is at the shortest lag the band allows, i.e. the true
+        # periodicity is >= fmax_hz -> a fast brain rhythm (alpha/beta), NOT a low-fundamental
+        # comb artifact. Callers should not flag these.
+        out.update(fundamental_hz=float(f0), period_s=float(k / fs), comb_strength=comb_strength,
+                   cardiac_like=bool(0.7 <= f0 <= 2.0), band_edge=bool(f0 >= 0.92 * fmax_hz))
     return out
 
 
@@ -200,7 +204,10 @@ def _detect_one(edf_path: Path, params: dict) -> str:
             "fundamental_hz": round(f0, 4) if not np.isnan(f0) else None,
             "comb_strength": round(per["comb_strength"], 4),
             "cardiac_like": per["cardiac_like"],
-            "flagged": bool(per["comb_strength"] >= params["periodic_strength_thr"]),
+            "band_edge": per["band_edge"],
+            # A genuine comb artifact is a strong periodicity in the INTERIOR of the band; a
+            # band-edge peak is a normal fast rhythm (alpha/beta), so it is not flagged.
+            "flagged": bool(per["comb_strength"] >= params["periodic_strength_thr"] and not per["band_edge"]),
         }
 
         _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, "", params, periodic)
@@ -237,9 +244,9 @@ def main() -> None:
     parser.add_argument("--seg_bad_percent", type=float, default=5.0,
                         help="annotate_amplitude bad_percent for segment detection (default 5).")
     parser.add_argument("--seed", type=int, default=42, help="RANSAC random state (reproducibility).")
-    parser.add_argument("--periodic_strength_thr", type=float, default=0.3,
-                        help="comb_strength (normalized autocorrelation at the fundamental) >= this flags a "
-                        "periodic (harmonic-comb) artifact (default 0.3).")
+    parser.add_argument("--periodic_strength_thr", type=float, default=0.5,
+                        help="comb_strength (normalized autocorrelation at the fundamental) >= this, AND not a "
+                        "band-edge (fast-rhythm) peak, flags a periodic (harmonic-comb) artifact (default 0.5).")
     parser.add_argument("--periodic_fmin", type=float, default=0.5,
                         help="Min fundamental (Hz) searched for the periodic artifact (default 0.5).")
     parser.add_argument("--periodic_fmax", type=float, default=6.0,

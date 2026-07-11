@@ -32,6 +32,13 @@ exclude_recordings_file: null
 # a prior `python src/precompute_badchannels.py` pass. Both null/false = no repair.
 interpolate_bad_channels: false
 drop_bad_segments: false
+# Average Artifact Subtraction of a periodic cardiac/pulse artifact (the harmonic comb that
+# dominates some PSDs), applied to recordings whose -bads.json flags a periodic artifact with a
+# fundamental <= aas_fmax Hz. Cleans the comb instead of excluding the recording, and stays below
+# the ~3 Hz spike-wave band so it never removes epileptiform activity. Needs lazy_loading=true and
+# a prior precompute_badchannels.py pass (for the periodic_artifact.fundamental_hz).
+apply_aas: false
+aas_fmax: 2.5
 # Drop windows overlapping a seizure span (.csv_bi label 'seiz'). Pair with include_seizures=true
 # to keep a seizure recording's interictal (bckg) windows instead of dropping the whole recording
 # (include_seizures=false). Needs lazy_loading=true; no precompute needed (reads .csv_bi directly).
