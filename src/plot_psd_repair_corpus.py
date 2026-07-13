@@ -3,11 +3,22 @@
 Compares the raw per-recording PSDs (``-psd.npz``) against the repaired ones
 (``-psd-interp.npz`` / ``-psd-aas.npz`` / ``-psd-interp-aas.npz`` from
 ``precompute_psd.py --interpolate --aas``) to show the aggregate improvement across the
-whole corpus. For each recording it channel-averages both PSDs on the shared grid, then
-means them across recordings. Two panels are drawn: ALL recordings, and the AFFECTED
-subset (recordings a repair actually touches, i.e. with flagged bad channels when
-``--interpolate`` and/or a flagged cardiac-band comb when ``--aas``), where the change is
-largest and the harmonic comb should flatten out.
+corpus. For each recording it channel-averages both PSDs on the shared grid, then means
+them across recordings. Columns are the two population groups: ALL recordings, and the
+AFFECTED subset (recordings a repair actually touches, i.e. with flagged bad channels
+when ``--interpolate`` and/or a flagged cardiac-band comb when ``--aas``), where the
+change is largest and the harmonic comb should flatten out.
+
+Options:
+  --by_class     split each curve into epilepsy vs no-epilepsy (dashed = raw, solid =
+                 repaired; color = class), to see whether the repair changes the
+                 class-discriminative PSD differently for the two groups.
+  --bands        segment the spectrum into one row per canonical EEG band
+                 (delta/theta/alpha/beta/gamma), each on its own y-scale; --band_edges
+                 F0 F1 ... sets custom segment edges instead.
+  --native --sfreq R
+                 read the native-rate sidecars and restrict to recordings sampled at R
+                 Hz (native-rate PSDs share a grid only within one sampling rate).
 
 Run on the machine that holds the corpus and both sets of ``-psd*.npz`` sidecars, after
 ``precompute_badchannels.py`` and both ``precompute_psd.py`` passes (raw and repaired).
@@ -18,7 +29,8 @@ Examples
 
     # after: precompute_psd.py --n_jobs 8   AND   precompute_psd.py --n_jobs 8 --interpolate --aas
     python src/plot_psd_repair_corpus.py --interpolate --aas
-    python src/plot_psd_repair_corpus.py --aas --bipolar --exclude_seizures --min_duration_min 2
+    python src/plot_psd_repair_corpus.py --aas --by_class --bands --exclude_seizures --min_duration_min 2
+    python src/plot_psd_repair_corpus.py --interpolate --aas --native --sfreq 250 --by_class
 """
 
 from __future__ import annotations
@@ -31,6 +43,14 @@ import numpy as np
 import rootutils
 
 root = rootutils.setup_root(__file__, pythonpath=True)
+
+CLASSES = (0, 1)
+CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
+CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
+# Canonical EEG bands (name, lo, hi); the top band is clipped to the plotted maximum.
+CANONICAL_BANDS = [("delta", 0.5, 4.0), ("theta", 4.0, 8.0), ("alpha", 8.0, 13.0),
+                   ("beta", 13.0, 30.0), ("gamma", 30.0, None)]
+_EPS = 1e-20
 
 
 def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False,
@@ -106,6 +126,39 @@ def _records(args):
     return [(str(r["path"]), str(r["subject"]), int(bool(r["epilepsy"]))) for _, r in df.iterrows()]
 
 
+def _build_bands(use_bands: bool, band_edges, top: float):
+    """List of (label, lo, hi) frequency segments to draw as rows.
+
+    ``band_edges`` (if given) defines consecutive segments; else ``use_bands`` selects the
+    canonical EEG bands (clipped to ``top``); else a single full-range segment.
+    """
+    if band_edges:
+        edges = sorted({float(e) for e in band_edges})
+        return [(f"{lo:g}-{hi:g} Hz", lo, hi) for lo, hi in zip(edges[:-1], edges[1:])]
+    if use_bands:
+        out = []
+        for name, lo, hi in CANONICAL_BANDS:
+            hi = top if hi is None else min(hi, top)
+            if lo < top:
+                out.append((f"{name}\n{lo:g}-{hi:g} Hz", lo, hi))
+        return out
+    return [(f"0-{top:g} Hz", 0.0, top)]
+
+
+def _group_total(acc_g):
+    """Sum the per-class (raw, rep, n) of one population group into one (raw, rep, n)."""
+    raw = rep = None
+    n = 0
+    for cls in CLASSES:
+        b = acc_g[cls]
+        if b["n"] == 0:
+            continue
+        raw = b["raw"] if raw is None else raw + b["raw"]
+        rep = b["rep"] if rep is None else rep + b["rep"]
+        n += b["n"]
+    return raw, rep, n
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--windows_csv", default=None,
@@ -124,6 +177,15 @@ def main() -> None:
                    help="Compare against the AAS-repair sidecars (-psd-aas).")
     p.add_argument("--aas_fmax", type=float, default=2.5,
                    help="Cardiac-band cutoff (Hz) used to classify AAS-affected recordings (default 2.5).")
+    p.add_argument("--by_class", action="store_true",
+                   help="Split each curve into epilepsy vs no-epilepsy (color = class; dashed = raw, "
+                   "solid = repaired).")
+    p.add_argument("--bands", action="store_true",
+                   help="Segment the spectrum into one row per canonical EEG band (delta/theta/alpha/beta/"
+                   "gamma), each on its own y-scale.")
+    p.add_argument("--band_edges", type=float, nargs="+", default=None,
+                   help="Custom frequency segment edges (Hz), e.g. --band_edges 0.5 4 8 13 30 80. Implies "
+                   "--bands and overrides the canonical bands.")
     p.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars for both raw and repaired.")
     p.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     p.add_argument("--native", action="store_true", help="Read the native-rate sidecars (requires --sfreq).")
@@ -146,17 +208,17 @@ def main() -> None:
 
     records = _records(args)
     ref_freqs = None
-    # Running sums of the channel-mean PSD (linear), for all recordings and the affected subset.
-    sums = {"all": {"raw": None, "rep": None, "n": 0}, "aff": {"raw": None, "rep": None, "n": 0}}
+    # Per-group (all / affected), per-class running sums of the channel-mean PSD (linear).
+    acc = {g: {cls: {"raw": None, "rep": None, "n": 0} for cls in CLASSES} for g in ("all", "aff")}
     n_missing = 0
-    for edf, _subj, _cls in records:
+    for edf, _subj, cls in records:
         raw = _channel_mean_psd(edf, raw_suffix)
         rep = _channel_mean_psd(edf, rep_suffix)
         if raw is None or rep is None:
             n_missing += 1
             continue
         f_raw, cm_raw = raw
-        f_rep, cm_rep = rep
+        _f_rep, cm_rep = rep
         if ref_freqs is None:
             ref_freqs = f_raw
         # Skip recordings whose grid differs (e.g. a stray native rate) so the mean stays coherent.
@@ -167,50 +229,77 @@ def main() -> None:
         if _affected(edf, args.interpolate, args.aas, args.aas_fmax):
             groups.append("aff")
         for g in groups:
-            sums[g]["raw"] = cm_raw if sums[g]["raw"] is None else sums[g]["raw"] + cm_raw
-            sums[g]["rep"] = cm_rep if sums[g]["rep"] is None else sums[g]["rep"] + cm_rep
-            sums[g]["n"] += 1
+            b = acc[g][cls]
+            b["raw"] = cm_raw if b["raw"] is None else b["raw"] + cm_raw
+            b["rep"] = cm_rep if b["rep"] is None else b["rep"] + cm_rep
+            b["n"] += 1
     if ref_freqs is None:
         raise SystemExit(f"No matching sidecars found (raw {raw_suffix} / repaired {rep_suffix}); "
                          f"run precompute_psd.py with and without the repair flags first.")
 
-    fmask = np.ones_like(ref_freqs, dtype=bool) if args.fmax is None else (ref_freqs <= args.fmax)
-    fx = ref_freqs[fmask]
+    top = float(args.fmax) if args.fmax is not None else float(ref_freqs.max())
+    bands = _build_bands(args.bands or bool(args.band_edges), args.band_edges, top)
     repairs = "+".join(r for r, on in (("interp", args.interpolate), ("aas", args.aas)) if on)
+    n_all = sum(acc["all"][c]["n"] for c in CLASSES)
+    n_aff = sum(acc["aff"][c]["n"] for c in CLASSES)
+    groups_meta = [("all", f"ALL (n={n_all})"), ("aff", f"AFFECTED by {repairs} (n={n_aff})")]
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), sharex=True, sharey=True)
-    panels = [("all", f"ALL recordings (n={sums['all']['n']})"),
-              ("aff", f"AFFECTED by {repairs} (n={sums['aff']['n']})")]
-    for ax, (g, title) in zip(axes, panels):
-        n = sums[g]["n"]
-        if n == 0:
-            ax.set_title(title + "  (none)", fontsize=10)
-            ax.text(0.5, 0.5, "no recordings in this group", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=9, color="0.5")
-            continue
-        raw_db = 10.0 * np.log10(sums[g]["raw"] / n + 1e-20)[fmask]
-        rep_db = 10.0 * np.log10(sums[g]["rep"] / n + 1e-20)[fmask]
-        ax.plot(fx, raw_db, color="0.45", lw=1.4, label="raw")
-        ax.plot(fx, rep_db, color="tab:blue", lw=1.4, label=f"repaired ({repairs})")
-        ax.set_title(title, fontsize=10)
-        ax.grid(True, alpha=0.25)
-        ax.legend(fontsize=8)
+    nrows, ncols = len(bands), len(groups_meta)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 2.9 * nrows + 0.6), squeeze=False)
+    for r, (blabel, lo, hi) in enumerate(bands):
+        bmask = (ref_freqs >= lo) & (ref_freqs <= hi)
+        fx = ref_freqs[bmask]
+        for c, (g, gtitle) in enumerate(groups_meta):
+            ax = axes[r][c]
+            first_cell = (r == 0 and c == 0)
+            if sum(acc[g][cls]["n"] for cls in CLASSES) == 0:
+                if r == 0:
+                    ax.text(0.5, 0.5, "no recordings in this group", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=9, color="0.5")
+            elif args.by_class:
+                for cls in CLASSES:
+                    b = acc[g][cls]
+                    if b["n"] == 0:
+                        continue
+                    raw_db = 10.0 * np.log10(b["raw"] / b["n"] + _EPS)[bmask]
+                    rep_db = 10.0 * np.log10(b["rep"] / b["n"] + _EPS)[bmask]
+                    ax.plot(fx, raw_db, color=CLASS_COLORS[cls], ls="--", lw=1.1, alpha=0.75,
+                            label=f"{CLASS_NAMES[cls]} raw (n={b['n']})" if first_cell else None)
+                    ax.plot(fx, rep_db, color=CLASS_COLORS[cls], ls="-", lw=1.5,
+                            label=f"{CLASS_NAMES[cls]} repaired" if first_cell else None)
+            else:
+                raw, rep, n = _group_total(acc[g])
+                ax.plot(fx, 10.0 * np.log10(raw / n + _EPS)[bmask], color="0.45", lw=1.4,
+                        label="raw" if first_cell else None)
+                ax.plot(fx, 10.0 * np.log10(rep / n + _EPS)[bmask], color="tab:blue", lw=1.5,
+                        label=f"repaired ({repairs})" if first_cell else None)
+            ax.set_xlim(lo, hi)
+            ax.grid(True, alpha=0.25)
+            if r == 0:
+                ax.set_title(gtitle, fontsize=10)
+            if c == 0:
+                ax.set_ylabel(f"{blabel}\nPSD (dB)", fontsize=8)
+    axes[0][0].legend(fontsize=7, loc="best")
 
     montage = "bipolar" if args.bipolar else "referential"
     notch = f", notch {[int(round(f)) for f in args.notch_freqs]}" if args.notch_freqs else ""
-    fig.suptitle(f"Corpus-mean PSD before vs after repair ({montage}{notch})  |  "
+    rate = f", native {args.sfreq:g} Hz" if args.native else ""
+    fig.suptitle(f"Corpus-mean PSD before vs after repair ({montage}{notch}{rate})  |  "
                  f"channel-averaged, mean over recordings  |  {n_missing} skipped (missing/grid)",
                  fontsize=11)
     fig.supxlabel("frequency (Hz)")
-    fig.supylabel("PSD (dB)")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
 
     tag = rep_suffix.replace("-psd", "").replace(".npz", "")
+    if args.by_class:
+        tag += "-byclass"
+    if bands and len(bands) > 1:
+        tag += "-bands"
     out = Path(args.out) if args.out else root / "diagnostics" / "psd" / f"psd_repair_corpus{tag}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)
-    print(f"wrote {out}  (all n={sums['all']['n']}, affected n={sums['aff']['n']}, skipped {n_missing})")
+    print(f"wrote {out}  (all n={n_all}, affected n={n_aff}, skipped {n_missing})")
 
 
 if __name__ == "__main__":
