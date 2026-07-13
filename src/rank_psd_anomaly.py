@@ -40,13 +40,18 @@ CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 _EPS = 1e-30
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False,
+                interpolate: bool = False, aas: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
     if native:
         s += "-native"
+    if interpolate:
+        s += "-interp"
+    if aas:
+        s += "-aas"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -175,6 +180,10 @@ def main() -> None:
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
     parser.add_argument("--native", action="store_true", help="Read the native-rate sidecars.")
+    parser.add_argument("--interpolate", action="store_true",
+                        help="Read the interpolated-repair sidecars (-psd-interp; precompute_psd.py --interpolate).")
+    parser.add_argument("--aas", action="store_true",
+                        help="Read the AAS-repair sidecars (-psd-aas; precompute_psd.py --aas).")
     parser.add_argument("--rank_by", "--rank", nargs="+", default=["roughness"],
                         choices=list(_RANK_METRICS), dest="rank_by",
                         help="Metric(s) to rank by; pass >1 to combine them (see --combine). "
@@ -192,7 +201,7 @@ def main() -> None:
     parser.add_argument("--out", default=None,
                         help="Output CSV (default: <root>/diagnostics/psd/psd_anomaly<scope>.csv).")
     args = parser.parse_args()
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native, args.interpolate, args.aas)
 
     if args.all_recordings or args.sfreq is not None:
         records = _records_from_corpus(

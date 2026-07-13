@@ -45,13 +45,18 @@ CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 _EPS = 1e-30
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False,
+                interpolate: bool = False, aas: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
     if native:
         s += "-native"
+    if interpolate:
+        s += "-interp"
+    if aas:
+        s += "-aas"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -246,6 +251,10 @@ def main() -> None:
     parser.add_argument("--fmax", type=float, default=None, help="Max frequency to plot (Hz); default full grid.")
     parser.add_argument("--bipolar", action="store_true", help="Read the bipolar sidecars.")
     parser.add_argument("--notch_freqs", type=float, nargs="+", default=None, help="Read the notched sidecars.")
+    parser.add_argument("--interpolate", action="store_true",
+                        help="Read the interpolated-repair sidecars (-psd-interp; precompute_psd.py --interpolate).")
+    parser.add_argument("--aas", action="store_true",
+                        help="Read the AAS-repair sidecars (-psd-aas; precompute_psd.py --aas).")
     parser.add_argument(
         "--native", action="store_true",
         help="Read the native-rate sidecars (-psd-native...; from precompute_psd.py --native). "
@@ -292,7 +301,7 @@ def main() -> None:
         raise SystemExit("--exclude_top / --exclude_anomaly_min need --exclude_anomaly_csv.")
     if args.exclude_anomaly_csv and not args.exclude_top and args.exclude_anomaly_min is None:
         raise SystemExit("--exclude_anomaly_csv needs a selector: --exclude_top N and/or --exclude_anomaly_min X.")
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native, args.interpolate, args.aas)
 
     corpus_mode = args.all_recordings or args.sfreq is not None
     if corpus_mode:

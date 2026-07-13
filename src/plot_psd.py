@@ -28,13 +28,18 @@ CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 CLASS_COLORS = {0: "tab:blue", 1: "tab:orange"}
 
 
-def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
+def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False,
+                interpolate: bool = False, aas: bool = False) -> str:
     """PSD sidecar suffix. MUST match TUHEEGEpilepsy._psd_suffix (the writer)."""
     s = "-psd"
     if bipolar:
         s += "-bipolar"
     if native:
         s += "-native"
+    if interpolate:
+        s += "-interp"
+    if aas:
+        s += "-aas"
     if notch_freqs:
         s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
     return s + ".npz"
@@ -101,8 +106,17 @@ def main() -> None:
         help="Read the native-rate sidecars (precompute_psd.py --native). Only coherent "
         "when the recordings share one native rate (per-channel aggregation assumes one grid).",
     )
+    parser.add_argument(
+        "--interpolate", action="store_true",
+        help="Read the interpolated-repair sidecars (-psd-interp.npz from "
+        "precompute_psd.py --interpolate).",
+    )
+    parser.add_argument(
+        "--aas", action="store_true",
+        help="Read the AAS-repair sidecars (-psd-aas.npz from precompute_psd.py --aas).",
+    )
     args = parser.parse_args()
-    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native)
+    suffix = _psd_suffix(args.bipolar, args.notch_freqs, args.native, args.interpolate, args.aas)
 
     import matplotlib
 

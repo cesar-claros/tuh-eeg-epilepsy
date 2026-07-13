@@ -632,23 +632,50 @@ class TUHEEGEpilepsy:
         logger.info("IC dipole fitting completed.")
 
     @staticmethod
-    def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False) -> str:
-        """Sidecar filename suffix encoding the PSD montage / filtering / rate.
+    def _psd_suffix(bipolar: bool = False, notch_freqs=None, native: bool = False,
+                    interpolate: bool = False, aas: bool = False) -> str:
+        """Sidecar filename suffix encoding the PSD montage / filtering / rate / repair.
 
         Encodes the options so variants coexist next to the same ``.edf`` and the
         idempotency skip is per-config: ``-psd.npz`` (referential, resampled, no
         filter), ``-psd-bipolar.npz``, ``-psd-native.npz`` (no resample, the
-        recording's own rate), ``-psd-notch-60-120.npz``, etc. Plotters rebuild the
-        same string to find the right sidecar, so keep this the single source of truth.
+        recording's own rate), ``-psd-notch-60-120.npz``, and the repaired variants
+        ``-psd-interp.npz`` (bad channels interpolated), ``-psd-aas.npz`` (periodic
+        artifact subtracted), ``-psd-interp-aas.npz``, etc. Plotters rebuild the same
+        string to find the right sidecar, so keep this the single source of truth.
         """
         s = "-psd"
         if bipolar:
             s += "-bipolar"
         if native:
             s += "-native"
+        if interpolate:
+            s += "-interp"
+        if aas:
+            s += "-aas"
         if notch_freqs:
             s += "-notch-" + "-".join(str(int(round(f))) for f in notch_freqs)
         return s + ".npz"
+
+    @staticmethod
+    def _read_bads_json(file_path: Path) -> dict:
+        """Load a recording's ``-bads.json`` sidecar (from ``precompute_badchannels.py``).
+
+        Returns the parsed dict, or ``{}`` if the sidecar is missing/unreadable. Kept local to
+        the engine (a few lines of json) so the PSD precompute does not import the lazy loader's
+        cached readers, which would be a circular import.
+        """
+        import json
+
+        sidecar = Path(file_path).parent / Path(file_path).name.replace(".edf", "-bads.json")
+        if not sidecar.exists():
+            return {}
+        try:
+            with open(sidecar) as f:
+                return json.load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not read {sidecar.name}: {e}")
+            return {}
 
     @staticmethod
     def _generate_psd(
@@ -657,6 +684,9 @@ class TUHEEGEpilepsy:
         win_sec: float = 4.0,
         bipolar: bool = False,
         notch_freqs=None,
+        interpolate: bool = False,
+        aas: bool = False,
+        aas_fmax: float = 2.5,
     ) -> None:
         """Compute and cache the per-channel Welch PSD for one recording.
 
@@ -672,11 +702,19 @@ class TUHEEGEpilepsy:
         variants coexist. Idempotent: skips if that ``.npz`` already exists. Without
         ``notch_freqs`` the 60 Hz line is kept. NOTE: native-rate sidecars share a grid
         only across recordings of the same native sfreq (so aggregate them per-rate).
+
+        Repair (both off by default, using the ``-bads.json`` sidecar; applied before the
+        bipolar re-reference, exactly as the lazy training loader does): ``interpolate`` spherical-
+        spline interpolates the flagged bad channels (skipped when ``too_many_bad_channels``);
+        ``aas`` subtracts a flagged periodic (cardiac/pulse) artifact whose fundamental is
+        ``<= aas_fmax`` Hz. These let the corpus PSD be recomputed on the cleaned signal to
+        compare against the raw ``-psd.npz``.
         """
         from scipy.signal import welch
 
         native = target_sfreq is None
-        suffix = TUHEEGEpilepsy._psd_suffix(bipolar, notch_freqs, native=native)
+        suffix = TUHEEGEpilepsy._psd_suffix(bipolar, notch_freqs, native=native,
+                                            interpolate=interpolate, aas=aas)
         psd_path = file_path.parent / file_path.name.replace(".edf", suffix)
         if psd_path.exists():
             return
@@ -704,6 +742,26 @@ class TUHEEGEpilepsy:
                     )
                 if valid:
                     raw.notch_filter(valid, verbose="ERROR")
+            # Bad-channel / periodic-artifact repair from the -bads.json sidecar, BEFORE the
+            # bipolar re-reference, matching the lazy loader (window_dataset._process): first
+            # spherical-spline interpolate the flagged channels (needs the montage; skipped if
+            # too_many_bad_channels), then AAS-subtract a flagged cardiac-band periodic artifact.
+            if interpolate or aas:
+                meta = TUHEEGEpilepsy._read_bads_json(file_path)
+                if interpolate and meta:
+                    present_bad = [c for c in meta.get("bad_channels", []) if c in raw.ch_names]
+                    if present_bad and not meta.get("too_many_bad_channels", False):
+                        TUHEEGEpilepsy._set_montage(raw)
+                        raw.info["bads"] = present_bad
+                        raw.interpolate_bads(reset_bads=True, verbose="error")
+                if aas and meta:
+                    pa = meta.get("periodic_artifact") or {}
+                    f0 = pa.get("fundamental_hz")
+                    if pa.get("flagged") and f0 and 0 < f0 <= aas_fmax:
+                        from src.data.components.aas import apply_aas
+
+                        raw = mne.io.RawArray(apply_aas(raw.get_data(), fs, 1.0 / f0),
+                                              raw.info, verbose="error")
             # Re-reference to the TCP bipolar montage on the (renamed) sensor channels.
             # The PSD of a bipolar channel is the spectrum of the anode-minus-cathode
             # difference; resampling is linear so it commutes with the re-reference.
@@ -740,16 +798,20 @@ class TUHEEGEpilepsy:
         win_sec: float = 4.0,
         bipolar: bool = False,
         notch_freqs=None,
+        interpolate: bool = False,
+        aas: bool = False,
+        aas_fmax: float = 2.5,
     ) -> None:
         """Compute and cache a per-channel Welch PSD for every recording.
 
         Writes one sidecar next to each ``.edf`` (see ``_generate_psd``); its name
-        encodes the montage and filtering (``_psd_suffix``), e.g. ``-psd.npz``,
-        ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``. Existing files are skipped, so
-        the pass is idempotent (each config has its own sidecar). The PSD is
-        split-independent, so it is computed once and reused for every train/test
+        encodes the montage, filtering and repair (``_psd_suffix``), e.g. ``-psd.npz``,
+        ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``, ``-psd-interp-aas.npz``. Existing
+        files are skipped, so the pass is idempotent (each config has its own sidecar). The
+        PSD is split-independent, so it is computed once and reused for every train/test
         split; it is far cheaper than the ICA precompute (FFT only, no model fitting).
-        Plot with ``src/plot_psd.py`` (pass the matching ``--bipolar`` / ``--notch_freqs``).
+        Plot with ``src/plot_psd.py`` (pass the matching ``--bipolar`` / ``--notch_freqs`` /
+        ``--interpolate`` / ``--aas``).
 
         Parameters
         ----------
@@ -765,21 +827,33 @@ class TUHEEGEpilepsy:
         notch_freqs : list[float] | None, default=None
             Notch frequencies (e.g. ``[60, 120]``) applied before the PSD. None keeps
             the line noise.
+        interpolate : bool, default=False
+            Spherical-spline interpolate the ``-bads.json`` bad channels before the PSD
+            (requires a prior ``precompute_badchannels.py`` pass).
+        aas : bool, default=False
+            Average-Artifact-Subtract a flagged periodic (cardiac/pulse) artifact with a
+            fundamental ``<= aas_fmax`` Hz before the PSD (same prerequisite).
+        aas_fmax : float, default=2.5
+            Only AAS a periodic artifact whose fundamental is at or below this (Hz).
         """
         montage = "bipolar" if bipolar else "referential"
         filt = f", notch {notch_freqs}" if notch_freqs else ""
+        repair = ", ".join(r for r, on in (("interp", interpolate), ("aas", aas)) if on)
+        rep = f", repair [{repair}]" if repair else ""
         rate = "native rate" if target_sfreq is None else f"target {target_sfreq:.0f} Hz"
         logger.info(
             f"Computing {montage} PSD for {len(self.descriptions)} recordings "
-            f"({rate}, {win_sec}s Welch windows{filt})..."
+            f"({rate}, {win_sec}s Welch windows{filt}{rep})..."
         )
         paths = self.descriptions["path"].tolist()
         if n_jobs == 1:
             for path in tqdm(paths, desc=f"Computing PSD ({montage})"):
-                self._generate_psd(path, target_sfreq, win_sec, bipolar, notch_freqs)
+                self._generate_psd(path, target_sfreq, win_sec, bipolar, notch_freqs,
+                                   interpolate, aas, aas_fmax)
         else:
             Parallel(n_jobs=n_jobs)(
-                delayed(self._generate_psd)(path, target_sfreq, win_sec, bipolar, notch_freqs)
+                delayed(self._generate_psd)(path, target_sfreq, win_sec, bipolar, notch_freqs,
+                                            interpolate, aas, aas_fmax)
                 for path in tqdm(paths, desc=f"Computing PSD ({montage})")
             )
         logger.info("PSD computation completed.")

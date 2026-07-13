@@ -14,13 +14,19 @@ From the ``code/`` directory inside the container::
     python src/precompute_psd.py --n_jobs 8
     python src/precompute_psd.py --n_jobs 8 --bipolar              # TCP bipolar montage
     python src/precompute_psd.py --n_jobs 8 --notch_freqs 60 120   # notch before the PSD
+    python src/precompute_psd.py --n_jobs 8 --interpolate --aas    # PSD on the repaired signal
     python src/precompute_psd.py --n_jobs 8 --target_sfreq 256 --win_sec 4 \
         --data_dir /scratch/.../data
 
-The sidecar name encodes the montage / filtering so variants coexist: ``-psd.npz``
-(referential, no notch), ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``,
-``-psd-bipolar-notch-60-120.npz``. Plot with ``src/plot_psd.py`` passing the matching
-``--bipolar`` / ``--notch_freqs`` flags.
+The sidecar name encodes the montage / filtering / repair so variants coexist:
+``-psd.npz`` (referential, no notch), ``-psd-bipolar.npz``, ``-psd-notch-60-120.npz``,
+``-psd-bipolar-notch-60-120.npz``, and the repaired variants ``-psd-interp.npz`` (bad
+channels interpolated), ``-psd-aas.npz`` (periodic artifact subtracted),
+``-psd-interp-aas.npz``. The repaired variants need a prior ``precompute_badchannels.py``
+pass (they read its ``-bads.json`` sidecars). Plot with ``src/plot_psd.py`` /
+``src/plot_psd_subjects.py`` passing the matching ``--bipolar`` / ``--notch_freqs`` /
+``--interpolate`` / ``--aas`` flags, or overlay raw vs repaired with
+``src/plot_psd_repair_corpus.py``.
 """
 
 from __future__ import annotations
@@ -99,6 +105,28 @@ def main() -> None:
         "grids match only WITHIN a native rate, so plot per-rate (plot_psd_subjects.py "
         "--native --sfreq <rate>). Overrides --target_sfreq.",
     )
+    parser.add_argument(
+        "--interpolate",
+        action="store_true",
+        help="Spherical-spline interpolate the flagged bad channels (from the -bads.json "
+        "sidecars, precompute_badchannels.py) before the PSD. Writes -psd-interp.npz "
+        "sidecars; compare against the raw -psd.npz to see the repair. Requires a prior "
+        "precompute_badchannels.py pass.",
+    )
+    parser.add_argument(
+        "--aas",
+        action="store_true",
+        help="Average-Artifact-Subtract a flagged periodic (cardiac/pulse) artifact "
+        "(fundamental <= --aas_fmax) before the PSD, cleaning the harmonic comb. Writes "
+        "-psd-aas.npz (or -psd-interp-aas.npz with --interpolate). Same prerequisite.",
+    )
+    parser.add_argument(
+        "--aas_fmax",
+        type=float,
+        default=2.5,
+        help="Only AAS a periodic artifact whose fundamental is <= this (Hz); matches the "
+        "train-time data.aas_fmax cardiac band (default 2.5).",
+    )
     args = parser.parse_args()
 
     recording_ids = list(range(args.limit)) if args.limit is not None else None
@@ -110,6 +138,7 @@ def main() -> None:
         target_sfreq=None if args.native else args.target_sfreq,
         win_sec=args.win_sec,
         bipolar=args.bipolar, notch_freqs=args.notch_freqs,
+        interpolate=args.interpolate, aas=args.aas, aas_fmax=args.aas_fmax,
     )
 
 
