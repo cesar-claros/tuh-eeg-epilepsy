@@ -19,10 +19,13 @@ Detection runs on the referential 10-20 channels (before bipolar) of a high-pass
   channel's railing does not flag segments that interpolation would otherwise fix).
 
 A whole-recording periodic (harmonic-comb) artifact is also characterized (fundamental_hz,
-comb_strength, cardiac_like) and written under ``periodic_artifact``. With ``--aas`` a flagged
-cardiac-band comb is subtracted (Average Artifact Subtraction) BEFORE the channel/segment flagging
-above, so a global comb (which makes channels look mutually correlated/predictable and distorts
-PyPREP's statistics) does not cause a channel to be flagged only for carrying the shared artifact.
+comb_strength, cardiac_like) and written under ``periodic_artifact``. ``--aas`` (DIAGNOSTIC, off by
+default) subtracts a flagged cardiac-band comb before the channel/segment flagging above, but this
+OVER-flags on low-amplitude recordings: the comb is a large shared component that keeps channels
+mutually correlated and keeps PyPREP lenient, so removing it leaves a weakly-correlated low-SNR
+residual on which correlation/RANSAC fire on many good channels (aaaaapsj_s001_t002: 4 bad channels
+raw vs 12/too_many with --aas). So DETECT ON THE RAW SIGNAL (default) and apply AAS at train time
+(``data.apply_aas``) instead; the two steps are independent.
 
 Idempotent: a recording whose ``-bads.json`` exists is skipped unless ``--overwrite``. CPU-only.
 
@@ -272,11 +275,15 @@ def main() -> None:
     parser.add_argument("--periodic_fmax", type=float, default=6.0,
                         help="Max fundamental (Hz) searched for the periodic artifact (default 6).")
     parser.add_argument("--aas", action="store_true",
-                        help="Subtract a flagged periodic (cardiac/pulse) artifact with Average Artifact "
-                        "Subtraction BEFORE flagging bad channels/segments, so a global comb does not distort "
-                        "PyPREP's statistics (a channel flagged only because of the shared comb is not "
-                        "interpolated). Only applied when the artifact is flagged and its fundamental is "
-                        "<= --aas_fmax; records periodic_artifact.aas_applied in the sidecar.")
+                        help="DIAGNOSTIC (default off; leave off for the corpus pass). Subtract a flagged "
+                        "cardiac-band comb with Average Artifact Subtraction BEFORE flagging channels/segments. "
+                        "In practice this OVER-flags on low-amplitude recordings: removing the dominant shared "
+                        "comb leaves a weakly-correlated low-SNR residual, so PyPREP's correlation/RANSAC checks "
+                        "fire on many good channels (aaaaapsj_s001_t002: 4 bad channels raw vs 12/too_many with "
+                        "--aas). The comb keeps channels mutually correlated, which keeps detection lenient, so "
+                        "DETECT ON THE RAW SIGNAL and apply AAS at train time (data.apply_aas) instead. Records "
+                        "periodic_artifact.aas_applied in the sidecar. Only applied when flagged and the "
+                        "fundamental is <= --aas_fmax.")
     parser.add_argument("--aas_fmax", type=float, default=2.5,
                         help="Only AAS-clean before detection when the fundamental is <= this (Hz); matches the "
                         "train-time data.aas_fmax cardiac band, below the 3 Hz spike-wave band (default 2.5).")
