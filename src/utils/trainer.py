@@ -72,6 +72,31 @@ def _best_subject_threshold(subject_true, subject_score) -> float:
     return best_thr
 
 
+def _dump_prediction_npz(out_path: Path, window_score, window_y, window_subject,
+                         subject_ids, subject_score, subject_true, counts) -> None:
+    """Write per-window and per-subject (label, score, subject) arrays for offline ROC curves.
+
+    Uses the SAME npz schema as the LuMamba eval dump (``win_prob``/``win_y``/``win_subject`` and
+    ``subj_prob``/``subj_y``/``win_per_subj``), so ``scripts/plot_roc_variants.py`` can overlay
+    HYDRA against the foundation models as just another 'variant'. The scores are the classifier's
+    signed decision-function margin (not a probability in [0, 1]); ROC / AUROC are rank-based, so
+    the score SCALE does not matter for the comparison, and each model's curve uses its own scores.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out_path,
+        win_prob=np.asarray(window_score, dtype=np.float32),
+        win_y=np.asarray(window_y, dtype=np.int8),
+        win_subject=np.asarray(window_subject),
+        subj_id=np.asarray(subject_ids),
+        subj_prob=np.asarray(subject_score, dtype=np.float32),
+        subj_y=np.asarray(subject_true, dtype=np.int8),
+        win_per_subj=np.asarray(counts, dtype=np.int32),
+    )
+    log.info(f"Dumped predictions to {out_path} "
+             f"({len(window_score)} windows, {len(subject_ids)} subjects)")
+
+
 class Trainer:
     """
     Trainer class to handle feature extraction, training, and testing.
@@ -86,15 +111,25 @@ class Trainer:
         If True (and ``merge_train_val`` is False), pick the subject-level decision threshold
         that maximizes balanced accuracy on the held-out val set, and apply it at test time
         (instead of the default 0). Enables a fair same-calibration comparison with LuMamba.
+    dump_predictions_dir : str | None, default=None
+        If set, write each scored split's raw per-window / per-subject (label, score, subject)
+        arrays to ``<dir>/<dump_tag>_<split>.npz`` (LuMamba-compatible schema), so ROC curves can
+        be drawn offline and overlaid on the foundation models (scripts/plot_roc_variants.py).
+    dump_tag : str, default="hydra"
+        Filename stem for the dumps; the launcher sets it to ``w<ws>_s<seed>_hydra_full`` so the
+        plotter parses it as the 'hydra' variant at that window / seed.
     """
-    def __init__(self, merge_train_val: bool = True, calibrate_threshold: bool = False):
+    def __init__(self, merge_train_val: bool = True, calibrate_threshold: bool = False,
+                 dump_predictions_dir: str | None = None, dump_tag: str = "hydra"):
         self.feature_extractor = None
         self.trained_pipeline = None
         self.merge_train_val = merge_train_val
         self.calibrate_threshold = calibrate_threshold
         self.subject_threshold = 0.0
+        self.dump_predictions_dir = dump_predictions_dir
+        self.dump_tag = dump_tag
 
-    def _get_scores(self, pipeline, data, metadata_df, split_name, subject_threshold=0.0):
+    def _get_scores(self, pipeline, data, metadata_df, split_name, subject_threshold=0.0, dump=False):
         log.info(f"Calculating scores for {split_name} data")
         # Window-level: signed decision value per window, thresholded at 0.
         window_score = pipeline.decision_function(data["X"])
@@ -106,10 +141,20 @@ class Trainer:
         df = metadata_df[['subject', 'epilepsy']].copy()
         df['score'] = window_score
         grouped = df.groupby('subject')
-        subject_score = grouped['score'].mean().to_numpy()
+        subj_mean = grouped['score'].mean()
+        subject_score = subj_mean.to_numpy()
+        subject_ids = subj_mean.index.to_numpy()
         subject_true = grouped['epilepsy'].first().astype(int).to_numpy()
         subject_pred = (subject_score > subject_threshold).astype(int)
         metrics_subject = _classification_metrics(subject_true, subject_pred, subject_score)
+
+        # Optional raw-score dump for offline ROC curves (same schema as the LuMamba eval dump).
+        if dump and self.dump_predictions_dir:
+            y_win = data["y"].cpu().numpy() if hasattr(data["y"], "cpu") else np.asarray(data["y"])
+            _dump_prediction_npz(
+                Path(self.dump_predictions_dir) / f"{self.dump_tag}_{split_name}.npz",
+                window_score, y_win, df['subject'].to_numpy(),
+                subject_ids, subject_score, subject_true, grouped.size().to_numpy())
 
         name = split_name.capitalize()
         log.info(
@@ -234,6 +279,11 @@ class Trainer:
                 )
                 log.info(f"Calibrated subject threshold on val: {self.subject_threshold:.6f}")
 
+        # Dump the held-out val predictions too (test is dumped in test()), for a val-split ROC.
+        if self.dump_predictions_dir:
+            self._get_scores(pipeline, val_data, datamodule.val_df, "val",
+                             subject_threshold=self.subject_threshold, dump=True)
+
         train_scores = self._get_scores(pipeline, train_data, metadata_df, "train",
                                         subject_threshold=self.subject_threshold)
 
@@ -275,5 +325,5 @@ class Trainer:
         test_data = self._extract_features(feature_extractor, test_dataloader, "test")
         log.info("Starting evaluation!")
         test_scores = self._get_scores(pipeline, test_data, datamodule.test_df, "test",
-                                       subject_threshold=self.subject_threshold)
+                                       subject_threshold=self.subject_threshold, dump=True)
         return test_scores

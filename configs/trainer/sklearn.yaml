@@ -5,3 +5,10 @@ merge_train_val: true
 # With merge_train_val=false, pick the subject-level decision threshold that maximizes balanced
 # accuracy on the held-out val set and apply it at test time (else the default 0 threshold).
 calibrate_threshold: false
+# If set, dump each scored split's raw per-window / per-subject (label, score, subject) arrays to
+# <dump_predictions_dir>/<dump_tag>_<split>.npz (LuMamba-compatible schema) for offline ROC curves
+# overlaid on the foundation models (scripts/plot_roc_variants.py). null = no dump.
+dump_predictions_dir: null
+# Filename stem for the dumps; the same-windows launcher sets it to w<ws>_s<seed>_hydra_full so the
+# plotter parses it as the 'hydra' variant at that window/seed.
+dump_tag: hydra

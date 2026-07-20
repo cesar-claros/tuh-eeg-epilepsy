@@ -18,6 +18,10 @@ set -euo pipefail
 DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0}"  # <-- EDIT: has 00_epilepsy/ 01_no_epilepsy/
 MANIFEST_ROOT="${MANIFEST_ROOT:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/BioFoundation/manifests}"  # <-- LuMamba manifests
 OUT_ROOT="${OUT_ROOT:-logs/hydra_vs_lumamba}"
+# Write per-window/per-subject score dumps here so they sit ALONGSIDE the LuMamba dumps and
+# scripts/plot_roc_variants.py overlays HYDRA vs the foundation models. Default: the LuMamba
+# roc_dumps dir (sibling of the manifests), so HYDRA and LuMamba land in the same folder.
+DUMP_DIR="${DUMP_DIR:-$(dirname "$MANIFEST_ROOT")/roc_dumps}"
 
 WINDOWS="${WINDOWS:-15 30 45 60}"
 SEEDS="${SEEDS:-0 1 2 3 4}"
@@ -25,7 +29,7 @@ SEEDS="${SEEDS:-0 1 2 3 4}"
 cd "$(dirname "$0")"
 [ -d "$DATA_DIR" ] || { echo "ERROR: DATA_DIR not found: $DATA_DIR (edit run_hydra_vs_lumamba.sh)"; exit 1; }
 
-echo "DATA_DIR=$DATA_DIR | MANIFEST_ROOT=$MANIFEST_ROOT | OUT_ROOT=$OUT_ROOT"
+echo "DATA_DIR=$DATA_DIR | MANIFEST_ROOT=$MANIFEST_ROOT | OUT_ROOT=$OUT_ROOT | DUMP_DIR=$DUMP_DIR"
 echo "windows=[$WINDOWS] seeds=[$SEEDS]"
 
 for WS in $WINDOWS; do
@@ -36,8 +40,8 @@ for WS in $WINDOWS; do
             echo "!! missing $MAN/windows_test.csv (run the LuMamba sweep first); skipping"
             continue
         fi
-        if [ -f "$OUT/performance.csv" ]; then
-            echo "[skip] $OUT/performance.csv already exists"
+        if [ -f "$OUT/performance.csv" ] && [ -f "$DUMP_DIR/w${WS}_s${SEED}_hydra_full_test.npz" ]; then
+            echo "[skip] $OUT done (metrics + score dump present)"
             continue
         fi
         echo "==================== HYDRA w=${WS}s seed=${SEED} ===================="
@@ -55,11 +59,16 @@ for WS in $WINDOWS; do
             data.seed="$SEED" \
             trainer.merge_train_val=false \
             trainer.calibrate_threshold=true \
+            trainer.dump_predictions_dir="$DUMP_DIR" \
+            trainer.dump_tag="w${WS}_s${SEED}_hydra_full" \
             hydra.run.dir="$OUT"
     done
 done
 
 echo "HYDRA runs done. Per-run metrics are in $OUT_ROOT/w<ws>_s<seed>/performance.csv"
+echo "Score dumps (for ROC overlay with LuMamba) in $DUMP_DIR as w<ws>_s<seed>_hydra_full_<split>.npz"
 echo "Aggregated subject-level test table:"
 python src/aggregate_performance.py --runs_root "$OUT_ROOT" --split test --level subject \
     --metrics balanced_accuracy roc_auc sensitivity specificity || true
+echo "Overlay ROC: python ../BioFundation/scripts/plot_roc_variants.py --dump_dir $DUMP_DIR \\"
+echo "    --level subject --split test --variants lejepa_only_128 mixed_300 hydra"
