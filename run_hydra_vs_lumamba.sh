@@ -72,3 +72,5 @@ python src/aggregate_performance.py --runs_root "$OUT_ROOT" --split test --level
     --metrics balanced_accuracy roc_auc sensitivity specificity || true
 echo "Overlay ROC: python ../BioFundation/scripts/plot_roc_variants.py --dump_dir $DUMP_DIR \\"
 echo "    --level subject --split test --variants lejepa_only_128 mixed_300 hydra"
+echo "Overlay PR:  python ../BioFundation/scripts/plot_roc_variants.py --curve pr --sens_marker 0.85 --dump_dir $DUMP_DIR \\"
+echo "    --level subject --split test --variants lejepa_only_128 mixed_300 hydra"
