@@ -22,10 +22,12 @@ window yields, per atom, the channel-activation count (NMS peaks with
 and the maximum absolute patch cosine over channels and time. ``events`` returns the
 activations themselves (window, channel, atom, sample, signed coefficient).
 
-Every (window, channel) row is centered on its median, scaled by its MAD and clipped
-before encoding, so atoms, thresholds and coefficients are in robust-std units of
-the row. This is not a whitening: the background response of a matched filter still
-depends on the atom.
+Every (window, channel) row is first-differenced (``pre_emphasis="diff"``, the
+default; ``none`` skips it), then centered on its median, scaled by its MAD and
+clipped, so atoms, thresholds and coefficients are in robust-std units of the
+encoded row. The difference flattens the ``1/f^2`` EEG spectrum so that the
+background response of a matched filter is near unit variance for any atom; MAD
+scaling alone is not a whitening.
 """
 
 from __future__ import annotations
@@ -55,7 +57,8 @@ _FLAT_PATCH_NORM = 1e-3
 _MAD_TO_STD = 1.4826
 _CLIP = 20.0
 _MODES = ("shrink", "topk")
-_STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode")
+_PRE_EMPHASIS = ("none", "diff")
+_STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis")
 _RESEED_PER_STEP = 4
 _RESEED_POOL_FACTOR = 4
 CHECKPOINT_NAME = "sae_state.pt"
@@ -86,6 +89,14 @@ class AtomSpec:
         covers; matches with ``abs(rho) < rho_min`` are discarded. 0 disables it.
     amp_min : float
         Extraction only: an NMS peak counts as an activation when ``abs(a) > amp_min``.
+    pre_emphasis : str
+        ``diff``: encode the first difference of every row (after which the row is
+        scaled). EEG power falls as about ``1/f^2``, so a smooth atom correlated with
+        the raw signal has a background response many times the row's robust std
+        and fires everywhere; the first difference flattens the spectrum so a
+        threshold of 3 is about three sigma for any atom. The atoms then live in
+        the differenced domain; ``atoms_signal_domain`` integrates them back.
+        ``none``: encode the scaled row as is.
     """
 
     n_atoms: int = 64
@@ -95,6 +106,7 @@ class AtomSpec:
     topk: int = 4
     rho_min: float = 0.0
     amp_min: float = 0.0
+    pre_emphasis: str = "diff"
 
 
 @dataclass(frozen=True)
@@ -175,7 +187,7 @@ class ShapeConvSAE(nn.Module):
     Raises
     ------
     ValueError
-        If ``spec.mode`` is not ``shrink`` or ``topk``.
+        If ``spec.mode`` or ``spec.pre_emphasis`` has an unknown value.
     """
 
     def __init__(
@@ -193,6 +205,8 @@ class ShapeConvSAE(nn.Module):
         self.train_spec = train_spec or TrainSpec()
         if self.spec.mode not in _MODES:
             raise ValueError(f"spec.mode must be one of {_MODES}, got {self.spec.mode!r}")
+        if self.spec.pre_emphasis not in _PRE_EMPHASIS:
+            raise ValueError(f"spec.pre_emphasis must be one of {_PRE_EMPHASIS}, got {self.spec.pre_emphasis!r}")
         self.random_state = random_state
         self.chunk_rows = chunk_rows
         self.device = HydraTransform._resolve_device(device)
@@ -258,7 +272,7 @@ class ShapeConvSAE(nn.Module):
         )
 
     def save_artifacts(self, output_dir: Path) -> None:
-        """Write ``sae_state.pt`` (reloadable checkpoint), ``sae_atoms.npy``, and ``sae_training.csv``."""
+        """Write ``sae_state.pt`` (checkpoint), ``sae_atoms.npy``, ``sae_atoms_signal.npy`` and ``sae_training.csv``."""
         output_dir = Path(output_dir)
         torch.save(
             {
@@ -273,6 +287,7 @@ class ShapeConvSAE(nn.Module):
             output_dir / CHECKPOINT_NAME,
         )
         np.save(output_dir / "sae_atoms.npy", self.atoms_numpy)
+        np.save(output_dir / "sae_atoms_signal.npy", self.atoms_signal_domain)
         if self.history:
             pl.DataFrame(self.history).write_csv(output_dir / "sae_training.csv")
         log.info(f"Saved {self.spec.n_atoms} atoms and {len(self.history)} training epochs to {output_dir}")
@@ -284,8 +299,27 @@ class ShapeConvSAE(nn.Module):
 
     @property
     def atoms_numpy(self) -> np.ndarray:
-        """The normalized atoms as a ``(n_atoms, atom_len)`` float32 array."""
+        """The normalized atoms as a ``(n_atoms, atom_len)`` float32 array, in the encoded domain."""
         return self._project(self.atoms.detach()).squeeze(1).cpu().numpy()
+
+    @property
+    def atoms_signal_domain(self) -> np.ndarray:
+        """The atoms as signal-domain waveforms ``(n_atoms, atom_len)``: the cumulative sum under ``diff``.
+
+        Each waveform is re-centered and re-normalized for display; it is the shape
+        the atom detects in the original (scaled) signal, up to an additive constant.
+        """
+        atoms = self._project(self.atoms.detach())
+        if self.spec.pre_emphasis == "diff":
+            atoms = self._project(atoms.cumsum(-1))
+        return atoms.squeeze(1).cpu().numpy()
+
+    def _rows(self, X: torch.Tensor) -> torch.Tensor:
+        """(window, channel) rows of a batch ``(B, C, T)``: pre-emphasis, then robust scaling; ``(B*C, T')``."""
+        rows = X.to(self.device).flatten(0, 1)
+        if self.spec.pre_emphasis == "diff":
+            rows = rows.diff(dim=-1)
+        return self._robust_scale(rows)
 
     @property
     def thresholds(self) -> np.ndarray:
@@ -428,7 +462,7 @@ class ShapeConvSAE(nn.Module):
             If the windows are shorter than a context crop.
         """
         train_spec = self.train_spec
-        rows = self._robust_scale(x.to(self.device)).flatten(0, 1)
+        rows = self._rows(x)
         total = train_spec.crop_len + 2 * self.context
         if rows.shape[1] < total:
             raise ValueError(f"windows of {rows.shape[1]} samples are shorter than crop_len + 2 * context = {total}")
@@ -486,7 +520,7 @@ class ShapeConvSAE(nn.Module):
         per_batch = max(math.ceil(train_spec.n_init_samples / max(len(dataloader), 1)), 1)
         samples = []
         for x, _ in tqdm(dataloader, desc="ShapeConv SAE k-means init"):
-            rows = self._robust_scale(x.to(self.device)).flatten(0, 1)
+            rows = self._rows(x)
             samples.append(self._sample_subsequences(rows, spec.atom_len, per_batch, generator))
         candidates = self._project(torch.cat(samples))
         candidates = candidates[candidates.abs().amax(-1) > 0]
@@ -661,8 +695,7 @@ class ShapeConvSAE(nn.Module):
 
     def _row_chunks(self, X: torch.Tensor):
         """Yield ``(start, code, rho)`` over chunks of the scaled (window, channel) rows of ``X``."""
-        n_windows, n_channels, n_times = X.shape
-        rows = self._robust_scale(X.to(self.device)).reshape(n_windows * n_channels, 1, n_times)
+        rows = self._rows(X).unsqueeze(1)
         atoms = self._project(self.atoms)
         for start in range(0, rows.shape[0], self.chunk_rows):
             amplitude, rho = self._scores(rows[start : start + self.chunk_rows], atoms)
@@ -711,9 +744,11 @@ class ShapeConvSAE(nn.Module):
     def events(self, X: torch.Tensor) -> pl.DataFrame:
         """Every activation of the code as a row: window, channel, atom, sample, signed coefficient.
 
-        The sample is the first sample of the atom placement within the window.
-        Activations with ``abs(coefficient) <= amp_min`` are excluded. Grouping of
-        coincident activations across channels into events is left to the caller.
+        The sample is the first sample of the atom placement within the encoded row
+        (under ``diff`` pre-emphasis, sample ``j`` of the difference spans original
+        samples ``j`` and ``j + 1``). Activations with ``abs(coefficient) <= amp_min``
+        are excluded. Grouping of coincident activations across channels into
+        events is left to the caller.
         """
         n_channels = X.shape[1]
         parts = []

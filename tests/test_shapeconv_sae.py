@@ -158,6 +158,24 @@ def test_provenance_check_rejects_overlap_and_mismatch() -> None:
         raise AssertionError("data-setting mismatch was not refused")
 
 
+def test_pre_emphasis_rows_and_signal_domain_atoms() -> None:
+    model = ShapeConvSAE(spec=AtomSpec(n_atoms=1, atom_len=16, pre_emphasis="diff"), device="cpu")
+    x = torch.cumsum(torch.randn(2, 3, 50, generator=torch.Generator().manual_seed(4)), dim=-1)
+    rows = model._rows(x)
+    assert rows.shape == (6, 49)
+    assert torch.allclose(rows, ShapeConvSAE._robust_scale(x.flatten(0, 1).diff(dim=-1)))
+    # A zero-mean atom in the difference domain integrates to a waveform that ends where it starts.
+    waveform = torch.randn(1, 1, 17, generator=torch.Generator().manual_seed(5))
+    waveform[..., -1] = waveform[..., 0]
+    with torch.no_grad():
+        model.atoms.copy_(ShapeConvSAE._project(waveform.diff(dim=-1)))
+    recovered = torch.from_numpy(model.atoms_signal_domain)[None]
+    target = ShapeConvSAE._project(waveform[..., 1:])
+    assert torch.allclose(recovered, target, atol=1e-5)
+    plain = ShapeConvSAE(spec=AtomSpec(n_atoms=1, atom_len=16, pre_emphasis="none"), device="cpu")
+    assert plain._rows(x).shape == (6, 50)
+
+
 def test_diversity_sign_and_shift_aware() -> None:
     model = ShapeConvSAE(spec=AtomSpec(n_atoms=2, atom_len=16), device="cpu")
     # Support on the first 10 samples only, zero-mean there, so a shift by 3 is an exact linear shift.

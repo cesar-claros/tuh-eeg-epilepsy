@@ -9,17 +9,21 @@ OUTPUT : a feature matrix F, float32 tensor (batch, 3 * n_atoms): per-atom
 
 Deterministic invariants FAIL the run (exit code 1):
   - feature dimension 3 * n_atoms and equality across chunk sizes,
-  - same seed -> identical fitted atoms (two full fits), different seed -> differs,
+  - same seed -> same fitted atoms (two short single-threaded fits, tolerance 1e-4;
+    multi-threaded CPU convolutions are not bit-reproducible), different seed -> differs,
   - checkpoint round trip: restored spec, identical features, skipped second fit,
   - a checkpoint without provenance is refused.
 Stochastic recovery checks are reported against predeclared tolerances and only
 fail the run with --strict:
-  - one atom recovers the planted template on the held-out draw (max |xcorr| > 0.9),
-  - the best atom's count and peak features separate the test windows (AUROC > 0.9).
+  - one atom recovers the planted template on the held-out draw (max |xcorr| > 0.9,
+    compared in the encoded domain: the differenced template under --pre-emphasis diff),
+  - the best atom's count (|a| > --amp-min) and peak features separate the test
+    windows (AUROC > 0.9).
 
 Run:
-    uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
-    uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3 --strict
+    uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
+    uv run python tests/stage7_shapeconv_sae.py --pre-emphasis none      # raw rows: background dominates
+    uv run python tests/stage7_shapeconv_sae.py --mode topk --topk 2 --strict
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=
 
 RECOVERY_MIN_XCORR = 0.9
 RECOVERY_MIN_AUROC = 0.9
+REPRO_ATOL = 1e-4
+REPRO_EPOCHS = 5
 
 
 def _banner(t: str) -> None:
@@ -100,7 +106,8 @@ def parse(argv):
     p.add_argument("--thresh", type=float, default=3.0, help="initial soft threshold (shrink)")
     p.add_argument("--lam", type=float, default=0.5, help="L1 weight (shrink)")
     p.add_argument("--topk", type=int, default=3, help="code entries per crop (topk)")
-    p.add_argument("--amp-min", type=float, default=0.0, help="extraction: count activations with |a| > amp_min")
+    p.add_argument("--amp-min", type=float, default=4.0, help="extraction: count activations with |a| > amp_min")
+    p.add_argument("--pre-emphasis", choices=("diff", "none"), default="diff")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--batch", type=int, default=16)
@@ -174,11 +181,11 @@ def main(argv=None) -> int:
     _kv("windows with events per draw", int(args.n_windows - args.n_windows // 2))
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
-    _kv("mode", args.mode)
+    _kv("mode / pre-emphasis", f"{args.mode} / {args.pre_emphasis}")
 
     spec = AtomSpec(
         n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, thresh=args.thresh,
-        topk=args.topk, amp_min=args.amp_min,
+        topk=args.topk, amp_min=args.amp_min, pre_emphasis=args.pre_emphasis,
     )
     train_spec = TrainSpec(
         epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
@@ -186,9 +193,10 @@ def main(argv=None) -> int:
     )
     provenance = {"train_subjects": ["synthetic-train"], "data": {"signal_mode": "synthetic"}}
 
-    def _fit(seed: int):
-        model = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=seed, device="cpu")
-        model.fit_unsupervised(train_loader, val_dataloader=val_loader, provenance=provenance)
+    def _fit(seed: int, epochs: int = args.epochs, monitor: bool = True):
+        schedule = TrainSpec(**{**train_spec.__dict__, "epochs": epochs})
+        model = ShapeConvSAE(spec=spec, train_spec=schedule, random_state=seed, device="cpu")
+        model.fit_unsupervised(train_loader, val_dataloader=val_loader if monitor else None, provenance=provenance)
         return model
 
     sae = _fit(args.seed)
@@ -213,8 +221,13 @@ def main(argv=None) -> int:
     sae.chunk_rows = 1
     checks.hard("chunk_rows=1 gives the same F", bool(torch.allclose(sae(x_test), f, atol=1e-5)))
     sae.chunk_rows = 16
-    same = _fit(args.seed)
-    checks.hard("same seed -> identical fitted atoms", bool(np.array_equal(sae.atoms_numpy, same.atoms_numpy)))
+    n_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    fit_a, fit_b = _fit(args.seed, REPRO_EPOCHS, monitor=False), _fit(args.seed, REPRO_EPOCHS, monitor=False)
+    torch.set_num_threads(n_threads)
+    max_diff = float(np.abs(fit_a.atoms_numpy - fit_b.atoms_numpy).max())
+    checks.hard(f"same seed -> same fitted atoms (1 thread, {REPRO_EPOCHS} ep, max diff {max_diff:.1e})",
+                max_diff <= REPRO_ATOL)
     seed_a = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu").atoms_numpy
     seed_b = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed + 1, device="cpu").atoms_numpy
     checks.hard("different seed -> different initial atoms", not np.array_equal(seed_a, seed_b))
@@ -223,7 +236,10 @@ def main(argv=None) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sae.save_artifacts(out_dir)
-    other_spec = AtomSpec(n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, rho_min=0.35, amp_min=2.0)
+    other_spec = AtomSpec(
+        n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, pre_emphasis=args.pre_emphasis,
+        rho_min=0.35, amp_min=2.0,
+    )
     reloaded = ShapeConvSAE(spec=other_spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
     checks.hard("saved spec restored on load", reloaded.spec == sae.spec)
     checks.hard("fitted after load", reloaded.fitted)
@@ -247,9 +263,13 @@ def main(argv=None) -> int:
 
     _sec("stochastic recovery (held-out test draw, predeclared tolerances)")
     atoms = sae.atoms_numpy
-    xcorr = np.array([np.abs(np.correlate(a, template, mode="full")).max() for a in atoms])
+    target = np.diff(template) if args.pre_emphasis == "diff" else template
+    target = (target - target.mean()) / np.linalg.norm(target - target.mean())
+    xcorr = np.array([np.abs(np.correlate(a, target, mode="full")).max() for a in atoms])
     best_atom = int(xcorr.argmax())
-    _kv("per-atom max |xcorr|", [round(float(v), 3) for v in xcorr])
+    _kv("per-atom max |xcorr| (encoded domain)", [round(float(v), 3) for v in xcorr])
+    signal_xcorr = np.abs(np.correlate(sae.atoms_signal_domain[best_atom], template, mode="full")).max()
+    _kv("best atom, signal-domain |xcorr|", f"{signal_xcorr:.3f}")
     checks.soft(f"template recovered (> {RECOVERY_MIN_XCORR})", bool(xcorr[best_atom] > RECOVERY_MIN_XCORR),
                 f"atom {best_atom}, |xcorr| {xcorr[best_atom]:.3f}")
     k = args.n_atoms

@@ -17,7 +17,11 @@ spec:
   topk: 4           # nonzero code entries per 1 s crop (topk)
   rho_min: 0.0      # optional cosine gate (the paper's norm term); 0 = off, the residual corrects
                     # the energy bias instead (design note 3.2). Sweep {0, 0.2, 0.35} if curious.
-  amp_min: 0.0      # extraction: an NMS peak counts as an event when |a| > amp_min
+  amp_min: 0.0      # extraction: an NMS peak counts as an activation when |a| > amp_min
+  pre_emphasis: diff # diff: encode the first difference of each row (flattens the 1/f^2 EEG
+                    # spectrum so a threshold of 3 is ~3 sigma for any atom; sae_atoms.npy is in
+                    # that domain, sae_atoms_signal.npy is the integrated waveform). none: raw rows,
+                    # where smooth atoms fire on background everywhere (stage 7, 2026-09-18).
 train_spec:
   _target_: src.models.components.shapeconv_sae.TrainSpec
   epochs: 30        # passes over the train dataloader; each pass draws fresh random crops, so
