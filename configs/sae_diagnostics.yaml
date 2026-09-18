@@ -1,0 +1,27 @@
+# @package _global_
+
+# Full-window diagnostics of a fitted ShapeConv SAE on one split (src/sae_diagnostics.py):
+# per-atom activation rates per channel-minute (all NMS peaks / above the extraction
+# threshold), peak magnitudes, response scale, threshold-to-response ratio, peak
+# frequency, lag coherence between atoms, and snippets of the most active atoms.
+defaults:
+  - _self_
+  - data: tuh_eeg_epilepsy
+  - feature: shapeconv_sae
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional local: default
+
+task_name: "sae_diagnostics"
+
+# Which split to encode. val is the development split; test must stay unopened until
+# the locked evaluation of the proposal.
+split: val
+
+# Output directory (feeds hydra.run.dir). Override, e.g.:
+#   python src/sae_diagnostics.py feature.pretrained=... output_dir=logs/sae_diag/D10
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
+tags: ["dev"]
+seed: null

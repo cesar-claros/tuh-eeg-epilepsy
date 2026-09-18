@@ -947,13 +947,22 @@ class ShapeConvSAE(nn.Module):
         return threshold * torch.as_tensor(self.atom_response_std, device=self.device).view(-1, 1)
 
     @torch.no_grad()
-    def calibrate_amp_min(self, dataloader: DataLoader, false_alarms_per_channel_minute: float, sfreq: float) -> None:
+    def calibrate_amp_min(
+        self,
+        dataloader: DataLoader,
+        false_alarms_per_channel_minute: float,
+        sfreq: float,
+        keep_label: int | None = None,
+    ) -> None:
         """Set per-atom extraction thresholds so that background activations reach a target rate.
 
         For every atom, the NMS peaks of the code on the loader's rows (taken as
         background, for example event-free synthetic rows or windows of negative
         training subjects) are collected, and the threshold is placed so that at
         most ``false_alarms_per_channel_minute`` peaks per channel-minute exceed it.
+        With ``keep_label`` only the windows whose label equals it are used (the
+        design note's calibration on negative training subjects); this is the one
+        place the module reads labels, and it must see training windows only.
         An atom with fewer peaks than the allowance keeps a threshold at its
         smallest peak. The thresholds are stored in the checkpoint and take
         precedence over ``amp_min``. On EEG the loader's rows are development-cohort
@@ -968,16 +977,29 @@ class ShapeConvSAE(nn.Module):
             Target rate of surviving background activations per atom.
         sfreq : float
             Sampling rate of the windows, to convert samples to minutes.
+        keep_label : int | None
+            Use only windows with this label (``None`` uses every window).
+
+        Raises
+        ------
+        ValueError
+            If no window passes the label filter.
         """
         peaks: list[list[torch.Tensor]] = [[] for _ in range(self.spec.n_atoms)]
         minutes = 0.0
-        for x, _ in tqdm(dataloader, desc="ShapeConv SAE threshold calibration"):
+        for x, y in tqdm(dataloader, desc="ShapeConv SAE threshold calibration"):
+            if keep_label is not None:
+                x = x[torch.as_tensor(y).reshape(-1) == keep_label]
+                if x.shape[0] == 0:
+                    continue
             minutes += x.shape[0] * x.shape[1] * x.shape[2] / sfreq / 60.0
             for _, code, _ in self._row_chunks(x):
                 magnitude = code.abs()
                 for atom in range(self.spec.n_atoms):
                     values = magnitude[:, atom][magnitude[:, atom] > 0]
                     peaks[atom].append(values)
+        if minutes == 0.0:
+            raise ValueError(f"no window with label {keep_label!r} in the calibration loader")
         allowed = int(false_alarms_per_channel_minute * minutes)
         thresholds = torch.zeros(self.spec.n_atoms, device=self.device)
         for atom in range(self.spec.n_atoms):
@@ -991,7 +1013,7 @@ class ShapeConvSAE(nn.Module):
         self.amp_min_atom.copy_(thresholds)
         self.fit_meta = {**self.fit_meta, "amp_min_calibration": {
             "false_alarms_per_channel_minute": float(false_alarms_per_channel_minute),
-            "channel_minutes": float(minutes), "sfreq": float(sfreq),
+            "channel_minutes": float(minutes), "sfreq": float(sfreq), "keep_label": keep_label,
         }}
         log.info(
             f"Calibrated per-atom thresholds at {false_alarms_per_channel_minute} per channel-minute over "

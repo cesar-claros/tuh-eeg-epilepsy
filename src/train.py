@@ -19,8 +19,10 @@ from src.utils import (
     dump_window_metadata,
     extras,
     get_metric_value,
+    instantiate_feature,
     split_provenance,
     task_wrapper,
+    threshold_calibration,
     Trainer,
 )
 
@@ -118,7 +120,7 @@ def _run_seed_sweep(
 
     rows: list[dict[str, float]] = []
     for seed in tqdm(seeds, desc="HYDRA feature seed sweep"):
-        feature_extractor = hydra.utils.instantiate(cfg.feature, random_state=seed)
+        feature_extractor = instantiate_feature(cfg.feature, random_state=seed)
         check_pretrained_provenance(
             feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val,
             allow_data_mismatch=bool(cfg.feature.get("allow_data_mismatch", False)),
@@ -134,6 +136,7 @@ def _run_seed_sweep(
             output_path=cfg.paths.output_dir,
             save=False,
             provenance=split_provenance(datamodule, cfg.data),
+            calibration=threshold_calibration(cfg),
         )
         test_scores = trainer.test(
             model=model,
@@ -419,7 +422,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         return _run_seed_sweep(cfg, datamodule, trainer, feature_seeds)
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
-    feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
+    feature_extractor: nn.Module = instantiate_feature(cfg.feature)
     # A pretrained learned extractor must not have seen this run's held-out subjects
     # and must have been trained on the same signal (montage, rate, filters).
     check_pretrained_provenance(
@@ -450,6 +453,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             datamodule=datamodule,
             output_path=cfg.paths.output_dir,
             provenance=split_provenance(datamodule, cfg.data),
+            calibration=threshold_calibration(cfg),
         )
 
     if cfg.get("test"):

@@ -23,7 +23,15 @@ rootutils.setup_root(__file__, pythonpath=True)
 
 # The project root must be on sys.path before the `src` imports (same as train.py).
 from src.models.components.shapeconv_sae import CHECKPOINT_NAME  # noqa: E402
-from src.utils import RankedLogger, dump_window_metadata, extras, split_provenance, task_wrapper  # noqa: E402
+from src.utils import (  # noqa: E402
+    RankedLogger,
+    dump_window_metadata,
+    extras,
+    instantiate_feature,
+    split_provenance,
+    task_wrapper,
+    threshold_calibration,
+)
 
 if TYPE_CHECKING:
     from lightning import LightningDataModule
@@ -62,7 +70,7 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     dump_window_metadata(output_dir, datamodule)
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
-    feature_extractor = hydra.utils.instantiate(cfg.feature)
+    feature_extractor = instantiate_feature(cfg.feature)
     if not hasattr(feature_extractor, "fit_unsupervised"):
         raise TypeError(f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae")
     if getattr(feature_extractor, "fitted", False):
@@ -71,6 +79,12 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     feature_extractor.fit_unsupervised(
         datamodule.train_dataloader(), datamodule.val_dataloader(), provenance=split_provenance(datamodule, cfg.data)
     )
+    calibration = threshold_calibration(cfg)
+    if calibration is not None:
+        feature_extractor.calibrate_amp_min(
+            datamodule.train_dataloader(), calibration["false_alarms_per_channel_minute"], calibration["sfreq"],
+            keep_label=calibration["keep_label"],
+        )
     feature_extractor.save_artifacts(output_dir)
     log.info(  # noqa: G004
         "Reuse with: python src/train.py feature=shapeconv_sae "

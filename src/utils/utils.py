@@ -300,6 +300,47 @@ def check_fit_provenance(pipeline: Any, datamodule: Any) -> None:
         )
 
 
+# Keys of the `feature` config node that steer the run rather than the extractor's
+# constructor (guard behaviour, threshold calibration); stripped before instantiation.
+_FEATURE_RUN_KEYS = ("allow_data_mismatch", "calibrate_fa", "calibrate_label")
+
+
+def instantiate_feature(feature_cfg: DictConfig, **overrides: Any) -> Any:
+    """Instantiate the feature extractor from its config node without the run-level keys.
+
+    Parameters
+    ----------
+    feature_cfg : DictConfig
+        The ``feature`` node (with ``_target_``).
+    **overrides : Any
+        Constructor overrides passed through to ``hydra.utils.instantiate``.
+    """
+    import hydra
+
+    keep = [k for k in feature_cfg if k not in _FEATURE_RUN_KEYS]
+    return hydra.utils.instantiate(OmegaConf.masked_copy(feature_cfg, keep), **overrides)
+
+
+def threshold_calibration(cfg: DictConfig) -> dict[str, Any] | None:
+    """The extraction-threshold calibration request of a run, or ``None``.
+
+    Reads ``feature.calibrate_fa`` (target background activations per channel-minute)
+    and ``feature.calibrate_label`` (window label taken as background, default 0),
+    with the sampling rate from ``data.target_sfreq``.
+    """
+    rate = cfg.feature.get("calibrate_fa") if "feature" in cfg else None
+    if rate is None:
+        return None
+    sfreq = cfg.data.get("target_sfreq")
+    if sfreq is None:
+        raise ValueError("feature.calibrate_fa needs data.target_sfreq to convert samples to minutes")
+    return {
+        "false_alarms_per_channel_minute": float(rate),
+        "sfreq": float(sfreq),
+        "keep_label": int(cfg.feature.get("calibrate_label", 0)),
+    }
+
+
 def dump_window_metadata(output_dir: Path, datamodule: Any) -> None:
     """Save the per-split window metadata to ``windows_<split>.csv`` in ``output_dir``.
 

@@ -59,6 +59,13 @@ override_spec: false
 # chunk_rows on small GPUs or with many atoms.
 device: auto
 chunk_rows: 16
+# Extraction-threshold calibration (design note theta*): after the fit, set per-atom
+# thresholds so that at most calibrate_fa NMS peaks per channel-minute survive on the
+# TRAINING windows with label calibrate_label (0 = non-epileptic subjects). Takes
+# precedence over amp_min; stored in the checkpoint. On EEG this is a cohort activation
+# rate, not a clinical false-alarm rate. null = no calibration. Synthetic Phase 1: 0.1.
+calibrate_fa: null
+calibrate_label: 0
 # Deliberate transfer only: log instead of refusing when the checkpoint's data settings
 # (montage, rate, filters, ICA selection, repairs) differ from this run. Subject overlap
 # with the held-out split is refused regardless.

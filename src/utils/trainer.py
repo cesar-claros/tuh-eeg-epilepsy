@@ -236,6 +236,7 @@ class Trainer:
             output_path: str,
             save: bool = True,
             provenance: dict | None = None,
+            calibration: dict | None = None,
         ):
         """Extract features, fit the scaler+classifier pipeline, and score on train.
 
@@ -260,6 +261,13 @@ class Trainer:
             (training subjects, data settings, window fingerprint; see
             ``src.utils.split_provenance``). Required when the extractor exposes
             ``fit_unsupervised`` and is not already fitted.
+        calibration : dict | None, default=None
+            If set and the extractor exposes ``calibrate_amp_min``, calibrate its
+            per-atom extraction thresholds on the TRAINING windows with label
+            ``keep_label`` (0 = non-epileptic subjects) to a background activation
+            rate: ``{"false_alarms_per_channel_minute": r, "sfreq": f, "keep_label": 0}``.
+            Skipped for a pretrained extractor that already carries calibrated
+            thresholds.
 
         Returns
         -------
@@ -279,6 +287,17 @@ class Trainer:
         if hasattr(feature_extractor, "fit_unsupervised"):
             log.info("Fitting the feature extractor without labels on the training windows")
             feature_extractor.fit_unsupervised(train_dataloader, val_dataloader, provenance=provenance)
+        if calibration and hasattr(feature_extractor, "calibrate_amp_min"):
+            if feature_extractor.calibrated_thresholds is None:
+                log.info(f"Calibrating extraction thresholds on training windows with label "
+                         f"{calibration.get('keep_label', 0)} at {calibration['false_alarms_per_channel_minute']} "
+                         f"per channel-minute")
+                feature_extractor.calibrate_amp_min(
+                    train_dataloader, calibration["false_alarms_per_channel_minute"], calibration["sfreq"],
+                    keep_label=calibration.get("keep_label", 0),
+                )
+            else:
+                log.info("Pretrained extractor already carries calibrated thresholds; keeping them")
 
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
         val_data = self._extract_features(feature_extractor, val_dataloader, "val")
