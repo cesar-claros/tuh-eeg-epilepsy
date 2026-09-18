@@ -15,7 +15,7 @@
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
-DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data/v3.0.0}"  # <-- EDIT: has 00_epilepsy/ 01_no_epilepsy/
+DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data}"  # <-- EDIT: has 00_epilepsy/ 01_no_epilepsy/
 MANIFEST_ROOT="${MANIFEST_ROOT:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/BioFoundation/manifests}"  # <-- LuMamba manifests
 OUT_ROOT="${OUT_ROOT:-logs/hydra_vs_lumamba}"
 # Write per-window/per-subject score dumps here so they sit ALONGSIDE the LuMamba dumps and
