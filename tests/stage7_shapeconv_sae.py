@@ -25,10 +25,20 @@ window AUROCs of the best atom's count and peak features, the per-atom table,
 recall on isolated versus close events, the dictionary-level event reconstruction
 correlation, timing error, count MAE, duplicates and false alarms per channel-minute.
 
+Stress conditions (targeted runs, not a grid): --amplitude 4 / 2 (event peak in
+background std), --event-free (no events: reports false alarms per channel-minute
+only; the gate does not apply), --band-pass (corpus-matched 1-45 Hz zero-phase
+filter after planting), --second-morphology (half the events use a sharp wave;
+recall is reported per template), --pair-gap G (every event gets a partner G
+samples later on the same channel), --artifacts (a broad bump on a random channel
+in 30 percent of ALL windows), --synchronous (each event on every channel at the
+same onset with a random polarity per channel).
+
 Run:
     uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
     uv run python tests/stage7_shapeconv_sae.py --pre-emphasis none      # raw rows: background dominates
     uv run python tests/stage7_shapeconv_sae.py --mode topk --topk 2 --strict
+    uv run python tests/stage7_shapeconv_sae.py --amplitude 4 --band-pass --artifacts --strict
 """
 
 from __future__ import annotations
@@ -125,15 +135,22 @@ def parse(argv):
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--match-tol", type=int, default=6, help="event matching tolerance in samples (engineering choice)")
+    p.add_argument("--event-free", action="store_true", help="plant no events; report false alarms only")
+    p.add_argument("--band-pass", action="store_true", help="1-45 Hz zero-phase Butterworth at 256 Hz after planting")
+    p.add_argument("--second-morphology", action="store_true", help="half of the events use a sharp-wave template")
+    p.add_argument("--pair-gap", type=int, default=0, help="if > 0, every event gets a partner this many samples later")
+    p.add_argument("--artifacts", action="store_true", help="broad bump (100 samples, 4 std) in 30%% of all windows")
+    p.add_argument("--synchronous", action="store_true", help="each event appears on every channel at the same onset")
     p.add_argument("--strict", action="store_true", help="also fail on the stochastic recovery checks")
     p.add_argument("--out-dir", default="tests/outputs/stage7", help="where the checkpoint round trip writes")
     return p.parse_args(argv)
 
 
-def _spike_wave(np, length: int):
-    """Unit-norm, zero-mean spike (narrow) followed by a slow wave of opposite sign."""
+def _spike_wave(np, length: int, sharp: bool = False):
+    """Unit-norm, zero-mean spike (narrow) or sharp wave (broader) followed by a slow wave of opposite sign."""
     t = np.linspace(0.0, 1.0, length)
-    template = np.exp(-(((t - 0.2) / 0.03) ** 2)) - 0.5 * np.exp(-(((t - 0.6) / 0.15) ** 2))
+    width = 0.09 if sharp else 0.03
+    template = np.exp(-(((t - 0.2) / width) ** 2)) - 0.5 * np.exp(-(((t - 0.6) / 0.15) ** 2))
     template = template - template.mean()
     return template / np.linalg.norm(template)
 
@@ -152,18 +169,41 @@ def _synthetic(np, args, seed: int):
     for i in range(1, t):
         x[..., i] = 0.95 * x[..., i - 1] + noise[..., i]
     x /= x.std(axis=-1, keepdims=True)
-    template = _spike_wave(np, args.template_len)
-    scale = args.amplitude / template.max()
+    templates = [_spike_wave(np, args.template_len)]
+    if args.second_morphology:
+        templates.append(_spike_wave(np, args.template_len, sharp=True))
     y = np.zeros(n, dtype=np.int64)
-    y[n // 2:] = 1
+    if not args.event_free:
+        y[n // 2:] = 1
+    last_onset = t - args.template_len - max(args.pair_gap, 0)
     events = []
+
+    def plant(w: int, ch: int, start: int, kind: int) -> None:
+        polarity = int(rng.choice([-1, 1]))
+        template = templates[kind]
+        x[w, ch, start:start + args.template_len] += polarity * (args.amplitude / template.max()) * template
+        events.append((w, ch, int(start), polarity, kind))
+
     for w in np.flatnonzero(y):
-        for ch in range(c):
-            for start in rng.integers(0, t - args.template_len, size=args.events_per_channel):
-                polarity = int(rng.choice([-1, 1]))
-                x[w, ch, start:start + args.template_len] += polarity * scale * template
-                events.append((w, ch, int(start), polarity))
-    return x, y, template, np.array(events, dtype=np.int64).reshape(-1, 4)
+        # Synchronous fields draw the onsets once per window and plant them on every channel.
+        for ch in ([None] if args.synchronous else range(c)):
+            for start in rng.integers(0, last_onset, size=args.events_per_channel):
+                kind = int(rng.integers(len(templates)))
+                for target in (range(c) if ch is None else (ch,)):
+                    plant(w, target, int(start), kind)
+                    if args.pair_gap > 0:
+                        plant(w, target, int(start) + args.pair_gap, kind)
+    if args.artifacts:
+        for w in range(n):
+            if rng.random() < 0.3:
+                onset = int(rng.integers(0, t - 100))
+                x[w, rng.integers(c), onset:onset + 100] += 4.0 * np.hanning(100)
+    if args.band_pass:
+        from scipy.signal import butter, sosfiltfilt
+
+        sos = butter(4, [1.0, 45.0], btype="bandpass", fs=SFREQ, output="sos")
+        x = sosfiltfilt(sos, x, axis=-1).astype(np.float32)
+    return x, y, templates[0], np.array(events, dtype=np.int64).reshape(-1, 5)
 
 
 def _match_events(np, pred, true, tol: int):
@@ -241,7 +281,11 @@ def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, at
             isolated[i] = False
     matched_true = np.zeros(n_true, dtype=bool)
     matched_true[mt] = True
+    per_template = {}
+    if n_true and events.shape[1] > 4:
+        per_template = {int(k): float(matched_true[events[:, 4] == k].mean()) for k in np.unique(events[:, 4])}
     return {
+        "recall_by_template": per_template,
         "precision": n_match / n_pred if n_pred else float("nan"),
         "recall": n_match / n_true if n_true else float("nan"),
         "recall_isolated": float(matched_true[isolated].mean()) if isolated.any() else float("nan"),
@@ -316,7 +360,12 @@ def main(argv=None) -> int:
 
     _sec("INPUT (train draw; val and test are independent draws)")
     _desc_tensor("X (window batch)", x_train)
-    _kv("windows with events per draw", int(args.n_windows - args.n_windows // 2))
+    _kv("windows with events per draw", 0 if args.event_free else int(args.n_windows - args.n_windows // 2))
+    stress_flags = ("event_free", "band_pass", "second_morphology", "artifacts", "synchronous")
+    stress = [k for k in stress_flags if getattr(args, k)]
+    if args.pair_gap:
+        stress.append(f"pair_gap {args.pair_gap}")
+    _kv("stress", ", ".join(stress) or "none")
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
     _kv("mode / pre-emphasis", f"{args.mode} / {args.pre_emphasis}")
@@ -414,16 +463,28 @@ def main(argv=None) -> int:
                       f"atom {best_atom}, |xcorr| {xcorr[best_atom]:.3f}")
     k = args.n_atoms
     counts, peaks, cosines = f[:, best_atom].numpy(), f[:, k + best_atom].numpy(), f[:, 2 * k + best_atom].numpy()
-    _kv("mean count, no events / events", f"{counts[y_test == 0].mean():.2f} / {counts[y_test == 1].mean():.2f}")
-    auc_count, auc_peak = roc_auc_score(y_test, counts), roc_auc_score(y_test, peaks)
-    checks.diagnostic(f"count AUROC (ref {REFERENCE_AUROC})", auc_count > REFERENCE_AUROC, f"{auc_count:.3f}")
-    checks.diagnostic(f"peak |a| AUROC (ref {REFERENCE_AUROC})", auc_peak > REFERENCE_AUROC, f"{auc_peak:.3f}")
-    _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
+    if y_test.min() != y_test.max():
+        _kv("mean count, no events / events", f"{counts[y_test == 0].mean():.2f} / {counts[y_test == 1].mean():.2f}")
+        auc_count, auc_peak = roc_auc_score(y_test, counts), roc_auc_score(y_test, peaks)
+        checks.diagnostic(f"count AUROC (ref {REFERENCE_AUROC})", auc_count > REFERENCE_AUROC, f"{auc_count:.3f}")
+        checks.diagnostic(f"peak |a| AUROC (ref {REFERENCE_AUROC})", auc_peak > REFERENCE_AUROC, f"{auc_peak:.3f}")
+        _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
+    else:
+        _kv("window AUROCs", "not defined (one class)")
     _kv("events table (an event window)", sae.events(x_test[-1:]).head(5))
 
     _sec(f"event-level matching, THE GATE (calibrated on val, scored on test, tolerance {args.match_tol} samples)")
     shape = tuple(x_test.shape)
     acts_val, acts_test = sae.events(x_val).to_numpy(), sae.events(x_test).to_numpy()
+    if args.event_free:
+        minutes = shape[0] * shape[1] * shape[2] / SFREQ / 60.0
+        per_atom = [float((acts_test[:, 2] == atom).sum()) / minutes for atom in range(args.n_atoms)]
+        _kv("false alarms per channel-minute, per atom", [round(v, 3) for v in per_atom])
+        _kv("false alarms per channel-minute, total", f"{sum(per_atom):.3f}")
+        _kv("gate", "not applicable (no events planted)")
+        _sec("RESULT")
+        _kv("deterministic failures", checks.failed or "none")
+        return 1 if checks.failed else 0
     calibration = {}
     for atom in range(args.n_atoms):
         acts = acts_val[acts_val[:, 2] == atom][:, [0, 1, 3, 4]]
@@ -445,8 +506,9 @@ def main(argv=None) -> int:
         _kv("atom / offset / sign (val)", f"{chosen} / {offset} / {sign:+d}  (val F1 {val_f1:.3f})")
         acts = acts_test[acts_test[:, 2] == chosen][:, [0, 1, 3, 4]]
         scores = _event_metrics(np, acts, events_test, offset, sign, args.match_tol, shape, args.atom_len)
-        for key in ("recall_isolated", "recall_close", "n_close", "timing_error_samples", "count_mae_per_window",
-                    "duplicates", "false_alarms_per_channel_minute", "polarity_accuracy", "n_true", "n_pred"):
+        for key in ("recall_isolated", "recall_close", "n_close", "recall_by_template", "timing_error_samples",
+                    "count_mae_per_window", "duplicates", "false_alarms_per_channel_minute", "polarity_accuracy",
+                    "n_true", "n_pred"):
             _kv(key, f"{scores[key]:.3f}" if isinstance(scores[key], float) else scores[key])
         checks.soft(f"event precision (> {RECOVERY_MIN_PR})", scores["precision"] > RECOVERY_MIN_PR,
                     f"{scores['precision']:.3f}")
