@@ -138,6 +138,9 @@ def parse(argv):
     p.add_argument("--nms-half", type=int, default=None, help="NMS half-width in samples (default atom_len // 2)")
     p.add_argument("--amp-min-relative", action="store_true",
                    help="amp_min in units of each atom's measured background response std")
+    p.add_argument("--calibrate-fa", type=float, default=None,
+                   help="calibrate per-atom thresholds to this false-alarm rate per channel-minute on an "
+                        "event-free draw (seed + 3); takes precedence over --amp-min")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--batch", type=int, default=16)
@@ -377,6 +380,8 @@ def main(argv=None) -> int:
         stress.append(f"nms_half {args.nms_half}")
     if args.amp_min_relative:
         stress.append("amp_min_relative")
+    if args.calibrate_fa is not None:
+        stress.append(f"calibrate_fa {args.calibrate_fa:g}")
     _kv("stress", ", ".join(stress))
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
@@ -400,6 +405,13 @@ def main(argv=None) -> int:
         return model
 
     sae = _fit(args.seed)
+    if args.calibrate_fa is not None:
+        saved_event_free = args.event_free
+        args.event_free = True
+        background_loader, _, _, _, _ = _loader(args.seed + 3)
+        args.event_free = saved_event_free
+        sae.calibrate_amp_min(background_loader, args.calibrate_fa, SFREQ)
+        _kv("calibrated thresholds per atom", [round(float(v), 2) for v in sae.calibrated_thresholds])
 
     _sec("training history")
     for record in sae.history:
@@ -445,6 +457,7 @@ def main(argv=None) -> int:
         ar_order=args.ar_order, rho_min=0.35, amp_min=2.0,
     )
     reloaded = ShapeConvSAE(spec=other_spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
+    checks.hard("calibrated thresholds survive reload", bool(torch.equal(reloaded.amp_min_atom, sae.amp_min_atom)))
     checks.hard("saved spec restored on load", reloaded.spec == sae.spec)
     checks.hard("fitted after load", reloaded.fitted)
     checks.hard("provenance restored", reloaded.train_subjects == ["synthetic-train"])

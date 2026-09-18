@@ -243,6 +243,7 @@ class ShapeConvSAE(nn.Module):
             torch.full((self.spec.n_atoms,), math.log(self.spec.thresh), device=self.device)
         )
         self.register_buffer("ar_coef", torch.zeros(max(self.spec.ar_order, 0), device=self.device))
+        self.register_buffer("amp_min_atom", torch.zeros(self.spec.n_atoms, device=self.device))
         self.history: list[dict[str, float]] = []
         self.provenance: dict[str, Any] = {}
         self.fit_meta: dict[str, Any] = {}
@@ -276,6 +277,8 @@ class ShapeConvSAE(nn.Module):
             log.warning(f"Migrated a pickled ShapeConvSAE: spec fields filled {fill}")
         if "ar_coef" not in self._buffers:
             self.register_buffer("ar_coef", torch.zeros(max(self.spec.ar_order, 0), device=self.device))
+        if "amp_min_atom" not in self._buffers:
+            self.register_buffer("amp_min_atom", torch.zeros(self.spec.n_atoms, device=self.device))
         if not getattr(self, "fit_meta", None):
             self.fit_meta = {
                 "train_spec": asdict(self.train_spec), "random_state": self.random_state, "migrated": True,
@@ -357,7 +360,8 @@ class ShapeConvSAE(nn.Module):
         if not provenance.get("train_subjects"):
             raise ValueError(f"{path} has no training-subject provenance; refusing to reuse it")
         missing, unexpected = self.load_state_dict(checkpoint["state_dict"], strict=False)
-        if unexpected or (missing and (set(missing) != {"ar_coef"} or self.spec.pre_emphasis == "diff_ar")):
+        tolerated = {"amp_min_atom"} | (set() if self.spec.pre_emphasis == "diff_ar" else {"ar_coef"})
+        if unexpected or not set(missing) <= tolerated:
             raise ValueError(f"{path}: state_dict mismatch (missing {missing}, unexpected {unexpected})")
         self.history = checkpoint["history"]
         self.provenance = provenance
@@ -400,6 +404,8 @@ class ShapeConvSAE(nn.Module):
         np.save(output_dir / "sae_atoms_signal.npy", self.atoms_signal_domain)
         if self.atom_response_std is not None:
             np.save(output_dir / "sae_atom_response_std.npy", self.atom_response_std)
+        if self.calibrated_thresholds is not None:
+            np.save(output_dir / "sae_amp_min_atom.npy", self.calibrated_thresholds)
         if self.history:
             pl.DataFrame(self.history).write_csv(output_dir / "sae_training.csv")
         log.info(f"Saved {self.spec.n_atoms} atoms and {len(self.history)} training epochs to {output_dir}")
@@ -925,7 +931,13 @@ class ShapeConvSAE(nn.Module):
     # ------------------------------------------------------------------ extraction
 
     def _event_threshold(self) -> torch.Tensor:
-        """Per-atom extraction threshold ``(n_atoms, 1)``: ``amp_min`` absolute, or times the response std."""
+        """Per-atom extraction threshold ``(n_atoms, 1)``.
+
+        A calibrated per-atom threshold (``calibrate_amp_min``) takes precedence;
+        otherwise ``amp_min``, absolute or times the measured response std.
+        """
+        if bool(self.amp_min_atom.any()):
+            return self.amp_min_atom.view(-1, 1)
         threshold = torch.full((self.spec.n_atoms, 1), float(self.spec.amp_min), device=self.device)
         if not self.spec.amp_min_relative:
             return threshold
@@ -933,6 +945,64 @@ class ShapeConvSAE(nn.Module):
             log.warning("amp_min_relative requested but no response scale was measured (fit without a val loader)")
             return threshold
         return threshold * torch.as_tensor(self.atom_response_std, device=self.device).view(-1, 1)
+
+    @torch.no_grad()
+    def calibrate_amp_min(self, dataloader: DataLoader, false_alarms_per_channel_minute: float, sfreq: float) -> None:
+        """Set per-atom extraction thresholds so that background activations reach a target rate.
+
+        For every atom, the NMS peaks of the code on the loader's rows (taken as
+        background, for example event-free synthetic rows or windows of negative
+        training subjects) are collected, and the threshold is placed so that at
+        most ``false_alarms_per_channel_minute`` peaks per channel-minute exceed it.
+        An atom with fewer peaks than the allowance keeps a threshold at its
+        smallest peak. The thresholds are stored in the checkpoint and take
+        precedence over ``amp_min``. On EEG the loader's rows are development-cohort
+        background, not verified event-free intervals, so the rate is an activation
+        rate in that cohort, not a clinical false-alarm rate.
+
+        Parameters
+        ----------
+        dataloader : DataLoader
+            Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)``; ``y`` is ignored.
+        false_alarms_per_channel_minute : float
+            Target rate of surviving background activations per atom.
+        sfreq : float
+            Sampling rate of the windows, to convert samples to minutes.
+        """
+        peaks: list[list[torch.Tensor]] = [[] for _ in range(self.spec.n_atoms)]
+        minutes = 0.0
+        for x, _ in tqdm(dataloader, desc="ShapeConv SAE threshold calibration"):
+            minutes += x.shape[0] * x.shape[1] * x.shape[2] / sfreq / 60.0
+            for _, code, _ in self._row_chunks(x):
+                magnitude = code.abs()
+                for atom in range(self.spec.n_atoms):
+                    values = magnitude[:, atom][magnitude[:, atom] > 0]
+                    peaks[atom].append(values)
+        allowed = int(false_alarms_per_channel_minute * minutes)
+        thresholds = torch.zeros(self.spec.n_atoms, device=self.device)
+        for atom in range(self.spec.n_atoms):
+            values = torch.cat(peaks[atom]) if peaks[atom] else torch.zeros(0, device=self.device)
+            if values.numel() == 0:
+                thresholds[atom] = _EPS
+            elif values.numel() <= allowed:
+                thresholds[atom] = max(float(values.min()) - _EPS, _EPS)
+            else:
+                thresholds[atom] = torch.topk(values, allowed + 1).values[-1]
+        self.amp_min_atom.copy_(thresholds)
+        self.fit_meta = {**self.fit_meta, "amp_min_calibration": {
+            "false_alarms_per_channel_minute": float(false_alarms_per_channel_minute),
+            "channel_minutes": float(minutes), "sfreq": float(sfreq),
+        }}
+        log.info(
+            f"Calibrated per-atom thresholds at {false_alarms_per_channel_minute} per channel-minute over "
+            f"{minutes:.1f} channel-minutes: median {float(thresholds.median()):.2f}, "
+            f"range {float(thresholds.min()):.2f} to {float(thresholds.max()):.2f}"
+        )
+
+    @property
+    def calibrated_thresholds(self) -> np.ndarray | None:
+        """Per-atom calibrated extraction thresholds ``(n_atoms,)``, or ``None`` when not calibrated."""
+        return self.amp_min_atom.cpu().numpy() if bool(self.amp_min_atom.any()) else None
 
     def _row_chunks(self, X: torch.Tensor):
         """Yield ``(start, code, rho)`` over chunks of the scaled (window, channel) rows of ``X``."""

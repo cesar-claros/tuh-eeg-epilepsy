@@ -450,6 +450,26 @@ def test_diff_ar_whitens_a_coloured_background() -> None:
         assert torch.equal(reloaded.ar_coef, model.ar_coef) and torch.equal(reloaded(x), model(x))
 
 
+def test_calibrated_thresholds_bound_background_rate() -> None:
+    loader, x = _tiny_loader(seed=21)
+    model = _tiny_model(seed=21)
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    background, xb = _tiny_loader(seed=22)
+    model.calibrate_amp_min(background, false_alarms_per_channel_minute=6.0, sfreq=256.0)
+    thresholds = model.calibrated_thresholds
+    assert thresholds is not None and thresholds.shape == (4,) and (thresholds > 0).all()
+    minutes = 8 * 2 * 256 / 256.0 / 60.0
+    counts = model(xb)[:, :4].sum(0)
+    assert bool((counts <= int(6.0 * minutes)).all())
+    assert torch.allclose(model._event_threshold().flatten(), torch.as_tensor(thresholds))
+    with tempfile.TemporaryDirectory() as tmp:
+        model.save_artifacts(Path(tmp))
+        reloaded = ShapeConvSAE(spec=model.spec, device="cpu", pretrained=Path(tmp) / CHECKPOINT_NAME)
+        assert torch.equal(reloaded.amp_min_atom, model.amp_min_atom)
+        assert reloaded.fit_meta["amp_min_calibration"]["false_alarms_per_channel_minute"] == 6.0
+        assert (Path(tmp) / "sae_amp_min_atom.npy").exists()
+
+
 def test_diversity_sign_and_shift_aware() -> None:
     model = ShapeConvSAE(spec=AtomSpec(n_atoms=2, atom_len=16), device="cpu")
     # Support on the first 10 samples only, zero-mean there, so a shift by 3 is an exact linear shift.
