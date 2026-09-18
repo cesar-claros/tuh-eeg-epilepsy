@@ -7,9 +7,11 @@
 #* the thread count, runs the unit invariants once, then runs the synthetic stage 7
 #* on three UNEXAMINED seed triplets (--seed s uses s, s+1, s+2 for train / val /
 #* test) with pre-emphasis 'diff' under --strict and 'none' on the same draws as a
-#* control, and once with the deployment geometry (K=64, L=80). A strict failure is
-#* recorded in $OUT_ROOT/failures.txt and the loop continues; it is evidence about
-#* reliability, not permission to lower a tolerance.
+#* control, and once with the deployment geometry (K=64, L=80). The strict gate is
+#* event precision and recall > 0.9 (decision of 2026-09-18; template correlation and
+#* window AUROCs are reported diagnostics). A strict failure is recorded in
+#* $OUT_ROOT/failures.txt and the loop continues; it is evidence about reliability,
+#* not permission to lower a tolerance.
 #*
 #* Run inside the HPC container, from the code/ repo root:
 #*   bash run_sae_phase1.sh
@@ -74,7 +76,7 @@ for log in "$OUT_ROOT"/*/stdout.log; do
   name=$(basename "$(dirname "$log")")
   {
     echo "== $name"
-    grep -E "deterministic failures|recovery below tolerance|template recovered|count AUROC|peak \|a\| AUROC" "$log" || true
+    grep -E "deterministic failures|gate below tolerance|template \|xcorr\||count AUROC|peak \|a\| AUROC" "$log" || true
     grep -E "atom / offset / sign|event precision|event recall|recall_isolated|recall_close|timing_error|false_alarms|event reconstruction" "$log" || true
     grep "thresh/response" "$log" | tail -1 || true
   } >> "$summary"

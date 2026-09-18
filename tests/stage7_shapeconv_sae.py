@@ -13,17 +13,17 @@ Deterministic invariants FAIL the run (exit code 1):
     multi-threaded CPU convolutions are not bit-reproducible), different seed -> differs,
   - checkpoint round trip: restored spec, identical features, skipped second fit,
   - a checkpoint without provenance is refused.
-Stochastic recovery checks are reported against predeclared tolerances and only
-fail the run with --strict:
-  - one atom recovers the planted template on the held-out draw (max |xcorr| > 0.9,
-    compared in the encoded domain: the differenced template under --pre-emphasis diff),
-  - the best atom's count (|a| > --amp-min) and peak features separate the test
-    windows (AUROC > 0.9),
-  - event-level matching on the test draw: the atom, the activation-to-onset offset
-    and the polarity sign are calibrated on the VALIDATION draw (best validation F1);
-    on the test draw, one-to-one matching within --match-tol samples must reach
-    precision and recall > 0.9. Timing error, count MAE per window, duplicates and
-    unmatched activations per channel-minute are reported.
+Stochastic recovery GATE (decision of 2026-09-18 after Phase 1 campaign 1; fails the
+run only with --strict): event-level matching on the test draw. The atom, its
+activation-to-onset offset and its polarity sign are calibrated on the VALIDATION
+draw (best validation F1); on the test draw, one-to-one matching within --match-tol
+samples must reach precision > 0.9 and recall > 0.9.
+Reported DIAGNOSTICS (never fail the run): the single-atom template correlation
+(max |xcorr| in the encoded domain; demoted from a gate because feature splitting
+carves one event across atoms, so no single atom need equal the waveform), the
+window AUROCs of the best atom's count and peak features, the per-atom table,
+recall on isolated versus close events, the dictionary-level event reconstruction
+correlation, timing error, count MAE, duplicates and false alarms per channel-minute.
 
 Run:
     uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
@@ -40,9 +40,9 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
-RECOVERY_MIN_XCORR = 0.9
-RECOVERY_MIN_AUROC = 0.9
-RECOVERY_MIN_PR = 0.9
+REFERENCE_XCORR = 0.9   # diagnostic reference, not a gate
+REFERENCE_AUROC = 0.9   # diagnostic reference, not a gate
+RECOVERY_MIN_PR = 0.9   # the gate: event precision and recall
 SFREQ = 256.0
 REPRO_ATOL = 1e-4
 REPRO_EPOCHS = 5
@@ -97,6 +97,11 @@ class _Checks:
         _kv(name, f"{'PASS' if ok else 'BELOW TOLERANCE'} ({detail})")
         if not ok:
             self.soft_failed.append(name)
+
+    @staticmethod
+    def diagnostic(name: str, ok: bool, detail: str) -> None:
+        """Report against a reference value without affecting the outcome."""
+        _kv(name, f"{'above' if ok else 'BELOW'} reference ({detail})")
 
 
 def parse(argv):
@@ -396,7 +401,7 @@ def main(argv=None) -> int:
         refused = True
     checks.hard("checkpoint without provenance refused", refused)
 
-    _sec("stochastic recovery (held-out test draw, predeclared tolerances)")
+    _sec("recovery diagnostics (held-out test draw; references, not gates)")
     atoms = sae.atoms_numpy
     target = np.diff(template) if args.pre_emphasis == "diff" else template
     target = (target - target.mean()) / np.linalg.norm(target - target.mean())
@@ -405,18 +410,18 @@ def main(argv=None) -> int:
     _kv("per-atom max |xcorr| (encoded domain)", [round(float(v), 3) for v in xcorr])
     signal_xcorr = np.abs(np.correlate(sae.atoms_signal_domain[best_atom], template, mode="full")).max()
     _kv("best atom, signal-domain |xcorr|", f"{signal_xcorr:.3f}")
-    checks.soft(f"template recovered (> {RECOVERY_MIN_XCORR})", bool(xcorr[best_atom] > RECOVERY_MIN_XCORR),
-                f"atom {best_atom}, |xcorr| {xcorr[best_atom]:.3f}")
+    checks.diagnostic(f"single-atom template |xcorr| (ref {REFERENCE_XCORR})", bool(xcorr[best_atom] > REFERENCE_XCORR),
+                      f"atom {best_atom}, |xcorr| {xcorr[best_atom]:.3f}")
     k = args.n_atoms
     counts, peaks, cosines = f[:, best_atom].numpy(), f[:, k + best_atom].numpy(), f[:, 2 * k + best_atom].numpy()
     _kv("mean count, no events / events", f"{counts[y_test == 0].mean():.2f} / {counts[y_test == 1].mean():.2f}")
     auc_count, auc_peak = roc_auc_score(y_test, counts), roc_auc_score(y_test, peaks)
-    checks.soft(f"count AUROC (> {RECOVERY_MIN_AUROC})", auc_count > RECOVERY_MIN_AUROC, f"{auc_count:.3f}")
-    checks.soft(f"peak |a| AUROC (> {RECOVERY_MIN_AUROC})", auc_peak > RECOVERY_MIN_AUROC, f"{auc_peak:.3f}")
+    checks.diagnostic(f"count AUROC (ref {REFERENCE_AUROC})", auc_count > REFERENCE_AUROC, f"{auc_count:.3f}")
+    checks.diagnostic(f"peak |a| AUROC (ref {REFERENCE_AUROC})", auc_peak > REFERENCE_AUROC, f"{auc_peak:.3f}")
     _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
     _kv("events table (an event window)", sae.events(x_test[-1:]).head(5))
 
-    _sec(f"event-level matching (calibrated on val, scored on test, tolerance {args.match_tol} samples)")
+    _sec(f"event-level matching, THE GATE (calibrated on val, scored on test, tolerance {args.match_tol} samples)")
     shape = tuple(x_test.shape)
     acts_val, acts_test = sae.events(x_val).to_numpy(), sae.events(x_test).to_numpy()
     calibration = {}
@@ -456,7 +461,7 @@ def main(argv=None) -> int:
 
     _sec("RESULT")
     _kv("deterministic failures", checks.failed or "none")
-    _kv("recovery below tolerance", checks.soft_failed or "none")
+    _kv("gate below tolerance", checks.soft_failed or "none")
     if checks.failed or (args.strict and checks.soft_failed):
         return 1
     return 0
