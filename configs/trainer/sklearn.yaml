@@ -12,3 +12,9 @@ dump_predictions_dir: null
 # Filename stem for the dumps; the same-windows launcher sets it to w<ws>_s<seed>_hydra_full so the
 # plotter parses it as the 'hydra' variant at that window/seed.
 dump_tag: hydra
+# Inner model selection of the classifier (e.g. LogisticRegressionCV cv=5): true replaces the
+# integer cv by subject-grouped, class-stratified folds over the training windows, so windows of
+# one subject never sit on both sides of a fold. false keeps sklearn's sample-level folds (the
+# historical behaviour of all HYDRA runs so far; the outer subject split is separate either way).
+group_inner_cv: false
+inner_cv_seed: 0

@@ -15,9 +15,11 @@ from tqdm import tqdm
 root = rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (
     RankedLogger,
+    check_pretrained_provenance,
     dump_window_metadata,
     extras,
     get_metric_value,
+    split_provenance,
     task_wrapper,
     Trainer,
 )
@@ -32,31 +34,6 @@ log = RankedLogger(__name__, rank_zero_only=True)
 
 # The datamodule encodes the epilepsy target as 1 and no-epilepsy as 0.
 EPILEPSY_CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
-
-
-def _check_pretrained_subjects(feature_extractor: Any, datamodule: Any) -> None:
-    """Refuse a pretrained extractor whose training subjects overlap this run's test subjects.
-
-    A dictionary trained by ``src/train_sae.py`` records its training subjects.
-    Reusing it on a split drawn with another ``data.seed`` can put those subjects
-    in the test set, which leaks them into the features even though no label was
-    used. Runs with the same ``data.seed`` (and split ratios) pass this check.
-
-    Raises
-    ------
-    ValueError
-        If any test subject was used to train the extractor.
-    """
-    trained_on = set(getattr(feature_extractor, "train_subjects", []) or [])
-    test_df = getattr(datamodule, "test_df", None)
-    if not trained_on or test_df is None or not len(test_df):
-        return
-    overlap = sorted(trained_on & set(test_df["subject"].unique().tolist()))
-    if overlap:
-        raise ValueError(
-            f"{len(overlap)} test subjects were used to train the pretrained feature extractor "
-            f"(e.g. {overlap[:5]}); rerun with the data.seed of the train_sae run"
-        )
 
 
 def _write_performance_csv(cfg: DictConfig, scores_by_split: dict) -> None:
@@ -142,7 +119,7 @@ def _run_seed_sweep(
     rows: list[dict[str, float]] = []
     for seed in tqdm(seeds, desc="HYDRA feature seed sweep"):
         feature_extractor = hydra.utils.instantiate(cfg.feature, random_state=seed)
-        _check_pretrained_subjects(feature_extractor, datamodule)
+        check_pretrained_provenance(feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val)
         scaler = hydra.utils.instantiate(cfg.scaler)
         model = hydra.utils.instantiate(cfg.model)
 
@@ -153,6 +130,7 @@ def _run_seed_sweep(
             datamodule=datamodule,
             output_path=cfg.paths.output_dir,
             save=False,
+            provenance=split_provenance(datamodule, cfg.data),
         )
         test_scores = trainer.test(
             model=model,
@@ -439,7 +417,9 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
-    _check_pretrained_subjects(feature_extractor, datamodule)
+    # A pretrained learned extractor must not have seen this run's held-out subjects
+    # and must have been trained on the same signal (montage, rate, filters).
+    check_pretrained_provenance(feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val)
 
     log.info(f"Instantiating sparse scaler <{cfg.scaler._target_}>")  # noqa: G004
     sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.scaler)
@@ -463,6 +443,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             scaler=sparse_scaler,
             datamodule=datamodule,
             output_path=cfg.paths.output_dir,
+            provenance=split_provenance(datamodule, cfg.data),
         )
 
     if cfg.get("test"):

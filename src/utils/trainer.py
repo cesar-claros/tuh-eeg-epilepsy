@@ -7,6 +7,7 @@ from loguru import logger as log
 from pathlib import Path
 from pytorch_lightning import LightningDataModule
 from sklearn import metrics as skm
+from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 from tqdm import tqdm
 
@@ -118,9 +119,18 @@ class Trainer:
     dump_tag : str, default="hydra"
         Filename stem for the dumps; the launcher sets it to ``w<ws>_s<seed>_hydra_full`` so the
         plotter parses it as the 'hydra' variant at that window / seed.
+    group_inner_cv : bool, default=False
+        If True, replace an integer ``cv`` of the classifier (e.g. ``LogisticRegressionCV(cv=5)``)
+        by subject-grouped, class-stratified folds over the training windows, so windows of one
+        subject never sit on both sides of an inner model-selection fold. False keeps sklearn's
+        default sample-level folds (the historical behaviour, which leaks subjects across inner
+        folds; the outer subject split is unaffected either way).
+    inner_cv_seed : int, default=0
+        Shuffle seed of the grouped inner folds.
     """
     def __init__(self, merge_train_val: bool = True, calibrate_threshold: bool = False,
-                 dump_predictions_dir: str | None = None, dump_tag: str = "hydra"):
+                 dump_predictions_dir: str | None = None, dump_tag: str = "hydra",
+                 group_inner_cv: bool = False, inner_cv_seed: int = 0):
         self.feature_extractor = None
         self.trained_pipeline = None
         self.merge_train_val = merge_train_val
@@ -128,6 +138,21 @@ class Trainer:
         self.subject_threshold = 0.0
         self.dump_predictions_dir = dump_predictions_dir
         self.dump_tag = dump_tag
+        self.group_inner_cv = group_inner_cv
+        self.inner_cv_seed = inner_cv_seed
+
+    def _set_grouped_inner_cv(self, model, y, subjects) -> None:
+        """Replace an integer ``cv`` on ``model`` by precomputed subject-grouped stratified folds."""
+        n_splits = getattr(model, "cv", None)
+        if not isinstance(n_splits, int) or n_splits < 2:
+            return
+        y = np.asarray(y).astype(int)
+        groups = np.asarray(subjects)
+        n_splits = min(n_splits, len(np.unique(groups)))
+        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=self.inner_cv_seed)
+        model.set_params(cv=list(splitter.split(np.zeros(len(y)), y, groups)))
+        log.info(f"Inner model-selection folds: {n_splits} subject-grouped stratified folds over "
+                 f"{len(np.unique(groups))} training subjects")
 
     def _get_scores(self, pipeline, data, metadata_df, split_name, subject_threshold=0.0, dump=False):
         log.info(f"Calculating scores for {split_name} data")
@@ -210,6 +235,7 @@ class Trainer:
             datamodule: LightningDataModule,
             output_path: str,
             save: bool = True,
+            provenance: dict | None = None,
         ):
         """Extract features, fit the scaler+classifier pipeline, and score on train.
 
@@ -229,6 +255,11 @@ class Trainer:
         save : bool, default=True
             If True, dump the pipeline, feature extractor, and scaler to disk. Set
             False for seed sweeps where the per-seed artifacts are not needed.
+        provenance : dict | None, default=None
+            Recorded by a learned feature extractor when it fits itself here
+            (training subjects, data settings, window fingerprint; see
+            ``src.utils.split_provenance``). Required when the extractor exposes
+            ``fit_unsupervised`` and is not already fitted.
 
         Returns
         -------
@@ -247,7 +278,7 @@ class Trainer:
         # are never read. A pretrained extractor (feature.pretrained) skips this.
         if hasattr(feature_extractor, "fit_unsupervised"):
             log.info("Fitting the feature extractor without labels on the training windows")
-            feature_extractor.fit_unsupervised(train_dataloader, val_dataloader)
+            feature_extractor.fit_unsupervised(train_dataloader, val_dataloader, provenance=provenance)
 
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
         val_data = self._extract_features(feature_extractor, val_dataloader, "val")
@@ -265,6 +296,8 @@ class Trainer:
             metadata_df = datamodule.train_df
 
         log.info("Starting classifier training!")
+        if self.group_inner_cv:
+            self._set_grouped_inner_cv(model, train_data["y"], metadata_df["subject"].to_numpy())
         pipeline = make_pipeline(
             scaler,
             model

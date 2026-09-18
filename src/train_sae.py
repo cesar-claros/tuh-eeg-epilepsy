@@ -23,7 +23,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 
 # The project root must be on sys.path before the `src` imports (same as train.py).
 from src.models.components.shapeconv_sae import CHECKPOINT_NAME  # noqa: E402
-from src.utils import RankedLogger, dump_window_metadata, extras, task_wrapper  # noqa: E402
+from src.utils import RankedLogger, dump_window_metadata, extras, split_provenance, task_wrapper  # noqa: E402
 
 if TYPE_CHECKING:
     from lightning import LightningDataModule
@@ -49,6 +49,8 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     ------
     TypeError
         If ``cfg.feature`` does not expose ``fit_unsupervised`` (e.g. HYDRA).
+    ValueError
+        If ``feature.pretrained`` is set: this entry point trains a new dictionary.
     """
     if cfg.get("seed"):
         lightning.seed_everything(cfg.seed, workers=True)
@@ -63,9 +65,12 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     feature_extractor = hydra.utils.instantiate(cfg.feature)
     if not hasattr(feature_extractor, "fit_unsupervised"):
         raise TypeError(f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae")
+    if getattr(feature_extractor, "fitted", False):
+        raise ValueError("train_sae.py trains a new dictionary; unset feature.pretrained")
 
-    feature_extractor.fit_unsupervised(datamodule.train_dataloader(), datamodule.val_dataloader())
-    feature_extractor.train_subjects = sorted(datamodule.train_df["subject"].unique().tolist())
+    feature_extractor.fit_unsupervised(
+        datamodule.train_dataloader(), datamodule.val_dataloader(), provenance=split_provenance(datamodule, cfg.data)
+    )
     feature_extractor.save_artifacts(output_dir)
     log.info(  # noqa: G004
         "Reuse with: python src/train.py feature=shapeconv_sae "

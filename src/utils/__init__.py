@@ -1,5 +1,12 @@
 from src.utils.pylogger import RankedLogger
 from src.utils.rich_utils import enforce_tags, print_config_tree
-from src.utils.utils import dump_window_metadata, extras, get_metric_value, task_wrapper
+from src.utils.utils import (
+    check_pretrained_provenance,
+    dump_window_metadata,
+    extras,
+    get_metric_value,
+    split_provenance,
+    task_wrapper,
+)
 from src.utils.trainer import Trainer
 

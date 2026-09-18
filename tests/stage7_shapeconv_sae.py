@@ -1,23 +1,25 @@
 """Stage 7 - ShapeConv sparse autoencoder (learned shapelet dictionary).
 
-INPUT  : window batches X, float32 tensor (batch, channels, timepoints), served by
-         a DataLoader of synthetic EEG-like rows: AR(1) background plus a planted
+INPUT  : three INDEPENDENT synthetic draws (train / val / test) of window batches X,
+         float32 (batch, channels, timepoints): AR(1) background plus a planted
          spike-and-wave template of RANDOM POLARITY at random positions in half of
          the windows (signed codes must cover both polarities with one atom).
-OUTPUT : a feature matrix F, float32 tensor (batch, 3 * n_atoms): per-atom event
-         counts summed over channels, per-atom peak |a|, per-atom best |cosine|.
+OUTPUT : a feature matrix F, float32 tensor (batch, 3 * n_atoms): per-atom
+         channel-activation counts, per-atom peak |coefficient|, per-atom max |cosine|.
 
-This stage needs no corpus. It also:
-  - fits the dictionary without labels (k-means init, signed sparse reconstruction
-    in the chosen --mode: shrink = learnable soft threshold + L1, topk = TopK),
-  - checks that one atom recovers the planted template (max |cross-correlation|
-    over lags) and that its features separate windows with / without events,
-  - confirms the feature dimension 3 * n_atoms, the seed behaviour of the init,
-    and the checkpoint round trip (save_artifacts -> pretrained=...).
+Deterministic invariants FAIL the run (exit code 1):
+  - feature dimension 3 * n_atoms and equality across chunk sizes,
+  - same seed -> identical fitted atoms (two full fits), different seed -> differs,
+  - checkpoint round trip: restored spec, identical features, skipped second fit,
+  - a checkpoint without provenance is refused.
+Stochastic recovery checks are reported against predeclared tolerances and only
+fail the run with --strict:
+  - one atom recovers the planted template on the held-out draw (max |xcorr| > 0.9),
+  - the best atom's count and peak features separate the test windows (AUROC > 0.9).
 
 Run:
     uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
-    uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3
+    uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3 --strict
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
+RECOVERY_MIN_XCORR = 0.9
+RECOVERY_MIN_AUROC = 0.9
+
 
 def _banner(t: str) -> None:
     print("\n" + "=" * 88 + "\n" + t + "\n" + "=" * 88)
@@ -39,7 +44,7 @@ def _sec(t: str) -> None:
 
 
 def _kv(k: str, v) -> None:
-    print(f"  {k:<28}: {v}")
+    print(f"  {k:<32}: {v}")
 
 
 def _desc_tensor(name: str, t, n: int = 6) -> None:
@@ -63,9 +68,27 @@ def _need(import_fn, pkgs: str):
         return None
 
 
+class _Checks:
+    """Collects named pass/fail results; deterministic failures fail the run."""
+
+    def __init__(self) -> None:
+        self.failed: list[str] = []
+        self.soft_failed: list[str] = []
+
+    def hard(self, name: str, ok: bool) -> None:
+        _kv(name, "PASS" if ok else "FAIL")
+        if not ok:
+            self.failed.append(name)
+
+    def soft(self, name: str, ok: bool, detail: str) -> None:
+        _kv(name, f"{'PASS' if ok else 'BELOW TOLERANCE'} ({detail})")
+        if not ok:
+            self.soft_failed.append(name)
+
+
 def parse(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--n-windows", type=int, default=64)
+    p.add_argument("--n-windows", type=int, default=64, help="windows per draw")
     p.add_argument("--channels", type=int, default=4)
     p.add_argument("--timepoints", type=int, default=2560, help="10 s at 256 Hz")
     p.add_argument("--template-len", type=int, default=64)
@@ -77,11 +100,12 @@ def parse(argv):
     p.add_argument("--thresh", type=float, default=3.0, help="initial soft threshold (shrink)")
     p.add_argument("--lam", type=float, default=0.5, help="L1 weight (shrink)")
     p.add_argument("--topk", type=int, default=3, help="code entries per crop (topk)")
-    p.add_argument("--amp-min", type=float, default=0.0, help="extraction: count events with |a| > amp_min")
+    p.add_argument("--amp-min", type=float, default=0.0, help="extraction: count activations with |a| > amp_min")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--strict", action="store_true", help="also fail on the stochastic recovery checks")
     p.add_argument("--out-dir", default="tests/outputs/stage7", help="where the checkpoint round trip writes")
     return p.parse_args(argv)
 
@@ -94,9 +118,9 @@ def _spike_wave(np, length: int):
     return template / np.linalg.norm(template)
 
 
-def _synthetic(np, args):
-    """AR(1) background rows with the template planted in the second half of the windows."""
-    rng = np.random.default_rng(args.seed)
+def _synthetic(np, args, seed: int):
+    """One independent draw: AR(1) background rows, template of random polarity in half the windows."""
+    rng = np.random.default_rng(seed)
     n, c, t = args.n_windows, args.channels, args.timepoints
     noise = rng.standard_normal((n, c, t)).astype(np.float32)
     x = np.empty_like(noise)
@@ -134,16 +158,23 @@ def main(argv=None) -> int:
     if mods is None:
         return 1
     np, torch, roc_auc_score, DataLoader, TensorDataset, AtomSpec, ShapeConvSAE, TrainSpec, CHECKPOINT_NAME = mods
+    checks = _Checks()
 
-    x_np, y_np, template = _synthetic(np, args)
-    x, y = torch.from_numpy(x_np), torch.from_numpy(y_np)
-    loader = DataLoader(TensorDataset(x, y), batch_size=args.batch, shuffle=False)
+    def _loader(seed: int):
+        x_np, y_np, template = _synthetic(np, args, seed)
+        x, y = torch.from_numpy(x_np), torch.from_numpy(y_np)
+        return DataLoader(TensorDataset(x, y), batch_size=args.batch, shuffle=False), x, y_np, template
 
-    _sec("INPUT")
-    _desc_tensor("X (window batch)", x)
-    _kv("windows with events", int(y.sum()))
+    train_loader, x_train, _, template = _loader(args.seed)
+    val_loader, _, _, _ = _loader(args.seed + 1)
+    _, x_test, y_test, _ = _loader(args.seed + 2)
+
+    _sec("INPUT (train draw; val and test are independent draws)")
+    _desc_tensor("X (window batch)", x_train)
+    _kv("windows with events per draw", int(args.n_windows - args.n_windows // 2))
     _kv("events per channel", args.events_per_channel)
-    _kv("template length", args.template_len)
+    _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
+    _kv("mode", args.mode)
 
     spec = AtomSpec(
         n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, thresh=args.thresh,
@@ -153,65 +184,92 @@ def main(argv=None) -> int:
         epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
         crop_batch=512, n_init_samples=2000,
     )
-    _kv("mode", args.mode)
-    sae = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu")
-    init_atoms = sae.atoms_numpy.copy()
-    sae.fit_unsupervised(loader, val_dataloader=loader)
+    provenance = {"train_subjects": ["synthetic-train"], "data": {"signal_mode": "synthetic"}}
+
+    def _fit(seed: int):
+        model = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=seed, device="cpu")
+        model.fit_unsupervised(train_loader, val_dataloader=val_loader, provenance=provenance)
+        return model
+
+    sae = _fit(args.seed)
 
     _sec("training history")
     for record in sae.history:
         _kv(
             f"epoch {int(record['epoch'])}",
             f"residual {record['residual_frac']:.1%} (val {record['val_residual_frac']:.1%}) "
-            f"activations/crop {record['active_per_crop']:.2f} dead={int(record['n_dead'])}",
+            f"activations/crop {record['active_per_crop']:.2f} objective {record['objective']:.4f} "
+            f"dead={int(record['n_dead'])} reseeded={int(record['n_reseeded'])}",
         )
     if args.mode == "shrink":
         _kv("learned thresholds", [round(float(v), 2) for v in sae.thresholds])
 
-    _sec("template recovery (max |cross-correlation| over lags; sign-free, codes are signed)")
-    atoms = sae.atoms_numpy
-    xcorr = np.array([np.abs(np.correlate(a, template, mode="full")).max() for a in atoms])
-    best_atom = int(xcorr.argmax())
-    _kv("per-atom max |xcorr|", [round(float(v), 3) for v in xcorr])
-    _kv("best atom / |xcorr|", f"{best_atom} / {xcorr[best_atom]:.3f}")
-    _kv("recovered (> 0.9)", bool(xcorr[best_atom] > 0.9))
-
     _banner("OUTPUT")
-    f = sae(x)
-    _desc_tensor("F (SAE features)", f)
-    _kv("3 * n_atoms", 3 * args.n_atoms)
-    _kv("F.shape[1] match", f.shape[1] == 3 * args.n_atoms)
+    f = sae(x_test)
+    _desc_tensor("F (SAE features, test draw)", f)
 
-    _sec("best atom separates windows with / without events")
-    k = args.n_atoms
-    counts, peaks, cosines = f[:, best_atom].numpy(), f[:, k + best_atom].numpy(), f[:, 2 * k + best_atom].numpy()
-    _kv("mean count, no events", f"{counts[y_np == 0].mean():.2f}")
-    _kv("mean count, events", f"{counts[y_np == 1].mean():.2f}")
-    _kv("count AUROC", f"{roc_auc_score(y_np, counts):.3f}")
-    _kv("peak |a| AUROC", f"{roc_auc_score(y_np, peaks):.3f}")
-    _kv("best |cosine| AUROC", f"{roc_auc_score(y_np, cosines):.3f}")
-
-    _sec("seed behaviour (initial atoms, before fitting)")
-    same = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu")
-    diff = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed + 1, device="cpu")
-    _kv("same seed -> identical", bool(np.array_equal(init_atoms, same.atoms_numpy)))
-    _kv("different seed -> differs", not np.array_equal(init_atoms, diff.atoms_numpy))
+    _sec("deterministic invariants")
+    checks.hard("F.shape[1] == 3 * n_atoms", f.shape[1] == 3 * args.n_atoms)
+    sae.chunk_rows = 1
+    checks.hard("chunk_rows=1 gives the same F", bool(torch.allclose(sae(x_test), f, atol=1e-5)))
+    sae.chunk_rows = 16
+    same = _fit(args.seed)
+    checks.hard("same seed -> identical fitted atoms", bool(np.array_equal(sae.atoms_numpy, same.atoms_numpy)))
+    seed_a = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu").atoms_numpy
+    seed_b = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed + 1, device="cpu").atoms_numpy
+    checks.hard("different seed -> different initial atoms", not np.array_equal(seed_a, seed_b))
 
     _sec("checkpoint round trip (save_artifacts -> pretrained=...)")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    sae.train_subjects = ["synthetic"]
     sae.save_artifacts(out_dir)
-    reloaded = ShapeConvSAE(spec=spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
-    _kv("fitted after load", reloaded.fitted)
-    reloaded.fit_unsupervised(loader)
-    _kv("fit skipped (epochs kept)", len(reloaded.history) == len(sae.history))
-    _kv("identical features", bool(torch.equal(reloaded(x), f)))
-    _kv("train_subjects", reloaded.train_subjects)
+    other_spec = AtomSpec(n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, rho_min=0.35, amp_min=2.0)
+    reloaded = ShapeConvSAE(spec=other_spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
+    checks.hard("saved spec restored on load", reloaded.spec == sae.spec)
+    checks.hard("fitted after load", reloaded.fitted)
+    checks.hard("provenance restored", reloaded.train_subjects == ["synthetic-train"])
+    reloaded.fit_unsupervised(train_loader, provenance={"train_subjects": ["other"]})
+    checks.hard("second fit skipped, provenance kept", reloaded.train_subjects == ["synthetic-train"])
+    checks.hard("identical features after reload", bool(torch.equal(reloaded(x_test), f)))
+    overridden = ShapeConvSAE(
+        spec=other_spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME, override_spec=True
+    )
+    checks.hard("override_spec keeps config gate", overridden.spec.rho_min == 0.35)
+    checkpoint = torch.load(out_dir / CHECKPOINT_NAME, weights_only=True)
+    checkpoint["provenance"] = {}
+    torch.save(checkpoint, out_dir / "no_provenance.pt")
+    try:
+        ShapeConvSAE(spec=spec, train_spec=train_spec, device="cpu", pretrained=out_dir / "no_provenance.pt")
+        refused = False
+    except ValueError:
+        refused = True
+    checks.hard("checkpoint without provenance refused", refused)
+
+    _sec("stochastic recovery (held-out test draw, predeclared tolerances)")
+    atoms = sae.atoms_numpy
+    xcorr = np.array([np.abs(np.correlate(a, template, mode="full")).max() for a in atoms])
+    best_atom = int(xcorr.argmax())
+    _kv("per-atom max |xcorr|", [round(float(v), 3) for v in xcorr])
+    checks.soft(f"template recovered (> {RECOVERY_MIN_XCORR})", bool(xcorr[best_atom] > RECOVERY_MIN_XCORR),
+                f"atom {best_atom}, |xcorr| {xcorr[best_atom]:.3f}")
+    k = args.n_atoms
+    counts, peaks, cosines = f[:, best_atom].numpy(), f[:, k + best_atom].numpy(), f[:, 2 * k + best_atom].numpy()
+    _kv("mean count, no events / events", f"{counts[y_test == 0].mean():.2f} / {counts[y_test == 1].mean():.2f}")
+    auc_count, auc_peak = roc_auc_score(y_test, counts), roc_auc_score(y_test, peaks)
+    checks.soft(f"count AUROC (> {RECOVERY_MIN_AUROC})", auc_count > RECOVERY_MIN_AUROC, f"{auc_count:.3f}")
+    checks.soft(f"peak |a| AUROC (> {RECOVERY_MIN_AUROC})", auc_peak > RECOVERY_MIN_AUROC, f"{auc_peak:.3f}")
+    _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
+    _kv("events table (first rows)", sae.events(x_test[:2]).head(5))
 
     _sec("-> flows to Stage 5")
-    print("  # Event counts are sparse non-negative, like HYDRA counts; the")
-    print("  # _SparseScaler standardises them before the linear classifier.")
+    print("  # Counts are sparse non-negative, like HYDRA counts; the _SparseScaler")
+    print("  # standardises them (and the peak / cosine blocks) before the classifier.")
+
+    _sec("RESULT")
+    _kv("deterministic failures", checks.failed or "none")
+    _kv("recovery below tolerance", checks.soft_failed or "none")
+    if checks.failed or (args.strict and checks.soft_failed):
+        return 1
     return 0
 
 

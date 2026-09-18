@@ -14,7 +14,8 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 4 | `stage4_hydra_transform.py` | `HydraTransformer` → feature matrix `F`; dimension formula + seed determinism | no (synthetic) |
 | 5 | `stage5_sparse_scaler.py` | `_SparseScaler` → scaled `Fs`; fitted mu/sigma/epsilon, mask effect | no (synthetic) |
 | 6 | `stage6_classifier_scoring.py` | `make_pipeline(scaler, clf)` fit → decision scores, window- and subject-level accuracy | no (synthetic) |
-| 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on synthetic rows with a planted spike-and-wave of random polarity → one atom recovers the template (`--mode shrink` or `topk`); `forward` → features `F[b, 3 * n_atoms]` (count, peak abs amplitude, best abs cosine) that separate the windows; `save_artifacts` → `pretrained=` round trip (writes to `tests/outputs/stage7/`) | no (synthetic) |
+| 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on an independent synthetic train draw (spike-and-wave of random polarity), monitored on a val draw, scored on a test draw; deterministic invariants (dimension, chunk invariance, seed reproducibility of two fits, checkpoint round trip, refusal without provenance) FAIL the run; recovery (template `\|xcorr\|`, count / peak AUROC) has predeclared tolerances, enforced with `--strict` | no (synthetic) |
+| - | `test_shapeconv_sae.py` | pass/fail unit invariants (pytest or plain python): projection, adjoint identity, analytic shrink response, NMS ties, checkpoint round trip and refusals, chunk invariance, provenance guard, diversity sign/shift invariance | no |
 
 ## Data flow
 
@@ -40,7 +41,8 @@ they say so and exit cleanly.
 uv run python tests/stage4_hydra_transform.py
 uv run python tests/stage5_sparse_scaler.py
 uv run python tests/stage6_classifier_scoring.py
-uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
+uv run python tests/test_shapeconv_sae.py
+uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
 uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3
 
 # data-dependent stages (where the corpus is present):
@@ -71,5 +73,5 @@ yet declared in `pyproject.toml`** and may need adding before these run:
 `aeon`, `braindecode`, `mne`, `mne-icalabel`, `scikit-learn`, `joblib`, `pandas`.
 The scripts detect missing imports and print which packages are needed.
 
-These are diagnostic scripts, not pass/fail unit tests; they are named
-`stageN_*.py` (not `test_*.py`) so pytest will not collect them.
+The `stageN_*.py` scripts are diagnostic (stage 7 also fails on broken
+invariants); `test_shapeconv_sae.py` is a pass/fail unit test that pytest collects.

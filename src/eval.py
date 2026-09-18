@@ -13,6 +13,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (
     RankedLogger,
     Trainer,
+    check_pretrained_provenance,
     extras,
     task_wrapper,
 )
@@ -75,6 +76,11 @@ def evaluate(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "scaler": scaler,
         "trainer": trainer,
     }
+
+    # The saved feature extractor may be a learned dictionary: refuse it if its
+    # training subjects fall in this run's test split or its data settings differ.
+    datamodule.setup()
+    check_pretrained_provenance(feature_extractor, datamodule, cfg.data)
 
     log.info("Starting testing!")
     metric_dict = trainer.test(

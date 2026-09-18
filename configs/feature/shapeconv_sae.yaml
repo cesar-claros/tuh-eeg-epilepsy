@@ -26,17 +26,21 @@ train_spec:
                     # the curve is flat. With lazy_loading each pass re-reads the EDFs.
   lr: 0.003
   lam: 0.5          # L1 weight (shrink); raise until events/second look plausible
-  crop_len: 256     # training crop in samples; must be >= atom_len
-  crops_per_row: 16 # random crops per (window, channel) row per pass
+  crop_len: 256     # scored samples per training crop; must be >= atom_len
+  context_len: null # unscored context on each side of a crop (null = atom_len-1+atom_len//2, 0 = none)
+  crops_per_row: 16 # random crops per (window, channel) row per pass (in expectation)
   crop_batch: 1024  # crops per optimizer step
-  lambda_div: 0.0   # shift-aware diversity penalty (0 = off)
+  lambda_div: 0.0   # diversity penalty: mean max |cross-correlation| over lags between atoms (0 = off)
   n_init_samples: 20000
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
-# the dictionary is loaded and fit_unsupervised is skipped; spec.n_atoms / atom_len / mode
-# must match the checkpoint. Use the same data.seed as the train_sae run (train.py checks
-# that no test subject was used to train the dictionary).
+# the dictionary is loaded and fit_unsupervised is skipped. The checkpoint's AtomSpec is
+# restored (spec.n_atoms / atom_len / mode must match; thresh / topk / rho_min / amp_min are
+# taken from the checkpoint unless override_spec is true). train.py and eval.py refuse a
+# checkpoint whose training subjects fall in the held-out split or whose data settings
+# (signal_mode, target_sfreq, filter_freq, notch_freqs) differ from the run.
 pretrained: null
+override_spec: false
 # Device: cpu | cuda | cuda:N | auto. Extraction memory ~ chunk_rows * n_atoms * T
 # floats (16 rows of a 2-minute 256 Hz window with 64 atoms: about 0.5 GiB); lower
 # chunk_rows on small GPUs or with many atoms.
