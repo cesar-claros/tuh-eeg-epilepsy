@@ -14,7 +14,7 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 4 | `stage4_hydra_transform.py` | `HydraTransformer` → feature matrix `F`; dimension formula + seed determinism | no (synthetic) |
 | 5 | `stage5_sparse_scaler.py` | `_SparseScaler` → scaled `Fs`; fitted mu/sigma/epsilon, mask effect | no (synthetic) |
 | 6 | `stage6_classifier_scoring.py` | `make_pipeline(scaler, clf)` fit → decision scores, window- and subject-level accuracy | no (synthetic) |
-| 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on synthetic rows with a planted spike-and-wave → atoms recover the template; `forward` → features `F[b, 2 * n_atoms]` whose event count separates the windows; `save_artifacts` → `pretrained=` round trip (writes to `tests/outputs/stage7/`) | no (synthetic) |
+| 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on synthetic rows with a planted spike-and-wave of random polarity → one atom recovers the template (`--mode shrink` or `topk`); `forward` → features `F[b, 3 * n_atoms]` (count, peak abs amplitude, best abs cosine) that separate the windows; `save_artifacts` → `pretrained=` round trip (writes to `tests/outputs/stage7/`) | no (synthetic) |
 
 ## Data flow
 
@@ -41,6 +41,7 @@ uv run python tests/stage4_hydra_transform.py
 uv run python tests/stage5_sparse_scaler.py
 uv run python tests/stage6_classifier_scoring.py
 uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
+uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3
 
 # data-dependent stages (where the corpus is present):
 uv run python tests/stage1_metadata.py --limit 20

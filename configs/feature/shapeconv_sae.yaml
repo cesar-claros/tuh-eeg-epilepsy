@@ -1,36 +1,44 @@
 _target_: src.models.components.shapeconv_sae.ShapeConvSAE
-# Learned shapelet dictionary (ShapeConv encoder + tied decoder, Qu et al. ICLR 2024).
-# One dictionary is shared by all channels. The trainer fits it without labels on
-# the training windows (fit_unsupervised) before extracting features. Output per
-# window: n_atoms event counts (summed over channels) + n_atoms best-cosine values.
-# Writes sae_atoms.npy (n_atoms x atom_len) and sae_training.csv to the run dir.
+# Learned shapelet dictionary: ShapeConv encoder without the min-pool, signed sparse
+# code, tied conv_transpose1d decoder (documentation/shapeconv_sae_design.md). One
+# dictionary is shared by all channels. The trainer fits it without labels on the
+# training windows (fit_unsupervised) before extracting features, unless `pretrained`
+# is set. Output per window, three blocks of n_atoms: event counts (summed over
+# channels), peak |a|, best |cosine|. Writes sae_state.pt, sae_atoms.npy and
+# sae_training.csv to the run dir.
 spec:
   _target_: src.models.components.shapeconv_sae.AtomSpec
-  n_atoms: 256
-  atom_len: 128     # samples; 0.5 s at data.target_sfreq=256 (spike + start of slow wave)
-  rho_min: 0.5      # cosine gate: an atom fires only where the signal has its shape
-  amp_min: 0.0      # extra amplitude floor (robust-std units) for counted events
+  n_atoms: 64
+  atom_len: 80      # samples; 312 ms at data.target_sfreq=256 (spike / sharp wave + start of slow wave)
+  mode: shrink      # shrink: sign(z)*relu(|z|-theta_k), learnable theta_k + L1 (train_spec.lam)
+                    # topk : keep spec.topk largest |z| per crop in training; at extraction there is
+                    #        no budget, so set amp_min (or rho_min) or the counts are background
+  thresh: 3.0       # initial theta_k, robust-std units (shrink)
+  topk: 4           # nonzero code entries per 1 s crop (topk)
+  rho_min: 0.0      # optional cosine gate (the paper's norm term); 0 = off, the residual corrects
+                    # the energy bias instead (design note 3.2). Sweep {0, 0.2, 0.35} if curious.
+  amp_min: 0.0      # extraction: an NMS peak counts as an event when |a| > amp_min
 train_spec:
   _target_: src.models.components.shapeconv_sae.TrainSpec
   epochs: 30        # passes over the train dataloader; each pass draws fresh random crops, so
                     # updates = epochs * rows * crops_per_row / crop_batch. Check sae_training.csv
-                    # (loss_rec / val_loss_rec / n_dead) and stop where the curve is flat. With
-                    # lazy_loading each pass re-reads the EDFs; the default eager path is in RAM.
-  lr: 0.001
-  topk: 4           # nonzero code entries per 1 s crop; 1 = shift-invariant spherical k-means
+                    # (residual_frac / val_residual_frac / active_per_crop / n_dead) and stop where
+                    # the curve is flat. With lazy_loading each pass re-reads the EDFs.
+  lr: 0.003
+  lam: 0.5          # L1 weight (shrink); raise until events/second look plausible
   crop_len: 256     # training crop in samples; must be >= atom_len
   crops_per_row: 16 # random crops per (window, channel) row per pass
   crop_batch: 1024  # crops per optimizer step
-  lambda_div: 0.01  # shift-aware diversity penalty (0 disables)
+  lambda_div: 0.0   # shift-aware diversity penalty (0 = off)
   n_init_samples: 20000
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
-# the dictionary is loaded and fit_unsupervised is skipped; spec.n_atoms / atom_len must
-# match the checkpoint. Use the same data.seed as the train_sae run (train.py checks that
-# no test subject was used to train the dictionary).
+# the dictionary is loaded and fit_unsupervised is skipped; spec.n_atoms / atom_len / mode
+# must match the checkpoint. Use the same data.seed as the train_sae run (train.py checks
+# that no test subject was used to train the dictionary).
 pretrained: null
 # Device: cpu | cuda | cuda:N | auto. Extraction memory ~ chunk_rows * n_atoms * T
-# floats (16 rows of a 2-minute 256 Hz window with 256 atoms: about 2 GiB); lower
-# chunk_rows on small GPUs.
+# floats (16 rows of a 2-minute 256 Hz window with 64 atoms: about 0.5 GiB); lower
+# chunk_rows on small GPUs or with many atoms.
 device: auto
 chunk_rows: 16

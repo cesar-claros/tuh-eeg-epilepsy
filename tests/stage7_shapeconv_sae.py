@@ -2,18 +2,22 @@
 
 INPUT  : window batches X, float32 tensor (batch, channels, timepoints), served by
          a DataLoader of synthetic EEG-like rows: AR(1) background plus a planted
-         spike-and-wave template at random positions in half of the windows.
-OUTPUT : a feature matrix F, float32 tensor (batch, 2 * n_atoms): per-atom event
-         counts summed over channels, then the per-atom best cosine match.
+         spike-and-wave template of RANDOM POLARITY at random positions in half of
+         the windows (signed codes must cover both polarities with one atom).
+OUTPUT : a feature matrix F, float32 tensor (batch, 3 * n_atoms): per-atom event
+         counts summed over channels, per-atom peak |a|, per-atom best |cosine|.
 
 This stage needs no corpus. It also:
-  - fits the dictionary without labels (k-means init, TopK reconstruction),
-  - checks that one atom recovers the planted template (max cross-correlation
-    over lags) and that its event count separates windows with / without events,
-  - confirms the feature dimension 2 * n_atoms and the seed behaviour of the init.
+  - fits the dictionary without labels (k-means init, signed sparse reconstruction
+    in the chosen --mode: shrink = learnable soft threshold + L1, topk = TopK),
+  - checks that one atom recovers the planted template (max |cross-correlation|
+    over lags) and that its features separate windows with / without events,
+  - confirms the feature dimension 3 * n_atoms, the seed behaviour of the init,
+    and the checkpoint round trip (save_artifacts -> pretrained=...).
 
 Run:
     uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
+    uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3
 """
 
 from __future__ import annotations
@@ -69,9 +73,13 @@ def parse(argv):
     p.add_argument("--events-per-channel", type=int, default=3)
     p.add_argument("--amplitude", type=float, default=8.0, help="event peak in background-std units")
     p.add_argument("--n-atoms", type=int, default=8)
+    p.add_argument("--mode", choices=("shrink", "topk"), default="shrink")
+    p.add_argument("--thresh", type=float, default=3.0, help="initial soft threshold (shrink)")
+    p.add_argument("--lam", type=float, default=0.5, help="L1 weight (shrink)")
+    p.add_argument("--topk", type=int, default=3, help="code entries per crop (topk)")
+    p.add_argument("--amp-min", type=float, default=0.0, help="extraction: count events with |a| > amp_min")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=5e-3)
-    p.add_argument("--topk", type=int, default=3)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-dir", default="tests/outputs/stage7", help="where the checkpoint round trip writes")
@@ -103,7 +111,8 @@ def _synthetic(np, args):
     for w in np.flatnonzero(y):
         for ch in range(c):
             for start in rng.integers(0, t - args.template_len, size=args.events_per_channel):
-                x[w, ch, start:start + args.template_len] += scale * template
+                polarity = rng.choice([-1.0, 1.0])
+                x[w, ch, start:start + args.template_len] += polarity * scale * template
     return x, y, template
 
 
@@ -136,11 +145,15 @@ def main(argv=None) -> int:
     _kv("events per channel", args.events_per_channel)
     _kv("template length", args.template_len)
 
-    spec = AtomSpec(n_atoms=args.n_atoms, atom_len=args.atom_len, rho_min=0.5)
-    train_spec = TrainSpec(
-        epochs=args.epochs, lr=args.lr, topk=args.topk, crop_len=256, crops_per_row=16,
-        crop_batch=512, lambda_div=0.01, n_init_samples=2000,
+    spec = AtomSpec(
+        n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, thresh=args.thresh,
+        topk=args.topk, amp_min=args.amp_min,
     )
+    train_spec = TrainSpec(
+        epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
+        crop_batch=512, n_init_samples=2000,
+    )
+    _kv("mode", args.mode)
     sae = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu")
     init_atoms = sae.atoms_numpy.copy()
     sae.fit_unsupervised(loader, val_dataloader=loader)
@@ -149,29 +162,34 @@ def main(argv=None) -> int:
     for record in sae.history:
         _kv(
             f"epoch {int(record['epoch'])}",
-            f"loss_rec={record['loss_rec']:.4f} val={record['val_loss_rec']:.4f} dead={int(record['n_dead'])}",
+            f"residual {record['residual_frac']:.1%} (val {record['val_residual_frac']:.1%}) "
+            f"activations/crop {record['active_per_crop']:.2f} dead={int(record['n_dead'])}",
         )
+    if args.mode == "shrink":
+        _kv("learned thresholds", [round(float(v), 2) for v in sae.thresholds])
 
-    _sec("template recovery (max cross-correlation over lags)")
+    _sec("template recovery (max |cross-correlation| over lags; sign-free, codes are signed)")
     atoms = sae.atoms_numpy
-    xcorr = np.array([np.correlate(a, template, mode="full").max() for a in atoms])
+    xcorr = np.array([np.abs(np.correlate(a, template, mode="full")).max() for a in atoms])
     best_atom = int(xcorr.argmax())
-    _kv("per-atom max xcorr", [round(float(v), 3) for v in xcorr])
-    _kv("best atom / xcorr", f"{best_atom} / {xcorr[best_atom]:.3f}")
+    _kv("per-atom max |xcorr|", [round(float(v), 3) for v in xcorr])
+    _kv("best atom / |xcorr|", f"{best_atom} / {xcorr[best_atom]:.3f}")
     _kv("recovered (> 0.9)", bool(xcorr[best_atom] > 0.9))
 
     _banner("OUTPUT")
     f = sae(x)
     _desc_tensor("F (SAE features)", f)
-    _kv("2 * n_atoms", 2 * args.n_atoms)
-    _kv("F.shape[1] match", f.shape[1] == 2 * args.n_atoms)
+    _kv("3 * n_atoms", 3 * args.n_atoms)
+    _kv("F.shape[1] match", f.shape[1] == 3 * args.n_atoms)
 
     _sec("best atom separates windows with / without events")
-    counts = f[:, best_atom].numpy()
+    k = args.n_atoms
+    counts, peaks, cosines = f[:, best_atom].numpy(), f[:, k + best_atom].numpy(), f[:, 2 * k + best_atom].numpy()
     _kv("mean count, no events", f"{counts[y_np == 0].mean():.2f}")
     _kv("mean count, events", f"{counts[y_np == 1].mean():.2f}")
     _kv("count AUROC", f"{roc_auc_score(y_np, counts):.3f}")
-    _kv("best-cosine AUROC", f"{roc_auc_score(y_np, f[:, args.n_atoms + best_atom].numpy()):.3f}")
+    _kv("peak |a| AUROC", f"{roc_auc_score(y_np, peaks):.3f}")
+    _kv("best |cosine| AUROC", f"{roc_auc_score(y_np, cosines):.3f}")
 
     _sec("seed behaviour (initial atoms, before fitting)")
     same = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu")
