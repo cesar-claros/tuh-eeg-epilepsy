@@ -225,7 +225,7 @@ def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, at
     minutes = n_windows * n_channels * n_times / SFREQ / 60.0
     true_counts = np.bincount(true[:, 0], minlength=n_windows)
     pred_counts = np.bincount(pred[:, 0], minlength=n_windows)
-    polarity_ok = float(np.mean(np.sign(acts[mp, 3]) * sign == true[mt, 3])) if n_match else float("nan")
+    polarity_ok = float(np.mean(np.sign(acts[mp, 3]) * sign == events[mt, 3])) if n_match else float("nan")
     return {
         "precision": n_match / n_pred if n_pred else float("nan"),
         "recall": n_match / n_true if n_true else float("nan"),
