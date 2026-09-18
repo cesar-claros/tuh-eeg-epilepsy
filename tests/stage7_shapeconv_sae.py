@@ -18,7 +18,12 @@ fail the run with --strict:
   - one atom recovers the planted template on the held-out draw (max |xcorr| > 0.9,
     compared in the encoded domain: the differenced template under --pre-emphasis diff),
   - the best atom's count (|a| > --amp-min) and peak features separate the test
-    windows (AUROC > 0.9).
+    windows (AUROC > 0.9),
+  - event-level matching on the test draw: the atom, the activation-to-onset offset
+    and the polarity sign are calibrated on the VALIDATION draw (best validation F1);
+    on the test draw, one-to-one matching within --match-tol samples must reach
+    precision and recall > 0.9. Timing error, count MAE per window, duplicates and
+    unmatched activations per channel-minute are reported.
 
 Run:
     uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
@@ -37,6 +42,8 @@ rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=
 
 RECOVERY_MIN_XCORR = 0.9
 RECOVERY_MIN_AUROC = 0.9
+RECOVERY_MIN_PR = 0.9
+SFREQ = 256.0
 REPRO_ATOL = 1e-4
 REPRO_EPOCHS = 5
 
@@ -112,6 +119,7 @@ def parse(argv):
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--match-tol", type=int, default=6, help="event matching tolerance in samples (engineering choice)")
     p.add_argument("--strict", action="store_true", help="also fail on the stochastic recovery checks")
     p.add_argument("--out-dir", default="tests/outputs/stage7", help="where the checkpoint round trip writes")
     return p.parse_args(argv)
@@ -126,7 +134,11 @@ def _spike_wave(np, length: int):
 
 
 def _synthetic(np, args, seed: int):
-    """One independent draw: AR(1) background rows, template of random polarity in half the windows."""
+    """One independent draw: AR(1) background rows, template of random polarity in half the windows.
+
+    Returns the rows, the window labels, the template, and the planted events as an
+    integer array with columns (window, channel, onset sample, polarity).
+    """
     rng = np.random.default_rng(seed)
     n, c, t = args.n_windows, args.channels, args.timepoints
     noise = rng.standard_normal((n, c, t)).astype(np.float32)
@@ -139,12 +151,92 @@ def _synthetic(np, args, seed: int):
     scale = args.amplitude / template.max()
     y = np.zeros(n, dtype=np.int64)
     y[n // 2:] = 1
+    events = []
     for w in np.flatnonzero(y):
         for ch in range(c):
             for start in rng.integers(0, t - args.template_len, size=args.events_per_channel):
-                polarity = rng.choice([-1.0, 1.0])
+                polarity = int(rng.choice([-1, 1]))
                 x[w, ch, start:start + args.template_len] += polarity * scale * template
-    return x, y, template
+                events.append((w, ch, int(start), polarity))
+    return x, y, template, np.array(events, dtype=np.int64).reshape(-1, 4)
+
+
+def _match_events(np, pred, true, tol: int):
+    """Greedy one-to-one matching of predicted onsets to true onsets within ``tol`` samples.
+
+    ``pred`` and ``true`` are integer arrays with columns (window, channel, sample).
+    Pairs are taken in order of increasing timing error within each (window,
+    channel). Returns the matched index arrays into ``pred`` and ``true``.
+    """
+    matched_p, matched_t = [], []
+    keys = {tuple(k) for k in np.unique(np.concatenate([pred[:, :2], true[:, :2]]), axis=0)}
+    for w, c in sorted(keys):
+        pi = np.flatnonzero((pred[:, 0] == w) & (pred[:, 1] == c))
+        ti = np.flatnonzero((true[:, 0] == w) & (true[:, 1] == c))
+        if len(pi) == 0 or len(ti) == 0:
+            continue
+        error = np.abs(pred[pi, 2][:, None] - true[ti, 2][None, :])
+        pairs = np.argwhere(error <= tol)
+        used_p, used_t = set(), set()
+        for a, b in pairs[np.argsort(error[pairs[:, 0], pairs[:, 1]], kind="stable")]:
+            if a in used_p or b in used_t:
+                continue
+            used_p.add(a)
+            used_t.add(b)
+            matched_p.append(pi[a])
+            matched_t.append(ti[b])
+    return np.asarray(matched_p, dtype=np.int64), np.asarray(matched_t, dtype=np.int64)
+
+
+def _calibrate_atom(np, acts, events, atom_len: int):
+    """Offset (true onset minus activation sample) and polarity sign of one atom, from its nearest true events."""
+    offsets, signs = [], []
+    for w, c, sample, coef in acts:
+        mask = (events[:, 0] == w) & (events[:, 1] == c)
+        if not mask.any():
+            continue
+        nearest = np.argmin(np.abs(events[mask, 2] - sample))
+        gap = events[mask, 2][nearest] - sample
+        if abs(gap) <= atom_len:
+            offsets.append(gap)
+            signs.append(np.sign(coef) * events[mask, 3][nearest])
+    if not offsets:
+        return None
+    return int(np.median(offsets)), int(np.sign(np.mean(signs)) or 1)
+
+
+def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, atom_len: int):
+    """Event-level scores of one atom's activations against the planted events.
+
+    ``acts`` has columns (window, channel, sample, coefficient); ``events`` has
+    (window, channel, onset, polarity); ``shape`` is (windows, channels, samples).
+    """
+    n_windows, n_channels, n_times = shape
+    pred = np.column_stack([acts[:, 0], acts[:, 1], acts[:, 2] + offset]).astype(np.int64)
+    true = events[:, :3]
+    mp, mt = _match_events(np, pred, true, tol)
+    n_pred, n_true, n_match = len(pred), len(true), len(mp)
+    unmatched = np.setdiff1d(np.arange(n_pred), mp)
+    duplicates = 0
+    for i in unmatched:
+        mask = (true[:, 0] == pred[i, 0]) & (true[:, 1] == pred[i, 1])
+        if mask.any() and np.abs(true[mask, 2] - pred[i, 2]).min() <= tol:
+            duplicates += 1
+    minutes = n_windows * n_channels * n_times / SFREQ / 60.0
+    true_counts = np.bincount(true[:, 0], minlength=n_windows)
+    pred_counts = np.bincount(pred[:, 0], minlength=n_windows)
+    polarity_ok = float(np.mean(np.sign(acts[mp, 3]) * sign == true[mt, 3])) if n_match else float("nan")
+    return {
+        "precision": n_match / n_pred if n_pred else float("nan"),
+        "recall": n_match / n_true if n_true else float("nan"),
+        "timing_error_samples": float(np.abs(pred[mp, 2] - true[mt, 2]).mean()) if n_match else float("nan"),
+        "count_mae_per_window": float(np.abs(true_counts - pred_counts).mean()),
+        "duplicates": duplicates,
+        "false_alarms_per_channel_minute": (len(unmatched) - duplicates) / minutes,
+        "polarity_accuracy": polarity_ok,
+        "n_true": n_true,
+        "n_pred": n_pred,
+    }
 
 
 def main(argv=None) -> int:
@@ -168,13 +260,13 @@ def main(argv=None) -> int:
     checks = _Checks()
 
     def _loader(seed: int):
-        x_np, y_np, template = _synthetic(np, args, seed)
+        x_np, y_np, template, events = _synthetic(np, args, seed)
         x, y = torch.from_numpy(x_np), torch.from_numpy(y_np)
-        return DataLoader(TensorDataset(x, y), batch_size=args.batch, shuffle=False), x, y_np, template
+        return DataLoader(TensorDataset(x, y), batch_size=args.batch, shuffle=False), x, y_np, template, events
 
-    train_loader, x_train, _, template = _loader(args.seed)
-    val_loader, _, _, _ = _loader(args.seed + 1)
-    _, x_test, y_test, _ = _loader(args.seed + 2)
+    train_loader, x_train, _, template, _ = _loader(args.seed)
+    val_loader, x_val, _, _, events_val = _loader(args.seed + 1)
+    _, x_test, y_test, _, events_test = _loader(args.seed + 2)
 
     _sec("INPUT (train draw; val and test are independent draws)")
     _desc_tensor("X (window batch)", x_train)
@@ -282,6 +374,34 @@ def main(argv=None) -> int:
     checks.soft(f"peak |a| AUROC (> {RECOVERY_MIN_AUROC})", auc_peak > RECOVERY_MIN_AUROC, f"{auc_peak:.3f}")
     _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
     _kv("events table (an event window)", sae.events(x_test[-1:]).head(5))
+
+    _sec(f"event-level matching (calibrated on val, scored on test, tolerance {args.match_tol} samples)")
+    shape = tuple(x_test.shape)
+    acts_val, acts_test = sae.events(x_val).to_numpy(), sae.events(x_test).to_numpy()
+    calibration = {}
+    for atom in range(args.n_atoms):
+        acts = acts_val[acts_val[:, 2] == atom][:, [0, 1, 3, 4]]
+        fit = _calibrate_atom(np, acts, events_val, args.atom_len) if len(acts) else None
+        if fit is None:
+            continue
+        val_scores = _event_metrics(np, acts, events_val, fit[0], fit[1], args.match_tol, shape, args.atom_len)
+        p_, r_ = val_scores["precision"], val_scores["recall"]
+        f1 = 2 * p_ * r_ / (p_ + r_) if (p_ + r_) > 0 else 0.0
+        calibration[atom] = (f1, fit[0], fit[1])
+    if calibration:
+        chosen, (val_f1, offset, sign) = max(calibration.items(), key=lambda kv: (kv[1][0], xcorr[kv[0]]))
+        _kv("atom / offset / sign (val)", f"{chosen} / {offset} / {sign:+d}  (val F1 {val_f1:.3f})")
+        acts = acts_test[acts_test[:, 2] == chosen][:, [0, 1, 3, 4]]
+        scores = _event_metrics(np, acts, events_test, offset, sign, args.match_tol, shape, args.atom_len)
+        for key in ("timing_error_samples", "count_mae_per_window", "duplicates",
+                    "false_alarms_per_channel_minute", "polarity_accuracy", "n_true", "n_pred"):
+            _kv(key, f"{scores[key]:.3f}" if isinstance(scores[key], float) else scores[key])
+        checks.soft(f"event precision (> {RECOVERY_MIN_PR})", scores["precision"] > RECOVERY_MIN_PR,
+                    f"{scores['precision']:.3f}")
+        checks.soft(f"event recall (> {RECOVERY_MIN_PR})", scores["recall"] > RECOVERY_MIN_PR,
+                    f"{scores['recall']:.3f}")
+    else:
+        checks.soft("event matching calibrated", False, "no atom activated near a validation event")
 
     _sec("-> flows to Stage 5")
     print("  # Counts are sparse non-negative, like HYDRA counts; the _SparseScaler")

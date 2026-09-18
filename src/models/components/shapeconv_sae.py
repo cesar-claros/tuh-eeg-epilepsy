@@ -823,7 +823,7 @@ class ShapeConvSAE(nn.Module):
             self.history.append(record)
             log.info(
                 f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}: residual {record['residual_frac']:.1%} "
-                f"of signal power (val {record['val_residual_frac']:.1%}), activations/crop "
+                f"of signal power (val {record['val_residual_frac']:.1%}), starts/crop "
                 f"{record['active_per_crop']:.2f}, objective {record['objective']:.4f}, "
                 f"dead {n_dead}, re-seeded {n_new}, steps {n_steps}"
             )
