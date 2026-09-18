@@ -218,7 +218,8 @@ class Trainer:
         model : nn.Module
             The (sklearn) classifier to fit.
         feature_extractor : nn.Module
-            The HYDRA feature transform applied to each window.
+            The feature transform applied to each window (HYDRA, or a learned
+            extractor exposing ``fit_unsupervised`` such as ShapeConvSAE).
         scaler : nn.Module
             The sparse scaler placed before the classifier in the pipeline.
         datamodule : LightningDataModule
@@ -239,6 +240,13 @@ class Trainer:
 
         # Extract features for train (and val if needed by model, though sklearn pipeline usually just uses train)
         train_dataloader = datamodule.train_dataloader()
+
+        # Extractors with learnable parameters (e.g. ShapeConvSAE) fit themselves on
+        # the training windows first. Labels are never read, and val stays untouched.
+        if hasattr(feature_extractor, "fit_unsupervised"):
+            log.info("Fitting the feature extractor without labels on the training windows")
+            feature_extractor.fit_unsupervised(train_dataloader)
+
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
 
         val_dataloader = datamodule.val_dataloader()
@@ -299,6 +307,9 @@ class Trainer:
             feature_extractor_path = self.output_path / "feature_extractor.joblib"
             log.info(f"Saving feature extractor to {feature_extractor_path}")
             joblib.dump(feature_extractor, feature_extractor_path)
+            # Learned extractors also write their inspectable artifacts (atoms, history).
+            if hasattr(feature_extractor, "save_artifacts"):
+                feature_extractor.save_artifacts(self.output_path)
             # Save the scaler
             scaler_path = self.output_path / "scaler.joblib"
             log.info(f"Saving scaler to {scaler_path}")

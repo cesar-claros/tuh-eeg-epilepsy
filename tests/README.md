@@ -14,6 +14,7 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 4 | `stage4_hydra_transform.py` | `HydraTransformer` → feature matrix `F`; dimension formula + seed determinism | no (synthetic) |
 | 5 | `stage5_sparse_scaler.py` | `_SparseScaler` → scaled `Fs`; fitted mu/sigma/epsilon, mask effect | no (synthetic) |
 | 6 | `stage6_classifier_scoring.py` | `make_pipeline(scaler, clf)` fit → decision scores, window- and subject-level accuracy | no (synthetic) |
+| 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on synthetic rows with a planted spike-and-wave → atoms recover the template; `forward` → features `F[b, 2 * n_atoms]` whose event count separates the windows | no (synthetic) |
 
 ## Data flow
 
@@ -27,8 +28,8 @@ raw EDF corpus
                                 └─(6)─> classifier -> window + subject scores
 ```
 
-Stages 4–6 generate their own synthetic, correctly-shaped inputs, so they run
-anywhere. Stages 1–3 need the unpacked TUH EEG Epilepsy corpus under
+Stages 4–7 generate their own synthetic, correctly-shaped inputs, so they run
+anywhere (stage 7 replaces stage 4 when `feature=shapeconv_sae`). Stages 1–3 need the unpacked TUH EEG Epilepsy corpus under
 `data/<version>/` (`00_epilepsy/`, `01_no_epilepsy/`, `DOCS/`); if it is absent
 they say so and exit cleanly.
 
@@ -39,6 +40,7 @@ they say so and exit cleanly.
 uv run python tests/stage4_hydra_transform.py
 uv run python tests/stage5_sparse_scaler.py
 uv run python tests/stage6_classifier_scoring.py
+uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20
 
 # data-dependent stages (where the corpus is present):
 uv run python tests/stage1_metadata.py --limit 20
