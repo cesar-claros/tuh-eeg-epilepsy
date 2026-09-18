@@ -304,6 +304,12 @@ class Trainer:
         )
         pipeline.fit(train_data["X"], train_data["y"])
         log.info("Classifier training completed!")
+        # Which subjects the scaler and classifier were fitted on (and, below, calibrated on),
+        # so eval.py can refuse a test split that contains any of them.
+        pipeline.fit_provenance_ = {
+            "fit_subjects": sorted(str(s) for s in metadata_df["subject"].unique()),
+            "calibration_subjects": [],
+        }
 
         # Subject-level threshold calibration on the held-out val set (max balanced accuracy),
         # applied at test time; window-level scoring stays at the default 0 threshold.
@@ -318,6 +324,7 @@ class Trainer:
                 self.subject_threshold = _best_subject_threshold(
                     vg['epilepsy'].first().astype(int).to_numpy(), vg['score'].mean().to_numpy()
                 )
+                pipeline.fit_provenance_["calibration_subjects"] = sorted(str(s) for s in vdf["subject"].unique())
                 log.info(f"Calibrated subject threshold on val: {self.subject_threshold:.6f}")
 
         # Dump the held-out val predictions too (test is dumped in test()), for a val-split ROC.

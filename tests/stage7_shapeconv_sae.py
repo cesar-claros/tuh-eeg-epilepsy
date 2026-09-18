@@ -206,11 +206,13 @@ def main(argv=None) -> int:
         _kv(
             f"epoch {int(record['epoch'])}",
             f"residual {record['residual_frac']:.1%} (val {record['val_residual_frac']:.1%}) "
-            f"activations/crop {record['active_per_crop']:.2f} objective {record['objective']:.4f} "
+            f"starts/crop {record['active_per_crop']:.2f} objective {record['objective']:.4f} "
+            f"thresh/response {record['median_thresh_over_response']:.2f} "
             f"dead={int(record['n_dead'])} reseeded={int(record['n_reseeded'])}",
         )
     if args.mode == "shrink":
         _kv("learned thresholds", [round(float(v), 2) for v in sae.thresholds])
+    _kv("val response std per atom", [round(float(v), 2) for v in sae.atom_response_std])
 
     _banner("OUTPUT")
     f = sae(x_test)

@@ -1,6 +1,7 @@
 from src.utils.pylogger import RankedLogger
 from src.utils.rich_utils import enforce_tags, print_config_tree
 from src.utils.utils import (
+    check_fit_provenance,
     check_pretrained_provenance,
     dump_window_metadata,
     extras,

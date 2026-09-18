@@ -146,11 +146,18 @@ def get_metric_value(
     return metric_value
 
 
-_PROVENANCE_DATA_KEYS = (
-    "version", "signal_mode", "target_sfreq", "filter_freq", "notch_freqs", "window_len_min",
-    "interpolate_bad_channels", "drop_bad_segments", "apply_aas", "seed", "train_val_test_split",
+# Settings that define the signal a learned extractor saw. All of them are recorded;
+# the MATCH keys must agree when the extractor is reused (montage composition, rate,
+# filters, ICA selection and signal repairs), the others are lineage.
+_PROVENANCE_MATCH_KEYS = (
+    "signal_mode", "bipolar", "target_sfreq", "filter_freq", "notch_freqs", "ica_keep_labels",
+    "brain_ic_min_gof", "brain_ic_use_dipoles", "interpolate_bad_channels", "drop_bad_segments",
+    "apply_aas", "aas_fmax",
 )
-_PROVENANCE_MATCH_KEYS = ("signal_mode", "target_sfreq", "filter_freq", "notch_freqs")
+_PROVENANCE_DATA_KEYS = _PROVENANCE_MATCH_KEYS + (
+    "version", "window_len_min", "seed", "train_val_test_split", "require_keep_labels",
+    "exclude_recordings_file", "drop_seizure_segments", "include_seizures",
+)
 
 
 def _plain(value: Any) -> Any:
@@ -190,17 +197,36 @@ def split_provenance(datamodule: Any, data_cfg: DictConfig) -> dict[str, Any]:
     }
 
 
+def _subject_overlap(subjects: set[str], datamodule: Any, splits: list[str]) -> tuple[str, list[str]]:
+    """First held-out split whose subjects intersect ``subjects``, with the overlap (empty if none)."""
+    for split in splits:
+        df = getattr(datamodule, f"{split}_df", None)
+        if df is None or not len(df):
+            continue
+        overlap = sorted(subjects & {str(s) for s in df["subject"].unique()})
+        if overlap:
+            return split, overlap
+    return "", []
+
+
 def check_pretrained_provenance(
-    feature_extractor: Any, datamodule: Any, data_cfg: DictConfig, check_val: bool = False
+    feature_extractor: Any,
+    datamodule: Any,
+    data_cfg: DictConfig,
+    check_val: bool = False,
+    allow_data_mismatch: bool = False,
 ) -> None:
-    """Refuse a fitted extractor whose training subjects or data settings do not fit this run.
+    """Refuse a fitted extractor whose artifact, training subjects or data settings do not fit this run.
 
     A dictionary trained by ``src/train_sae.py`` (or inside an earlier ``train``
     run) records its provenance. Reusing it on a split drawn with another
     ``data.seed`` can put its training subjects in the test set, which leaks them
     into the features even though no label was used; reusing it on another
-    montage, rate or filter changes what its atoms mean. Extractors without
-    provenance (HYDRA, or a not-yet-fitted SAE) pass.
+    montage, rate, filter, ICA selection or repair changes what its atoms mean.
+    Stateless extractors (HYDRA) and a not-yet-fitted learned extractor pass. A
+    fitted learned extractor is asked to validate its own artifact first
+    (``validate_artifact``), so a fitted module without provenance or with an
+    old schema is refused on every loading path, including ``joblib``.
 
     Parameters
     ----------
@@ -212,35 +238,66 @@ def check_pretrained_provenance(
         The ``data`` config of the current run.
     check_val : bool
         Also refuse overlap with the validation subjects (when val is held out).
+    allow_data_mismatch : bool
+        Log a data-setting mismatch instead of raising (a deliberate transfer
+        experiment). Subject overlap is never allowed.
 
     Raises
     ------
     ValueError
-        On subject overlap with the test (or val) split, or on a data-setting mismatch.
+        On an invalid artifact, on subject overlap with the test (or val) split,
+        or on a data-setting mismatch unless ``allow_data_mismatch``.
     """
+    validate = getattr(feature_extractor, "validate_artifact", None)
+    if callable(validate):
+        validate()
     provenance = getattr(feature_extractor, "provenance", None) or {}
     trained_on = set(provenance.get("train_subjects", []))
     if not trained_on:
         return
-    splits = ["test", "val"] if check_val else ["test"]
-    for split in splits:
-        df = getattr(datamodule, f"{split}_df", None)
-        if df is None or not len(df):
-            continue
-        overlap = sorted(trained_on & {str(s) for s in df["subject"].unique()})
-        if overlap:
-            raise ValueError(
-                f"{len(overlap)} {split} subjects were used to train the pretrained feature extractor "
-                f"(e.g. {overlap[:5]}); rerun with the data.seed of the train_sae run"
-            )
+    split, overlap = _subject_overlap(trained_on, datamodule, ["test", "val"] if check_val else ["test"])
+    if overlap:
+        raise ValueError(
+            f"{len(overlap)} {split} subjects were used to train the pretrained feature extractor "
+            f"(e.g. {overlap[:5]}); rerun with the data.seed of the train_sae run"
+        )
     saved = provenance.get("data", {})
     mismatch = {
         k: (saved.get(k), _plain(data_cfg.get(k)))
         for k in _PROVENANCE_MATCH_KEYS
         if k in saved and saved.get(k) != _plain(data_cfg.get(k))
     }
-    if mismatch:
+    if mismatch and allow_data_mismatch:
+        log.warning(f"Deliberate transfer: pretrained feature extractor data settings differ (saved, run): {mismatch}")  # noqa: G004
+    elif mismatch:
         raise ValueError(f"pretrained feature extractor data settings differ from this run (saved, run): {mismatch}")
+
+
+def check_fit_provenance(pipeline: Any, datamodule: Any) -> None:
+    """Refuse a saved classifier pipeline whose fit or calibration subjects fall in this run's test split.
+
+    ``Trainer.fit`` attaches ``fit_provenance_`` to the pipeline: the subjects whose
+    windows fitted the scaler and classifier (train, plus val when merged) and the
+    subjects used for threshold calibration. Evaluating on a split that contains
+    any of them would score the classifier on labels it trained on. Pipelines
+    without the attribute (older artifacts) are refused too, since their fit
+    subjects are unknown.
+
+    Raises
+    ------
+    ValueError
+        On overlap, or when the pipeline carries no fit provenance.
+    """
+    provenance = getattr(pipeline, "fit_provenance_", None)
+    if not provenance or not provenance.get("fit_subjects"):
+        raise ValueError("the saved pipeline records no fit subjects; retrain it before evaluating on another split")
+    seen = set(provenance["fit_subjects"]) | set(provenance.get("calibration_subjects", []))
+    split, overlap = _subject_overlap(seen, datamodule, ["test"])
+    if overlap:
+        raise ValueError(
+            f"{len(overlap)} {split} subjects fitted or calibrated the saved classifier (e.g. {overlap[:5]}); "
+            "evaluation must use the run's own held-out split"
+        )
 
 
 def dump_window_metadata(output_dir: Path, datamodule: Any) -> None:

@@ -33,7 +33,7 @@ scaling alone is not a whitening.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,8 @@ _STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis")
 _RESEED_PER_STEP = 4
 _RESEED_POOL_FACTOR = 4
 CHECKPOINT_NAME = "sae_state.pt"
-CHECKPOINT_FORMAT = 2
+CHECKPOINT_FORMAT = 3
+_LEGACY_FORMAT_NO_PRE_EMPHASIS = 2
 
 
 @dataclass(frozen=True)
@@ -93,10 +94,13 @@ class AtomSpec:
         ``diff``: encode the first difference of every row (after which the row is
         scaled). EEG power falls as about ``1/f^2``, so a smooth atom correlated with
         the raw signal has a background response many times the row's robust std
-        and fires everywhere; the first difference flattens the spectrum so a
-        threshold of 3 is about three sigma for any atom. The atoms then live in
-        the differenced domain; ``atoms_signal_domain`` integrates them back.
-        ``none``: encode the scaled row as is.
+        and fires everywhere; the first difference multiplies the spectrum by
+        ``4 sin^2(w/2)`` and removes most of that low-frequency dominance. It is a
+        pre-emphasis, not a whitening: the background response scale still depends
+        on the atom and on the band, and is measured per atom (``atom_response_std``)
+        rather than assumed. Atoms then live in the differenced domain;
+        ``atoms_signal_domain`` integrates them back. ``none``: encode the scaled
+        row as is.
     """
 
     n_atoms: int = 64
@@ -218,6 +222,9 @@ class ShapeConvSAE(nn.Module):
         )
         self.history: list[dict[str, float]] = []
         self.provenance: dict[str, Any] = {}
+        self.fit_meta: dict[str, Any] = {}
+        self.atom_response_std: np.ndarray | None = None
+        self.artifact_format = CHECKPOINT_FORMAT
         self.fitted = False
         self._pool_energy = torch.zeros(0, device=self.device)
         self._pool_patches = torch.zeros(0, self.spec.atom_len, device=self.device)
@@ -228,27 +235,86 @@ class ShapeConvSAE(nn.Module):
 
     # ------------------------------------------------------------------ checkpoint
 
-    def load_checkpoint(self, path: str | Path, override_spec: bool = False) -> None:
-        """Load atoms, thresholds, history and provenance from ``sae_state.pt``; mark the module fitted.
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Unpickle (joblib) and migrate an instance written by an older module version.
 
-        The saved ``AtomSpec`` is restored by default, so a reloaded dictionary is
-        encoded exactly as it was trained. With ``override_spec`` the constructor's
-        non-structural fields win and the difference is logged.
+        An instance pickled before ``pre_emphasis`` existed encoded raw rows, so its
+        spec is rebuilt with ``pre_emphasis="none"`` instead of inheriting the
+        class default; missing fit metadata is filled from the constructor values
+        it was fitted with and marked as migrated.
+        """
+        super().__setstate__(state)
+        if getattr(self, "artifact_format", None) == CHECKPOINT_FORMAT:
+            return
+        if "pre_emphasis" not in vars(self.spec):
+            self.spec = replace(self.spec, pre_emphasis="none")
+            log.warning("Migrated a pickled ShapeConvSAE without pre_emphasis to pre_emphasis='none'")
+        if not getattr(self, "fit_meta", None):
+            self.fit_meta = {
+                "train_spec": asdict(self.train_spec), "random_state": self.random_state, "migrated": True,
+            }
+        if not hasattr(self, "atom_response_std"):
+            self.atom_response_std = None
+        self.artifact_format = CHECKPOINT_FORMAT
+
+    def validate_artifact(self) -> None:
+        """Refuse a fitted dictionary whose provenance or schema is unusable; an unfitted module passes.
 
         Raises
         ------
         ValueError
-            If the checkpoint format is unknown, if ``n_atoms``, ``atom_len`` or
-            ``mode`` differ from ``spec``, or if the checkpoint carries no
-            training-subject provenance.
+            If the module is fitted but records no training subjects, or its
+            artifact schema is not the current one.
+        """
+        if not self.fitted:
+            return
+        if self.artifact_format != CHECKPOINT_FORMAT:
+            raise ValueError(
+                f"fitted ShapeConvSAE has artifact format {self.artifact_format}, expected {CHECKPOINT_FORMAT}"
+            )
+        if not self.provenance.get("train_subjects"):
+            raise ValueError("fitted ShapeConvSAE records no training subjects; refusing to reuse it")
+
+    @staticmethod
+    def _saved_spec(checkpoint: dict[str, Any], path: str | Path) -> AtomSpec:
+        """The ``AtomSpec`` a checkpoint was trained with, migrating a format-2 file (no pre-emphasis)."""
+        version = checkpoint.get("format")
+        spec_dict = dict(checkpoint.get("spec") or {})
+        required = {f.name for f in fields(AtomSpec)}
+        if version == _LEGACY_FORMAT_NO_PRE_EMPHASIS and required - set(spec_dict) == {"pre_emphasis"}:
+            spec_dict["pre_emphasis"] = "none"
+            log.warning(f"{path}: format-2 checkpoint encoded raw rows; migrated to pre_emphasis='none'")
+        elif version != CHECKPOINT_FORMAT:
+            raise ValueError(f"{path}: unsupported checkpoint format {version!r} (expected {CHECKPOINT_FORMAT})")
+        missing, unknown = required - set(spec_dict), set(spec_dict) - required
+        if missing or unknown:
+            raise ValueError(f"{path}: checkpoint spec fields missing {sorted(missing)} / unknown {sorted(unknown)}")
+        return AtomSpec(**spec_dict)
+
+    def load_checkpoint(self, path: str | Path, override_spec: bool = False) -> None:
+        """Load atoms, thresholds, history, fit metadata and provenance from ``sae_state.pt``; mark fitted.
+
+        The saved ``AtomSpec`` is restored by default, so a reloaded dictionary is
+        encoded exactly as it was trained. With ``override_spec`` the constructor's
+        non-structural fields win and the difference is logged. The training
+        schedule and seed the dictionary was fitted with are kept in ``fit_meta``
+        and are not replaced by the constructor's values.
+
+        Raises
+        ------
+        ValueError
+            If the checkpoint format is unsupported, its spec is incomplete, a
+            structural field (``n_atoms``, ``atom_len``, ``mode``, ``pre_emphasis``)
+            differs from ``spec``, or it carries no training-subject provenance.
         """
         checkpoint = torch.load(Path(path), map_location=self.device, weights_only=True)
-        if checkpoint.get("format") != CHECKPOINT_FORMAT:
-            raise ValueError(f"{path}: unsupported checkpoint format {checkpoint.get('format')!r}")
-        saved = AtomSpec(**checkpoint["spec"])
+        saved = self._saved_spec(checkpoint, path)
         for key in _STRUCTURAL_FIELDS:
             if getattr(saved, key) != getattr(self.spec, key):
-                raise ValueError(f"{path} has {key}={getattr(saved, key)!r} but spec.{key}={getattr(self.spec, key)!r}")
+                raise ValueError(
+                    f"{path} has {key}={getattr(saved, key)!r} but spec.{key}={getattr(self.spec, key)!r}; "
+                    f"set feature.spec.{key} to the checkpoint's value"
+                )
         differing = {
             f.name: (getattr(saved, f.name), getattr(self.spec, f.name))
             for f in fields(AtomSpec)
@@ -265,6 +331,13 @@ class ShapeConvSAE(nn.Module):
         self.load_state_dict(checkpoint["state_dict"])
         self.history = checkpoint["history"]
         self.provenance = provenance
+        self.fit_meta = checkpoint.get("fit") or {
+            "train_spec": checkpoint.get("train_spec"), "random_state": checkpoint.get("random_state"),
+            "migrated": True,
+        }
+        response = checkpoint.get("atom_response_std")
+        self.atom_response_std = None if response is None else np.asarray(response, dtype=np.float32)
+        self.artifact_format = CHECKPOINT_FORMAT
         self.fitted = True
         log.info(
             f"Loaded {self.spec.n_atoms} pretrained atoms from {path} "
@@ -272,22 +345,31 @@ class ShapeConvSAE(nn.Module):
         )
 
     def save_artifacts(self, output_dir: Path) -> None:
-        """Write ``sae_state.pt`` (checkpoint), ``sae_atoms.npy``, ``sae_atoms_signal.npy`` and ``sae_training.csv``."""
+        """Write ``sae_state.pt`` and the inspectable arrays.
+
+        ``sae_atoms.npy`` (encoded domain), ``sae_atoms_signal.npy`` (integrated
+        synthesis shapes, ``atom_len + 1`` samples), ``sae_atom_response_std.npy``
+        (when measured) and ``sae_training.csv``. The checkpoint stores the fit
+        metadata of the dictionary as fitted, not the constructor's current values.
+        """
         output_dir = Path(output_dir)
+        fit_meta = self.fit_meta or {"train_spec": asdict(self.train_spec), "random_state": self.random_state}
         torch.save(
             {
                 "format": CHECKPOINT_FORMAT,
                 "spec": asdict(self.spec),
-                "train_spec": asdict(self.train_spec),
-                "random_state": self.random_state,
+                "fit": fit_meta,
                 "state_dict": {k: v.cpu() for k, v in self.state_dict().items()},
                 "history": self.history,
                 "provenance": self.provenance,
+                "atom_response_std": None if self.atom_response_std is None else self.atom_response_std.tolist(),
             },
             output_dir / CHECKPOINT_NAME,
         )
         np.save(output_dir / "sae_atoms.npy", self.atoms_numpy)
         np.save(output_dir / "sae_atoms_signal.npy", self.atoms_signal_domain)
+        if self.atom_response_std is not None:
+            np.save(output_dir / "sae_atom_response_std.npy", self.atom_response_std)
         if self.history:
             pl.DataFrame(self.history).write_csv(output_dir / "sae_training.csv")
         log.info(f"Saved {self.spec.n_atoms} atoms and {len(self.history)} training epochs to {output_dir}")
@@ -304,14 +386,32 @@ class ShapeConvSAE(nn.Module):
 
     @property
     def atoms_signal_domain(self) -> np.ndarray:
-        """The atoms as signal-domain waveforms ``(n_atoms, atom_len)``: the cumulative sum under ``diff``.
+        """Integrated synthesis shapes ``(n_atoms, atom_len + 1)`` under ``diff``; the atoms themselves under ``none``.
 
-        Each waveform is re-centered and re-normalized for display; it is the shape
-        the atom detects in the original (scaled) signal, up to an additive constant.
+        Under ``diff`` the inverse of ``atom_len`` differences from a zero baseline is
+        ``[0, cumsum(s)]``, with ``atom_len + 1`` samples; a zero-sum atom returns to
+        that baseline. The shape is re-centered and re-normalized for display, so
+        its reconstruction scale is not kept, and the clip makes the preprocessing
+        irreversible in any case. It is the component the atom synthesizes, not the
+        filter it applies; see ``atoms_analysis_filter``. Under ``none`` it is the
+        atom itself (``atom_len`` samples).
         """
         atoms = self._project(self.atoms.detach())
         if self.spec.pre_emphasis == "diff":
-            atoms = self._project(atoms.cumsum(-1))
+            atoms = self._project(F.pad(atoms.cumsum(-1), (1, 0)))
+        return atoms.squeeze(1).cpu().numpy()
+
+    @property
+    def atoms_analysis_filter(self) -> np.ndarray:
+        """The original-domain analysis filter of each atom, ``(n_atoms, atom_len + 1)`` under ``diff``.
+
+        ``<s, diff(x)> = <f, x>`` with ``f[u] = s[u - 1] - s[u]`` (``s[-1] = s[L] = 0``),
+        so ``f`` is what the encoder correlates with the scaled original row. Unit
+        normalized for display. Under ``none`` it is the atom itself.
+        """
+        atoms = self._project(self.atoms.detach())
+        if self.spec.pre_emphasis == "diff":
+            atoms = self._project(F.pad(atoms, (1, 0)) - F.pad(atoms, (0, 1)))
         return atoms.squeeze(1).cpu().numpy()
 
     def _rows(self, X: torch.Tensor) -> torch.Tensor:
@@ -479,9 +579,12 @@ class ShapeConvSAE(nn.Module):
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-            The loss; ``[residual_energy, signal_energy, n_active, n_crops]`` on the
-            scored part; nonzero code entries per atom (positions overlapping the
-            scored part); and the detached scored residual ``(n, 1, crop_len)``.
+            The loss; ``[residual_energy, signal_energy, n_starts, n_crops]`` on the
+            scored part, where ``n_starts`` counts code entries whose placement
+            starts inside the scored part (a stationary per-crop rate, unlike the
+            ``(crop_len + atom_len - 1)`` overlapping placements the L1 term sums);
+            nonzero entries per atom over the overlapping placements (usage); and
+            the detached scored residual ``(n, 1, crop_len)``.
         """
         lo, hi = self._scored_positions()
         z = self._sparse_code(crops, atoms)
@@ -493,11 +596,12 @@ class ShapeConvSAE(nn.Module):
         if self.train_spec.lambda_div > 0:
             loss = loss + self.train_spec.lambda_div * self._diversity(atoms)
         active = z_scored.detach() != 0
+        starts = self._center(z.detach()) != 0
         stats = torch.stack(
             [
                 residual.detach().pow(2).sum(),
                 self._center(crops).pow(2).sum(),
-                active.sum().to(crops.dtype),
+                starts.sum().to(crops.dtype),
                 torch.tensor(float(crops.shape[0]), device=crops.device),
             ]
         )
@@ -538,7 +642,13 @@ class ShapeConvSAE(nn.Module):
 
     @torch.no_grad()
     def _collect_reseed_patches(self, residual: torch.Tensor) -> None:
-        """Keep the highest-energy, mutually separated, non-flat residual patches of a step in a bounded pool."""
+        """Keep the highest-energy residual patches of a step in a bounded pool.
+
+        Candidates are local maxima of the residual energy within one minibatch,
+        so they are locally separated; overlapping crops and later minibatches can
+        still contribute the same transient. Non-finite and near-flat patches are
+        excluded.
+        """
         length = self.spec.atom_len
         energy = F.avg_pool1d(residual.pow(2), length, stride=1)
         energy = energy * self._local_maxima(energy)
@@ -568,6 +678,7 @@ class ShapeConvSAE(nn.Module):
         n_dead = int(dead.numel())
         n_new = min(n_dead, int(self._pool_energy.numel()))
         if n_new == 0:
+            self._clear_pool()
             return n_dead, 0
         chosen = self._pool_energy.topk(n_new).indices
         targets = dead[:n_new]
@@ -578,22 +689,41 @@ class ShapeConvSAE(nn.Module):
             if state:
                 state["exp_avg"][targets] = 0.0
                 state["exp_avg_sq"][targets] = 0.0
-        self._pool_energy = self._pool_energy[:0]
-        self._pool_patches = self._pool_patches[:0]
+        self._clear_pool()
         return n_dead, n_new
 
+    def _clear_pool(self) -> None:
+        """Empty the residual pool; called at every epoch start and on every re-seed exit."""
+        self._pool_energy = self._pool_energy[:0]
+        self._pool_patches = self._pool_patches[:0]
+
     @torch.no_grad()
-    def _val_stats(self, val_dataloader: DataLoader) -> torch.Tensor:
-        """Summed ``[residual_energy, signal_energy, n_active, n_crops]`` on fixed crops of the validation windows."""
+    def _val_stats(self, val_dataloader: DataLoader) -> tuple[torch.Tensor, torch.Tensor]:
+        """Validation statistics on fixed crops: summed step stats and the per-atom response scale.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``[residual_energy, signal_energy, n_starts, n_crops]`` summed over the
+            crops, and the per-atom standard deviation of the pre-threshold
+            correlation ``y`` over all positions (the empirical background response
+            scale of each atom on the development cohort, events included).
+        """
         generator = torch.Generator().manual_seed(self.random_state + 1)
         atoms = self._project(self.atoms)
         totals = torch.zeros(4, device=self.device)
+        sum_sq = torch.zeros(self.spec.n_atoms, device=self.device)
+        count = 0.0
         for x, _ in val_dataloader:
             crops = self._crops(x, generator)
             for start in range(0, crops.shape[0], self.train_spec.crop_batch):
-                _, stats, _, _ = self._step(crops[start : start + self.train_spec.crop_batch], atoms)
+                batch = crops[start : start + self.train_spec.crop_batch]
+                _, stats, _, _ = self._step(batch, atoms)
                 totals += stats
-        return totals
+                amplitude, _ = self._scores(batch, atoms)
+                sum_sq += amplitude.pow(2).sum(dim=(0, 2))
+                count += float(amplitude.shape[0] * amplitude.shape[2])
+        return totals, (sum_sq / max(count, 1.0)).sqrt()
 
     def fit_unsupervised(
         self,
@@ -646,7 +776,9 @@ class ShapeConvSAE(nn.Module):
         self._init_atoms(loader, generator)
         optimizer = torch.optim.Adam(self.parameters(), lr=train_spec.lr)
         self.history = []
+        response_std: torch.Tensor | None = None
         for epoch in range(train_spec.epochs):
+            self._clear_pool()
             usage = torch.zeros(spec.n_atoms, dtype=torch.long, device=self.device)
             totals = torch.zeros(4, device=self.device)
             loss_sum, n_steps = 0.0, 0
@@ -668,7 +800,10 @@ class ShapeConvSAE(nn.Module):
                     n_steps += 1
             last = epoch + 1 == train_spec.epochs
             n_dead, n_new = (int((usage == 0).sum()), 0) if last else self._reset_dead_atoms(usage, optimizer)
-            val = self._val_stats(val_dataloader) if val_dataloader is not None else None
+            val = None
+            if val_dataloader is not None:
+                val, response_std = self._val_stats(val_dataloader)
+            thresholds = self.log_thresh.detach().exp()
             record = {
                 "epoch": epoch + 1,
                 "residual_frac": float(totals[0] / totals[1].clamp_min(_EPS)),
@@ -676,6 +811,11 @@ class ShapeConvSAE(nn.Module):
                 "objective": loss_sum / max(n_steps, 1),
                 "val_residual_frac": float(val[0] / val[1].clamp_min(_EPS)) if val is not None else float("nan"),
                 "val_active_per_crop": float(val[2] / val[3].clamp_min(1.0)) if val is not None else float("nan"),
+                "median_thresh_over_response": (
+                    float((thresholds / response_std.clamp_min(_EPS)).median())
+                    if response_std is not None
+                    else float("nan")
+                ),
                 "n_dead": n_dead,
                 "n_reseeded": n_new,
                 "n_steps": n_steps,
@@ -687,7 +827,9 @@ class ShapeConvSAE(nn.Module):
                 f"{record['active_per_crop']:.2f}, objective {record['objective']:.4f}, "
                 f"dead {n_dead}, re-seeded {n_new}, steps {n_steps}"
             )
-        self._pool_energy, self._pool_patches = self._pool_energy[:0], self._pool_patches[:0]
+        self._clear_pool()
+        self.atom_response_std = None if response_std is None else response_std.cpu().numpy().astype(np.float32)
+        self.fit_meta = {"train_spec": asdict(train_spec), "random_state": self.random_state, "context": self.context}
         self.provenance = provenance
         self.fitted = True
 

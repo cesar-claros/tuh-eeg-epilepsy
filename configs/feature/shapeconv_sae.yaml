@@ -50,3 +50,7 @@ override_spec: false
 # chunk_rows on small GPUs or with many atoms.
 device: auto
 chunk_rows: 16
+# Deliberate transfer only: log instead of refusing when the checkpoint's data settings
+# (montage, rate, filters, ICA selection, repairs) differ from this run. Subject overlap
+# with the held-out split is refused regardless.
+allow_data_mismatch: false

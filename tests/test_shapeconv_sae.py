@@ -5,13 +5,18 @@ Runs under pytest (``uv run pytest tests/test_shapeconv_sae.py``) or as a script
 function and exits 1 on the first failure. Covered: the projection (including the
 flat case), the encoder/decoder adjoint identity, the analytic soft-threshold
 response, NMS plateaus and ties, checkpoint round trip with a non-default spec,
-refusal of a checkpoint without provenance and of a structural mismatch, chunk-size
-invariance of the features, cross-split rejection by the provenance check, and the
+refusal of a checkpoint without provenance and of a structural mismatch, migration
+of a format-2 checkpoint and of an old pickled instance, save-load-save
+preservation of the fit metadata, chunk-size invariance of the features, the
+provenance guards (subject overlap, the independent ``bipolar`` switch, a fitted
+extractor without provenance, classifier fit subjects), context-crop / full-row code
+equality, the residual-pool lifecycle, the pre-emphasis mappings, and the
 sign/shift behaviour of the diversity term.
 """
 
 from __future__ import annotations
 
+import pickle
 import tempfile
 from pathlib import Path
 
@@ -27,7 +32,7 @@ from omegaconf import OmegaConf  # noqa: E402
 from torch.utils.data import DataLoader, TensorDataset  # noqa: E402
 
 from src.models.components.shapeconv_sae import CHECKPOINT_NAME, AtomSpec, ShapeConvSAE, TrainSpec  # noqa: E402
-from src.utils import check_pretrained_provenance  # noqa: E402
+from src.utils import check_fit_provenance, check_pretrained_provenance  # noqa: E402
 
 PROVENANCE = {"train_subjects": ["s1", "s2"], "data": {"signal_mode": "bipolar", "target_sfreq": 256}}
 
@@ -42,6 +47,14 @@ def _tiny_loader(seed: int = 0) -> tuple[DataLoader, torch.Tensor]:
     generator = torch.Generator().manual_seed(seed)
     x = torch.randn(8, 2, 256, generator=generator)
     return DataLoader(TensorDataset(x, torch.zeros(8, dtype=torch.long)), batch_size=4), x
+
+
+def _expect_value_error(fn, message: str) -> None:
+    try:
+        fn()
+    except ValueError:
+        return
+    raise AssertionError(message)
 
 
 def test_projection_zero_mean_unit_norm_and_flat() -> None:
@@ -164,16 +177,192 @@ def test_pre_emphasis_rows_and_signal_domain_atoms() -> None:
     rows = model._rows(x)
     assert rows.shape == (6, 49)
     assert torch.allclose(rows, ShapeConvSAE._robust_scale(x.flatten(0, 1).diff(dim=-1)))
-    # A zero-mean atom in the difference domain integrates to a waveform that ends where it starts.
+    # A zero-mean atom in the difference domain integrates (L + 1 samples, zero baseline) to a
+    # waveform that ends where it starts.
     waveform = torch.randn(1, 1, 17, generator=torch.Generator().manual_seed(5))
     waveform[..., -1] = waveform[..., 0]
     with torch.no_grad():
         model.atoms.copy_(ShapeConvSAE._project(waveform.diff(dim=-1)))
     recovered = torch.from_numpy(model.atoms_signal_domain)[None]
-    target = ShapeConvSAE._project(waveform[..., 1:])
-    assert torch.allclose(recovered, target, atol=1e-5)
+    assert recovered.shape == (1, 1, 17)
+    assert torch.allclose(recovered, ShapeConvSAE._project(waveform), atol=1e-5)
+    # The analysis filter satisfies <s, diff(x)> = <f, x> for any x (up to the display normalization).
+    atom = model._project(model.atoms.detach())
+    filt = torch.from_numpy(model.atoms_analysis_filter)[None]
+    probe = torch.randn(1, 1, 17, generator=torch.Generator().manual_seed(6))
+    lhs = (atom * probe.diff(dim=-1)).sum()
+    raw_filter = F.pad(atom, (1, 0)) - F.pad(atom, (0, 1))
+    assert torch.allclose(lhs, (raw_filter * probe).sum(), atol=1e-5)
+    assert torch.allclose(filt, ShapeConvSAE._project(raw_filter), atol=1e-6)
     plain = ShapeConvSAE(spec=AtomSpec(n_atoms=1, atom_len=16, pre_emphasis="none"), device="cpu")
     assert plain._rows(x).shape == (6, 50)
+    assert plain.atoms_signal_domain.shape == (1, 16)
+
+
+def test_format2_checkpoint_migrates_to_none_and_refuses_diff() -> None:
+    loader, x = _tiny_loader()
+    model = _tiny_model(pre_emphasis="none")
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        model.save_artifacts(out)
+        legacy = torch.load(out / CHECKPOINT_NAME, weights_only=True)
+        legacy["format"] = 2
+        legacy["spec"] = {k: v for k, v in legacy["spec"].items() if k != "pre_emphasis"}
+        legacy["train_spec"], legacy["random_state"] = legacy.pop("fit")["train_spec"], 0
+        torch.save(legacy, out / "legacy.pt")
+        migrated = ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16, pre_emphasis="none"), device="cpu",
+                                pretrained=out / "legacy.pt")
+        assert migrated.spec.pre_emphasis == "none"
+        assert torch.equal(migrated(x), model(x))
+        _expect_value_error(
+            lambda: ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16), device="cpu", pretrained=out / "legacy.pt"),
+            "a format-2 checkpoint was applied to differenced rows",
+        )
+        legacy["format"] = 1
+        torch.save(legacy, out / "older.pt")
+        _expect_value_error(
+            lambda: ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16, pre_emphasis="none"), device="cpu",
+                                 pretrained=out / "older.pt"),
+            "a format-1 checkpoint was accepted",
+        )
+
+
+def test_pickled_extractor_guard_and_migration() -> None:
+    loader, x = _tiny_loader()
+    model = _tiny_model()
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    data_cfg = OmegaConf.create({"signal_mode": "bipolar", "target_sfreq": 256})
+
+    class _Datamodule:
+        test_df = pd.DataFrame({"subject": ["s9"]})
+
+    restored = pickle.loads(pickle.dumps(model))
+    check_pretrained_provenance(restored, _Datamodule(), data_cfg)
+    assert torch.equal(restored(x), model(x))
+    restored.provenance = {}
+    _expect_value_error(lambda: check_pretrained_provenance(restored, _Datamodule(), data_cfg),
+                        "a fitted extractor without provenance passed the guard")
+    unfitted = _tiny_model()
+    check_pretrained_provenance(unfitted, _Datamodule(), data_cfg)
+    # An instance pickled before pre_emphasis existed: no artifact_format, spec without the field.
+    old = _tiny_model(pre_emphasis="none")
+    old.fit_unsupervised(loader, provenance=PROVENANCE)
+    reference = old(x)
+    state = old.__dict__.copy()
+    state.pop("artifact_format")
+    state.pop("fit_meta")
+    spec_state = {k: v for k, v in vars(old.spec).items() if k != "pre_emphasis"}
+    state["spec"] = AtomSpec.__new__(AtomSpec)
+    object.__setattr__(state["spec"], "__dict__", spec_state)
+    revived = ShapeConvSAE.__new__(ShapeConvSAE)
+    revived.__setstate__(state)
+    assert revived.spec.pre_emphasis == "none"
+    assert revived.fit_meta.get("migrated") is True
+    check_pretrained_provenance(revived, _Datamodule(), data_cfg)
+    assert torch.equal(revived(x), reference)
+
+
+def test_effective_signal_signature_includes_bipolar_switch() -> None:
+    class _Extractor:
+        provenance = {"train_subjects": ["s1"], "data": {"signal_mode": "raw", "bipolar": False}}
+
+    class _Datamodule:
+        test_df = pd.DataFrame({"subject": ["s9"]})
+
+    check_pretrained_provenance(_Extractor(), _Datamodule(), OmegaConf.create({"signal_mode": "raw", "bipolar": False}))
+    _expect_value_error(
+        lambda: check_pretrained_provenance(
+            _Extractor(), _Datamodule(), OmegaConf.create({"signal_mode": "raw", "bipolar": True})),
+        "the bipolar switch was not matched",
+    )
+    check_pretrained_provenance(
+        _Extractor(), _Datamodule(), OmegaConf.create({"signal_mode": "raw", "bipolar": True}), allow_data_mismatch=True
+    )
+
+
+def test_save_load_save_preserves_fit_metadata() -> None:
+    loader, _ = _tiny_loader()
+    fitted = ShapeConvSAE(
+        spec=AtomSpec(n_atoms=4, atom_len=16),
+        train_spec=TrainSpec(epochs=1, lam=2.0, crop_len=64, crops_per_row=4, crop_batch=64, n_init_samples=64),
+        random_state=7, device="cpu",
+    )
+    fitted.fit_unsupervised(loader, provenance=PROVENANCE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        fitted.save_artifacts(out)
+        reloaded = ShapeConvSAE(
+            spec=AtomSpec(n_atoms=4, atom_len=16), train_spec=TrainSpec(lam=0.5), random_state=42, device="cpu",
+            pretrained=out / CHECKPOINT_NAME,
+        )
+        (out / "again").mkdir()
+        reloaded.save_artifacts(out / "again")
+        saved = torch.load(out / "again" / CHECKPOINT_NAME, weights_only=True)
+        assert saved["fit"]["train_spec"]["lam"] == 2.0 and saved["fit"]["random_state"] == 7
+        assert saved["provenance"]["train_subjects"] == ["s1", "s2"]
+
+
+def test_fit_provenance_rejects_old_val_as_new_test() -> None:
+    class _Pipeline:
+        fit_provenance_ = {"fit_subjects": ["s1", "s2", "v1"], "calibration_subjects": ["v2"]}
+
+    class _Datamodule:
+        test_df = pd.DataFrame({"subject": ["t1"]})
+
+    check_fit_provenance(_Pipeline(), _Datamodule())
+    for swapped in ("v1", "v2", "s1"):
+        _Datamodule.test_df = pd.DataFrame({"subject": [swapped, "t1"]})
+        _expect_value_error(lambda: check_fit_provenance(_Pipeline(), _Datamodule()), f"{swapped} in test passed")
+
+    class _Bare:
+        pass
+
+    _Datamodule.test_df = pd.DataFrame({"subject": ["t1"]})
+    _expect_value_error(lambda: check_fit_provenance(_Bare(), _Datamodule()), "a pipeline without fit subjects passed")
+
+
+def test_context_crop_code_matches_full_row_code() -> None:
+    model = ShapeConvSAE(
+        spec=AtomSpec(n_atoms=3, atom_len=16, thresh=0.5, pre_emphasis="none"),
+        train_spec=TrainSpec(crop_len=64), device="cpu",
+    )
+    atoms = model._project(model.atoms)
+    row = torch.randn(1, 1, 400, generator=torch.Generator().manual_seed(8))
+    full = model._code(*model._scores(row, atoms))
+    ctx, crop_len = model.context, model.train_spec.crop_len
+    start = 120
+    crop = row[..., start : start + crop_len + 2 * ctx]
+    crop = crop - model._center(crop).mean(-1, keepdim=True)
+    code = model._code(*model._scores(crop, atoms))
+    lo, hi = model._scored_positions()
+    assert (lo, hi) == (ctx - 15, ctx + crop_len)
+    assert torch.allclose(code[..., lo:hi], full[..., start + lo : start + hi], atol=1e-5)
+    # The masked decoder is the adjoint of the encoder on the scored part.
+    z = torch.randn_like(code)
+    lhs = (model._center(F.conv_transpose1d(z, atoms)) * model._center(crop)).sum()
+    rhs = (z * F.conv1d(F.pad(model._center(crop), (ctx, ctx)), atoms)).sum()
+    assert torch.allclose(lhs, rhs, atol=1e-3)
+
+
+def test_residual_pool_lifecycle() -> None:
+    model = _tiny_model()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    residual = torch.randn(4, 1, 64, generator=torch.Generator().manual_seed(9))
+    model._collect_reseed_patches(residual)
+    assert model._pool_energy.numel() > 0
+    dead, reseeded = model._reset_dead_atoms(torch.ones(4, dtype=torch.long), optimizer)
+    assert (dead, reseeded) == (0, 0) and model._pool_energy.numel() == 0
+    model._collect_reseed_patches(torch.zeros(4, 1, 64))
+    model._collect_reseed_patches(torch.full((4, 1, 64), float("nan")))
+    assert model._pool_energy.numel() == 0
+    before = model.atoms.detach().clone()
+    dead, reseeded = model._reset_dead_atoms(torch.zeros(4, dtype=torch.long), optimizer)
+    assert (dead, reseeded) == (4, 0) and torch.equal(model.atoms.detach(), before)
+    model._collect_reseed_patches(residual)
+    dead, reseeded = model._reset_dead_atoms(torch.tensor([0, 1, 1, 1]), optimizer)
+    assert (dead, reseeded) == (1, 1) and model._pool_energy.numel() == 0
+    assert not torch.equal(model.atoms.detach()[0], before[0])
 
 
 def test_diversity_sign_and_shift_aware() -> None:

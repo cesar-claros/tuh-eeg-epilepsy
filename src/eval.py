@@ -13,6 +13,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (
     RankedLogger,
     Trainer,
+    check_fit_provenance,
     check_pretrained_provenance,
     extras,
     task_wrapper,
@@ -77,10 +78,12 @@ def evaluate(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "trainer": trainer,
     }
 
-    # The saved feature extractor may be a learned dictionary: refuse it if its
-    # training subjects fall in this run's test split or its data settings differ.
+    # Refuse an evaluation split that any saved component has seen: the learned
+    # feature extractor (training subjects, data settings) and the classifier
+    # pipeline (fit and calibration subjects, which include val when it was merged).
     datamodule.setup()
     check_pretrained_provenance(feature_extractor, datamodule, cfg.data)
+    check_fit_provenance(pipeline, datamodule)
 
     log.info("Starting testing!")
     metric_dict = trainer.test(

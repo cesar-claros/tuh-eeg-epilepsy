@@ -119,7 +119,10 @@ def _run_seed_sweep(
     rows: list[dict[str, float]] = []
     for seed in tqdm(seeds, desc="HYDRA feature seed sweep"):
         feature_extractor = hydra.utils.instantiate(cfg.feature, random_state=seed)
-        check_pretrained_provenance(feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val)
+        check_pretrained_provenance(
+            feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val,
+            allow_data_mismatch=bool(cfg.feature.get("allow_data_mismatch", False)),
+        )
         scaler = hydra.utils.instantiate(cfg.scaler)
         model = hydra.utils.instantiate(cfg.model)
 
@@ -419,7 +422,10 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
     # A pretrained learned extractor must not have seen this run's held-out subjects
     # and must have been trained on the same signal (montage, rate, filters).
-    check_pretrained_provenance(feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val)
+    check_pretrained_provenance(
+        feature_extractor, datamodule, cfg.data, check_val=not trainer.merge_train_val,
+        allow_data_mismatch=bool(cfg.feature.get("allow_data_mismatch", False)),
+    )
 
     log.info(f"Instantiating sparse scaler <{cfg.scaler._target_}>")  # noqa: G004
     sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.scaler)
