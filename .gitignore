@@ -163,3 +163,6 @@ configs/local/default.yaml
 
 # Test / inspection script outputs
 tests/outputs/
+# SAE campaign driver logs (the per-run logs live under tests/outputs/)
+sae_phase1.log
+sae_stress.log

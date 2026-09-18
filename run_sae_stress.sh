@@ -6,8 +6,8 @@
 #* event-free condition, which only reports false alarms per channel-minute. Lower
 #* SNR and artifact conditions characterize failure; they are not required to pass.
 #*
-#* Run inside the HPC container, from the code/ repo root:
-#*   bash run_sae_stress.sh
+#* Run inside the HPC container, from the code/ repo root (about ten minutes):
+#*   nohup bash run_sae_stress.sh > sae_stress.log 2>&1 &
 #* Override inline, e.g.:  SEED=7000 OUT_ROOT=tests/outputs/sae_stress_x bash run_sae_stress.sh
 #*----------------------------------------------------------------------------*
 set -euo pipefail
