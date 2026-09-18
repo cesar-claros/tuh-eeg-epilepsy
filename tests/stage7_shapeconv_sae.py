@@ -226,9 +226,22 @@ def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, at
     true_counts = np.bincount(true[:, 0], minlength=n_windows)
     pred_counts = np.bincount(pred[:, 0], minlength=n_windows)
     polarity_ok = float(np.mean(np.sign(acts[mp, 3]) * sign == events[mt, 3])) if n_match else float("nan")
+    # An event is "close" when another true event on the same channel starts within atom_len
+    # samples: NMS keeps one activation per neighbourhood, so close pairs are where misses are expected.
+    isolated = np.ones(n_true, dtype=bool)
+    for i in range(n_true):
+        same = (true[:, 0] == true[i, 0]) & (true[:, 1] == true[i, 1])
+        same[i] = False
+        if same.any() and np.abs(true[same, 2] - true[i, 2]).min() <= atom_len:
+            isolated[i] = False
+    matched_true = np.zeros(n_true, dtype=bool)
+    matched_true[mt] = True
     return {
         "precision": n_match / n_pred if n_pred else float("nan"),
         "recall": n_match / n_true if n_true else float("nan"),
+        "recall_isolated": float(matched_true[isolated].mean()) if isolated.any() else float("nan"),
+        "recall_close": float(matched_true[~isolated].mean()) if (~isolated).any() else float("nan"),
+        "n_close": int((~isolated).sum()),
         "timing_error_samples": float(np.abs(pred[mp, 2] - true[mt, 2]).mean()) if n_match else float("nan"),
         "count_mae_per_window": float(np.abs(true_counts - pred_counts).mean()),
         "duplicates": duplicates,
@@ -237,6 +250,34 @@ def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, at
         "n_true": n_true,
         "n_pred": n_pred,
     }
+
+
+def _event_reconstruction_corr(torch, np, sae, x, events, atom_len: int) -> float:
+    """Mean correlation between the sparse reconstruction and the encoded row around each true event.
+
+    A dictionary-level recovery measure: it credits an event that is carved across
+    several atoms, unlike the single-atom template correlation. The segment runs
+    from ``onset - atom_len // 2`` to ``onset + atom_len + atom_len // 2`` in the
+    encoded row (under ``diff`` the onset index is the same up to one sample).
+    """
+    rows = sae._rows(x)
+    n_channels = x.shape[1]
+    atoms = sae._project(sae.atoms)
+    correlations = []
+    with torch.no_grad():
+        for start, code, _ in sae._row_chunks(x):
+            recon = torch.nn.functional.conv_transpose1d(code, atoms).squeeze(1)
+            for local in range(code.shape[0]):
+                row = start + local
+                w, c = divmod(row, n_channels)
+                for onset in events[(events[:, 0] == w) & (events[:, 1] == c), 2]:
+                    lo = max(int(onset) - atom_len // 2, 0)
+                    hi = min(int(onset) + atom_len + atom_len // 2, rows.shape[1])
+                    a, b = rows[row, lo:hi], recon[local, lo:hi]
+                    a, b = a - a.mean(), b - b.mean()
+                    denom = float(a.norm() * b.norm())
+                    correlations.append(float((a * b).sum()) / denom if denom > 0 else 0.0)
+    return float(np.mean(correlations)) if correlations else float("nan")
 
 
 def main(argv=None) -> int:
@@ -388,13 +429,19 @@ def main(argv=None) -> int:
         p_, r_ = val_scores["precision"], val_scores["recall"]
         f1 = 2 * p_ * r_ / (p_ + r_) if (p_ + r_) > 0 else 0.0
         calibration[atom] = (f1, fit[0], fit[1])
+    for atom in range(args.n_atoms):
+        f1, offset, sign = calibration.get(atom, (float("nan"), 0, 0))
+        _kv(f"atom {atom:2d}: |xcorr| / val F1 / offset / sign",
+            f"{xcorr[atom]:.3f} / {f1:.3f} / {offset:+d} / {sign:+d}")
+    _kv("event reconstruction |corr| (test, all atoms)",
+        f"{_event_reconstruction_corr(torch, np, sae, x_test, events_test, args.atom_len):.3f}")
     if calibration:
         chosen, (val_f1, offset, sign) = max(calibration.items(), key=lambda kv: (kv[1][0], xcorr[kv[0]]))
         _kv("atom / offset / sign (val)", f"{chosen} / {offset} / {sign:+d}  (val F1 {val_f1:.3f})")
         acts = acts_test[acts_test[:, 2] == chosen][:, [0, 1, 3, 4]]
         scores = _event_metrics(np, acts, events_test, offset, sign, args.match_tol, shape, args.atom_len)
-        for key in ("timing_error_samples", "count_mae_per_window", "duplicates",
-                    "false_alarms_per_channel_minute", "polarity_accuracy", "n_true", "n_pred"):
+        for key in ("recall_isolated", "recall_close", "n_close", "timing_error_samples", "count_mae_per_window",
+                    "duplicates", "false_alarms_per_channel_minute", "polarity_accuracy", "n_true", "n_pred"):
             _kv(key, f"{scores[key]:.3f}" if isinstance(scores[key], float) else scores[key])
         checks.soft(f"event precision (> {RECOVERY_MIN_PR})", scores["precision"] > RECOVERY_MIN_PR,
                     f"{scores['precision']:.3f}")

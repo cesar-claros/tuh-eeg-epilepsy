@@ -75,7 +75,7 @@ for log in "$OUT_ROOT"/*/stdout.log; do
   {
     echo "== $name"
     grep -E "deterministic failures|recovery below tolerance|template recovered|count AUROC|peak \|a\| AUROC" "$log" || true
-    grep -E "atom / offset / sign|event precision|event recall|timing_error|false_alarms" "$log" || true
+    grep -E "atom / offset / sign|event precision|event recall|recall_isolated|recall_close|timing_error|false_alarms|event reconstruction" "$log" || true
     grep "thresh/response" "$log" | tail -1 || true
   } >> "$summary"
 done
