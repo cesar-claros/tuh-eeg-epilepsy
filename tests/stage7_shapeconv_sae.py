@@ -279,7 +279,7 @@ def main(argv=None) -> int:
     checks.soft(f"count AUROC (> {RECOVERY_MIN_AUROC})", auc_count > RECOVERY_MIN_AUROC, f"{auc_count:.3f}")
     checks.soft(f"peak |a| AUROC (> {RECOVERY_MIN_AUROC})", auc_peak > RECOVERY_MIN_AUROC, f"{auc_peak:.3f}")
     _kv("max |cosine| AUROC", f"{roc_auc_score(y_test, cosines):.3f}")
-    _kv("events table (first rows)", sae.events(x_test[:2]).head(5))
+    _kv("events table (an event window)", sae.events(x_test[-1:]).head(5))
 
     _sec("-> flows to Stage 5")
     print("  # Counts are sparse non-negative, like HYDRA counts; the _SparseScaler")
