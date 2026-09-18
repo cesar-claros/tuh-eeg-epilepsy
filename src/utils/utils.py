@@ -3,6 +3,7 @@
 import warnings
 from collections.abc import Callable
 from importlib.util import find_spec
+from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig
@@ -142,3 +143,26 @@ def get_metric_value(
     log.info(f"Retrieved metric value! <{metric_name}={metric_value}>")  # noqa: G004
 
     return metric_value
+
+
+def dump_window_metadata(output_dir: Path, datamodule: Any) -> None:
+    """Save the per-split window metadata to ``windows_<split>.csv`` in ``output_dir``.
+
+    Each file lists the windows (subject, path, start, end, ...) used in that
+    split. The windowing is deterministic in ``data.seed`` and independent of
+    ``signal_mode``, so the files let you confirm that two runs used exactly the
+    same windows, or fix the split of a later run (``data.windows_*_csv``).
+
+    Parameters
+    ----------
+    output_dir : Path
+        Run output directory; created if absent.
+    datamodule : Any
+        A set-up datamodule exposing ``train_df`` / ``val_df`` / ``test_df``.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split in ("train", "val", "test"):
+        df = getattr(datamodule, f"{split}_df", None)
+        if df is not None and len(df):
+            df.to_csv(output_dir / f"windows_{split}.csv", index=False)
+            log.info(f"Saved {len(df)} {split} window rows to windows_{split}.csv")  # noqa: G004

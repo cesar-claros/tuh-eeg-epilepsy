@@ -15,6 +15,7 @@ from tqdm import tqdm
 root = rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (
     RankedLogger,
+    dump_window_metadata,
     extras,
     get_metric_value,
     task_wrapper,
@@ -33,22 +34,29 @@ log = RankedLogger(__name__, rank_zero_only=True)
 EPILEPSY_CLASS_NAMES = {0: "no-epilepsy", 1: "epilepsy"}
 
 
-def _dump_window_metadata(cfg: DictConfig, datamodule: Any) -> None:
-    """Save the per-split window metadata to CSV in the run output directory.
+def _check_pretrained_subjects(feature_extractor: Any, datamodule: Any) -> None:
+    """Refuse a pretrained extractor whose training subjects overlap this run's test subjects.
 
-    Each ``windows_<split>.csv`` lists the windows (subject, path, start, end,
-    ...) used in that split. Because the windowing is deterministic in
-    ``data.seed`` and independent of ``signal_mode`` / ``ica_keep_labels``, these
-    files let you confirm that two runs evaluated on exactly the same windows
-    (diff the files) or see precisely which windows differ.
+    A dictionary trained by ``src/train_sae.py`` records its training subjects.
+    Reusing it on a split drawn with another ``data.seed`` can put those subjects
+    in the test set, which leaks them into the features even though no label was
+    used. Runs with the same ``data.seed`` (and split ratios) pass this check.
+
+    Raises
+    ------
+    ValueError
+        If any test subject was used to train the extractor.
     """
-    output_dir = Path(cfg.paths.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for split in ("train", "val", "test"):
-        df = getattr(datamodule, f"{split}_df", None)
-        if df is not None and len(df):
-            df.to_csv(output_dir / f"windows_{split}.csv", index=False)
-            log.info(f"Saved {len(df)} {split} window rows to windows_{split}.csv")  # noqa: G004
+    trained_on = set(getattr(feature_extractor, "train_subjects", []) or [])
+    test_df = getattr(datamodule, "test_df", None)
+    if not trained_on or test_df is None or not len(test_df):
+        return
+    overlap = sorted(trained_on & set(test_df["subject"].unique().tolist()))
+    if overlap:
+        raise ValueError(
+            f"{len(overlap)} test subjects were used to train the pretrained feature extractor "
+            f"(e.g. {overlap[:5]}); rerun with the data.seed of the train_sae run"
+        )
 
 
 def _write_performance_csv(cfg: DictConfig, scores_by_split: dict) -> None:
@@ -134,6 +142,7 @@ def _run_seed_sweep(
     rows: list[dict[str, float]] = []
     for seed in tqdm(seeds, desc="HYDRA feature seed sweep"):
         feature_extractor = hydra.utils.instantiate(cfg.feature, random_state=seed)
+        _check_pretrained_subjects(feature_extractor, datamodule)
         scaler = hydra.utils.instantiate(cfg.scaler)
         model = hydra.utils.instantiate(cfg.model)
 
@@ -419,7 +428,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     # with different signal_mode / ica_keep_labels (same data.seed) can be
     # confirmed to use the same windows.
     datamodule.setup()
-    _dump_window_metadata(cfg, datamodule)
+    dump_window_metadata(Path(cfg.paths.output_dir), datamodule)
 
     # Optional multi-seed evaluation of the random HYDRA kernels: quantifies how
     # much accuracy varies with feature.random_state while the data split is held
@@ -430,6 +439,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor: nn.Module = hydra.utils.instantiate(cfg.feature)
+    _check_pretrained_subjects(feature_extractor, datamodule)
 
     log.info(f"Instantiating sparse scaler <{cfg.scaler._target_}>")  # noqa: G004
     sparse_scaler: nn.Module = hydra.utils.instantiate(cfg.scaler)

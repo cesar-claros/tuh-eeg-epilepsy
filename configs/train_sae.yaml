@@ -1,0 +1,24 @@
+# @package _global_
+
+# Standalone dictionary training (src/train_sae.py): fits feature=shapeconv_sae
+# on the training windows without extracting features or fitting a classifier.
+defaults:
+  - _self_
+  - data: tuh_eeg_epilepsy
+  - feature: shapeconv_sae
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional local: default
+
+task_name: "train_sae"
+
+# Output directory for this run (feeds hydra.run.dir). Holds sae_state.pt,
+# sae_atoms.npy, sae_training.csv and the windows_*.csv split files. Override:
+#   python src/train_sae.py output_dir=/scratch/me/sae_01
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
+tags: ["dev"]
+
+# seed for random number generators in pytorch, numpy and python.random
+seed: null

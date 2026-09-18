@@ -240,16 +240,16 @@ class Trainer:
 
         # Extract features for train (and val if needed by model, though sklearn pipeline usually just uses train)
         train_dataloader = datamodule.train_dataloader()
+        val_dataloader = datamodule.val_dataloader()
 
         # Extractors with learnable parameters (e.g. ShapeConvSAE) fit themselves on
-        # the training windows first. Labels are never read, and val stays untouched.
+        # the training windows first (val is only scored for the loss curve). Labels
+        # are never read. A pretrained extractor (feature.pretrained) skips this.
         if hasattr(feature_extractor, "fit_unsupervised"):
             log.info("Fitting the feature extractor without labels on the training windows")
-            feature_extractor.fit_unsupervised(train_dataloader)
+            feature_extractor.fit_unsupervised(train_dataloader, val_dataloader)
 
         train_data = self._extract_features(feature_extractor, train_dataloader, "train")
-
-        val_dataloader = datamodule.val_dataloader()
         val_data = self._extract_features(feature_extractor, val_dataloader, "val")
 
         if self.merge_train_val:

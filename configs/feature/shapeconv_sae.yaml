@@ -12,7 +12,10 @@ spec:
   amp_min: 0.0      # extra amplitude floor (robust-std units) for counted events
 train_spec:
   _target_: src.models.components.shapeconv_sae.TrainSpec
-  epochs: 5         # passes over the train dataloader (with lazy_loading each pass re-reads the EDFs)
+  epochs: 30        # passes over the train dataloader; each pass draws fresh random crops, so
+                    # updates = epochs * rows * crops_per_row / crop_batch. Check sae_training.csv
+                    # (loss_rec / val_loss_rec / n_dead) and stop where the curve is flat. With
+                    # lazy_loading each pass re-reads the EDFs; the default eager path is in RAM.
   lr: 0.001
   topk: 4           # nonzero code entries per 1 s crop; 1 = shift-invariant spherical k-means
   crop_len: 256     # training crop in samples; must be >= atom_len
@@ -21,6 +24,11 @@ train_spec:
   lambda_div: 0.01  # shift-aware diversity penalty (0 disables)
   n_init_samples: 20000
 random_state: 42
+# Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
+# the dictionary is loaded and fit_unsupervised is skipped; spec.n_atoms / atom_len must
+# match the checkpoint. Use the same data.seed as the train_sae run (train.py checks that
+# no test subject was used to train the dictionary).
+pretrained: null
 # Device: cpu | cuda | cuda:N | auto. Extraction memory ~ chunk_rows * n_atoms * T
 # floats (16 rows of a 2-minute 256 Hz window with 256 atoms: about 2 GiB); lower
 # chunk_rows on small GPUs.

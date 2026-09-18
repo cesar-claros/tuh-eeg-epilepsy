@@ -17,7 +17,7 @@ absolute deviation before encoding, so atoms and thresholds live in robust-std u
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +38,7 @@ _EPS = 1e-8
 _ENERGY_FLOOR = 1e-6
 _MAD_TO_STD = 1.4826
 _N_INIT_BATCHES = 8
+CHECKPOINT_NAME = "sae_state.pt"
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,9 @@ class TrainSpec:
     Parameters
     ----------
     epochs : int
-        Passes over the training dataloader.
+        Passes over the training dataloader. Every pass draws fresh random crops,
+        so the update count is ``epochs * rows * crops_per_row / crop_batch``; read
+        ``history`` (``sae_training.csv``) to see where the losses level off.
     lr : float
         Adam learning rate.
     topk : int
@@ -89,7 +92,7 @@ class TrainSpec:
         Sub-sequences sampled for the k-means initialization of the atoms.
     """
 
-    epochs: int = 5
+    epochs: int = 30
     lr: float = 1e-3
     topk: int = 4
     crop_len: int = 256
@@ -104,8 +107,9 @@ class ShapeConvSAE(nn.Module):
 
     Plugs into the sklearn-style ``Trainer`` like ``HydraTransformer``: ``forward``
     maps a window batch ``(B, C, T)`` to features ``(B, 2 * n_atoms)``. Unlike HYDRA
-    the atoms are learned, so the trainer first calls ``fit_unsupervised`` on the
-    training dataloader (labels are never read).
+    the atoms are learned: either the trainer calls ``fit_unsupervised`` on the
+    training dataloader (labels are never read), or a dictionary trained earlier by
+    ``src/train_sae.py`` is loaded through ``pretrained`` and the fit is skipped.
 
     Parameters
     ----------
@@ -121,6 +125,9 @@ class ShapeConvSAE(nn.Module):
         (window, channel) rows scored per pass at extraction time. Memory scales
         with ``chunk_rows * n_atoms * T``; 16 rows of a 2-minute window at 256 Hz
         with 256 atoms need about 2 GiB.
+    pretrained : str | Path | None
+        Path to a ``sae_state.pt`` checkpoint written by ``save_artifacts``. Its
+        ``n_atoms`` / ``atom_len`` must match ``spec``.
     """
 
     def __init__(
@@ -130,6 +137,7 @@ class ShapeConvSAE(nn.Module):
         random_state: int = 42,
         device: str | None = "auto",
         chunk_rows: int = 16,
+        pretrained: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.spec = spec or AtomSpec()
@@ -141,6 +149,31 @@ class ShapeConvSAE(nn.Module):
         init = torch.randn(self.spec.n_atoms, 1, self.spec.atom_len, generator=generator)
         self.atoms = nn.Parameter(self._project(init).to(self.device))
         self.history: list[dict[str, float]] = []
+        self.train_subjects: list[str] = []
+        self.fitted = False
+        if pretrained:
+            self.load_checkpoint(pretrained)
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load atoms, history, and training subjects from ``sae_state.pt`` and mark the module fitted.
+
+        Raises
+        ------
+        ValueError
+            If the checkpoint's ``n_atoms`` or ``atom_len`` differ from ``spec``.
+        """
+        checkpoint = torch.load(Path(path), map_location=self.device, weights_only=True)
+        saved = checkpoint["spec"]
+        for key in ("n_atoms", "atom_len"):
+            if saved[key] != getattr(self.spec, key):
+                raise ValueError(
+                    f"checkpoint {path} has {key}={saved[key]} but spec.{key}={getattr(self.spec, key)}"
+                )
+        self.load_state_dict(checkpoint["state_dict"])
+        self.history = checkpoint["history"]
+        self.train_subjects = checkpoint["train_subjects"]
+        self.fitted = True
+        log.info(f"Loaded {self.spec.n_atoms} pretrained atoms from {path} ({len(self.history)} epochs)")
 
     @property
     def atoms_numpy(self) -> np.ndarray:
@@ -287,25 +320,56 @@ class ShapeConvSAE(nn.Module):
                 state["exp_avg_sq"][dead] = 0.0
         return int(dead.numel())
 
-    def fit_unsupervised(self, dataloader: DataLoader) -> None:
+    def _crops(self, x: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+        """Random zero-mean crops ``(rows * crops_per_row, 1, crop_len)`` of a window batch."""
+        train_spec = self.train_spec
+        rows = self._robust_scale(x.to(self.device)).flatten(0, 1)
+        if rows.shape[1] < train_spec.crop_len:
+            raise ValueError(f"windows of {rows.shape[1]} samples are shorter than crop_len")
+        n_crops = rows.shape[0] * train_spec.crops_per_row
+        crops = self._sample_subsequences(rows, train_spec.crop_len, n_crops, generator)
+        return (crops - crops.mean(-1, keepdim=True)).unsqueeze(1)
+
+    @torch.no_grad()
+    def _val_loss(self, val_dataloader: DataLoader) -> float:
+        """Mean reconstruction loss on fixed random crops of the validation windows."""
+        generator = torch.Generator().manual_seed(self.random_state + 1)
+        atoms = self._project(self.atoms)
+        loss_sum, n_steps = 0.0, 0
+        for x, _ in val_dataloader:
+            crops = self._crops(x, generator)
+            for start in range(0, crops.shape[0], self.train_spec.crop_batch):
+                _, loss_rec, _ = self._step(crops[start:start + self.train_spec.crop_batch], atoms)
+                loss_sum += float(loss_rec)
+                n_steps += 1
+        return loss_sum / max(n_steps, 1)
+
+    def fit_unsupervised(self, dataloader: DataLoader, val_dataloader: DataLoader | None = None) -> None:
         """Learn the atoms by sparse reconstruction of random crops of the windows.
 
         Every dataloader batch ``(X, y)`` is scaled per (window, channel) row, cut
         into ``crops_per_row`` random crops per row, and consumed in optimizer steps
         of ``crop_batch`` crops. Labels ``y`` are ignored. After each epoch, atoms
-        that never entered a code are re-seeded from data. Per-epoch reconstruction
-        loss and dead-atom counts are kept in ``history``.
+        that never entered a code are re-seeded from data. Per-epoch train (and,
+        if given, validation) reconstruction loss and dead-atom counts are kept in
+        ``history``. A module loaded from a checkpoint (``fitted``) returns at once.
 
         Parameters
         ----------
         dataloader : DataLoader
             Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)``.
+        val_dataloader : DataLoader | None
+            Held-out windows scored after every epoch (monitoring only; nothing
+            is selected on them).
 
         Raises
         ------
         ValueError
             If ``crop_len`` is shorter than ``atom_len`` or longer than the windows.
         """
+        if self.fitted:
+            log.info("ShapeConv SAE already fitted (pretrained checkpoint); skipping fit_unsupervised")
+            return
         spec, train_spec = self.spec, self.train_spec
         if train_spec.crop_len < spec.atom_len:
             raise ValueError(f"crop_len={train_spec.crop_len} must be >= atom_len={spec.atom_len}")
@@ -318,14 +382,9 @@ class ShapeConvSAE(nn.Module):
             usage = torch.zeros(spec.n_atoms, dtype=torch.long, device=self.device)
             loss_sum, n_steps = 0.0, 0
             for x, _ in tqdm(dataloader, desc=f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}"):
-                rows = self._robust_scale(x.to(self.device)).flatten(0, 1)
-                if rows.shape[1] < train_spec.crop_len:
-                    raise ValueError(f"windows of {rows.shape[1]} samples are shorter than crop_len")
-                n_crops = rows.shape[0] * train_spec.crops_per_row
-                crops = self._sample_subsequences(rows, train_spec.crop_len, n_crops, generator)
-                crops = (crops - crops.mean(-1, keepdim=True)).unsqueeze(1)
-                order = torch.randperm(n_crops, generator=generator).to(self.device)
-                for start in range(0, n_crops, train_spec.crop_batch):
+                crops = self._crops(x, generator)
+                order = torch.randperm(crops.shape[0], generator=generator).to(self.device)
+                for start in range(0, crops.shape[0], train_spec.crop_batch):
                     batch = crops[order[start:start + train_spec.crop_batch]]
                     loss, loss_rec, used = self._step(batch, self._project(self.atoms))
                     optimizer.zero_grad(set_to_none=True)
@@ -340,14 +399,16 @@ class ShapeConvSAE(nn.Module):
             record = {
                 "epoch": epoch + 1,
                 "loss_rec": loss_sum / max(n_steps, 1),
+                "val_loss_rec": self._val_loss(val_dataloader) if val_dataloader is not None else float("nan"),
                 "n_dead": n_dead,
                 "n_steps": n_steps,
             }
             self.history.append(record)
             log.info(
-                f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}: "
-                f"loss_rec={record['loss_rec']:.4f} dead_atoms={n_dead} steps={n_steps}"
+                f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}: loss_rec={record['loss_rec']:.4f} "
+                f"val_loss_rec={record['val_loss_rec']:.4f} dead_atoms={n_dead} steps={n_steps}"
             )
+        self.fitted = True
 
     @torch.no_grad()
     def forward(self, X: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
@@ -383,8 +444,17 @@ class ShapeConvSAE(nn.Module):
         return torch.cat([counts_cat, best_cat], dim=1)
 
     def save_artifacts(self, output_dir: Path) -> None:
-        """Write the atoms (``sae_atoms.npy``) and the training history (``sae_training.csv``)."""
+        """Write ``sae_state.pt`` (reloadable checkpoint), ``sae_atoms.npy``, and ``sae_training.csv``."""
         output_dir = Path(output_dir)
+        torch.save(
+            {
+                "spec": asdict(self.spec),
+                "state_dict": {k: v.cpu() for k, v in self.state_dict().items()},
+                "history": self.history,
+                "train_subjects": list(self.train_subjects),
+            },
+            output_dir / CHECKPOINT_NAME,
+        )
         np.save(output_dir / "sae_atoms.npy", self.atoms_numpy)
         if self.history:
             pl.DataFrame(self.history).write_csv(output_dir / "sae_training.csv")

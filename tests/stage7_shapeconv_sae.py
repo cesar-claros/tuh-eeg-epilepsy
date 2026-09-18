@@ -19,6 +19,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import rootutils
 
@@ -73,6 +74,7 @@ def parse(argv):
     p.add_argument("--topk", type=int, default=3)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--out-dir", default="tests/outputs/stage7", help="where the checkpoint round trip writes")
     return p.parse_args(argv)
 
 
@@ -115,14 +117,14 @@ def main(argv=None) -> int:
         from sklearn.metrics import roc_auc_score
         from torch.utils.data import DataLoader, TensorDataset
 
-        from src.models.components.shapeconv_sae import AtomSpec, ShapeConvSAE, TrainSpec
+        from src.models.components.shapeconv_sae import CHECKPOINT_NAME, AtomSpec, ShapeConvSAE, TrainSpec
 
-        return np, torch, roc_auc_score, DataLoader, TensorDataset, AtomSpec, ShapeConvSAE, TrainSpec
+        return np, torch, roc_auc_score, DataLoader, TensorDataset, AtomSpec, ShapeConvSAE, TrainSpec, CHECKPOINT_NAME
 
     mods = _need(_imports, "torch, numpy, scikit-learn, polars, loguru")
     if mods is None:
         return 1
-    np, torch, roc_auc_score, DataLoader, TensorDataset, AtomSpec, ShapeConvSAE, TrainSpec = mods
+    np, torch, roc_auc_score, DataLoader, TensorDataset, AtomSpec, ShapeConvSAE, TrainSpec, CHECKPOINT_NAME = mods
 
     x_np, y_np, template = _synthetic(np, args)
     x, y = torch.from_numpy(x_np), torch.from_numpy(y_np)
@@ -141,11 +143,14 @@ def main(argv=None) -> int:
     )
     sae = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed, device="cpu")
     init_atoms = sae.atoms_numpy.copy()
-    sae.fit_unsupervised(loader)
+    sae.fit_unsupervised(loader, val_dataloader=loader)
 
     _sec("training history")
     for record in sae.history:
-        _kv(f"epoch {int(record['epoch'])}", f"loss_rec={record['loss_rec']:.4f} dead={int(record['n_dead'])}")
+        _kv(
+            f"epoch {int(record['epoch'])}",
+            f"loss_rec={record['loss_rec']:.4f} val={record['val_loss_rec']:.4f} dead={int(record['n_dead'])}",
+        )
 
     _sec("template recovery (max cross-correlation over lags)")
     atoms = sae.atoms_numpy
@@ -173,6 +178,18 @@ def main(argv=None) -> int:
     diff = ShapeConvSAE(spec=spec, train_spec=train_spec, random_state=args.seed + 1, device="cpu")
     _kv("same seed -> identical", bool(np.array_equal(init_atoms, same.atoms_numpy)))
     _kv("different seed -> differs", not np.array_equal(init_atoms, diff.atoms_numpy))
+
+    _sec("checkpoint round trip (save_artifacts -> pretrained=...)")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sae.train_subjects = ["synthetic"]
+    sae.save_artifacts(out_dir)
+    reloaded = ShapeConvSAE(spec=spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
+    _kv("fitted after load", reloaded.fitted)
+    reloaded.fit_unsupervised(loader)
+    _kv("fit skipped (epochs kept)", len(reloaded.history) == len(sae.history))
+    _kv("identical features", bool(torch.equal(reloaded(x), f)))
+    _kv("train_subjects", reloaded.train_subjects)
 
     _sec("-> flows to Stage 5")
     print("  # Event counts are sparse non-negative, like HYDRA counts; the")
