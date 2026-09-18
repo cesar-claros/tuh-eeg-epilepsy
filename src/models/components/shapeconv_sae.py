@@ -57,13 +57,18 @@ _FLAT_PATCH_NORM = 1e-3
 _MAD_TO_STD = 1.4826
 _CLIP = 20.0
 _MODES = ("shrink", "topk")
-_PRE_EMPHASIS = ("none", "diff")
-_STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis")
+_PRE_EMPHASIS = ("none", "diff", "diff_ar")
+_STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis", "ar_order")
 _RESEED_PER_STEP = 4
 _RESEED_POOL_FACTOR = 4
 CHECKPOINT_NAME = "sae_state.pt"
-CHECKPOINT_FORMAT = 3
-_LEGACY_FORMAT_NO_PRE_EMPHASIS = 2
+CHECKPOINT_FORMAT = 4
+# Spec fields absent from older checkpoints and the values that reproduce their behaviour.
+_SPEC_MIGRATIONS = {
+    2: {"pre_emphasis": "none", "ar_order": 8, "nms_half_width": None, "amp_min_relative": False},
+    3: {"ar_order": 8, "nms_half_width": None, "amp_min_relative": False},
+}
+_AR_RIDGE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -99,8 +104,22 @@ class AtomSpec:
         pre-emphasis, not a whitening: the background response scale still depends
         on the atom and on the band, and is measured per atom (``atom_response_std``)
         rather than assumed. Atoms then live in the differenced domain;
-        ``atoms_signal_domain`` integrates them back. ``none``: encode the scaled
-        row as is.
+        ``atoms_signal_domain`` integrates them back. ``diff_ar``: the difference
+        followed by an AR(``ar_order``) whitening filter fitted on the training rows
+        (pooled Yule-Walker), for band-limited signals where the difference alone
+        leaves the background coloured. ``none``: encode the scaled row as is.
+    ar_order : int
+        Order of the whitening filter (``diff_ar`` only). Structural: a checkpoint
+        must match.
+    nms_half_width : int | None
+        Half-width of the non-maximum-suppression neighbourhood in samples; ``None``
+        uses ``atom_len // 2``. Two activations of one atom closer than this on one
+        channel keep only the larger, so the value sets the closest pair of events
+        that can both be detected. The training context follows it.
+    amp_min_relative : bool
+        Interpret ``amp_min`` in units of each atom's measured background response
+        standard deviation (``atom_response_std``, from the validation crops) instead
+        of robust-std units of the row. Requires a fit with a validation loader.
     """
 
     n_atoms: int = 64
@@ -111,6 +130,9 @@ class AtomSpec:
     rho_min: float = 0.0
     amp_min: float = 0.0
     pre_emphasis: str = "diff"
+    ar_order: int = 8
+    nms_half_width: int | None = None
+    amp_min_relative: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,6 +242,7 @@ class ShapeConvSAE(nn.Module):
         self.log_thresh = nn.Parameter(
             torch.full((self.spec.n_atoms,), math.log(self.spec.thresh), device=self.device)
         )
+        self.register_buffer("ar_coef", torch.zeros(max(self.spec.ar_order, 0), device=self.device))
         self.history: list[dict[str, float]] = []
         self.provenance: dict[str, Any] = {}
         self.fit_meta: dict[str, Any] = {}
@@ -246,9 +269,13 @@ class ShapeConvSAE(nn.Module):
         super().__setstate__(state)
         if getattr(self, "artifact_format", None) == CHECKPOINT_FORMAT:
             return
-        if "pre_emphasis" not in vars(self.spec):
-            self.spec = replace(self.spec, pre_emphasis="none")
-            log.warning("Migrated a pickled ShapeConvSAE without pre_emphasis to pre_emphasis='none'")
+        present = vars(self.spec)
+        fill = {k: v for k, v in _SPEC_MIGRATIONS[2].items() if k not in present}
+        if fill:
+            self.spec = replace(self.spec, **fill)
+            log.warning(f"Migrated a pickled ShapeConvSAE: spec fields filled {fill}")
+        if "ar_coef" not in self._buffers:
+            self.register_buffer("ar_coef", torch.zeros(max(self.spec.ar_order, 0), device=self.device))
         if not getattr(self, "fit_meta", None):
             self.fit_meta = {
                 "train_spec": asdict(self.train_spec), "random_state": self.random_state, "migrated": True,
@@ -277,13 +304,14 @@ class ShapeConvSAE(nn.Module):
 
     @staticmethod
     def _saved_spec(checkpoint: dict[str, Any], path: str | Path) -> AtomSpec:
-        """The ``AtomSpec`` a checkpoint was trained with, migrating a format-2 file (no pre-emphasis)."""
+        """The ``AtomSpec`` a checkpoint was trained with; formats 2 and 3 are migrated (fields filled)."""
         version = checkpoint.get("format")
         spec_dict = dict(checkpoint.get("spec") or {})
         required = {f.name for f in fields(AtomSpec)}
-        if version == _LEGACY_FORMAT_NO_PRE_EMPHASIS and required - set(spec_dict) == {"pre_emphasis"}:
-            spec_dict["pre_emphasis"] = "none"
-            log.warning(f"{path}: format-2 checkpoint encoded raw rows; migrated to pre_emphasis='none'")
+        if version in _SPEC_MIGRATIONS:
+            fill = {k: v for k, v in _SPEC_MIGRATIONS[version].items() if k not in spec_dict}
+            spec_dict.update(fill)
+            log.warning(f"{path}: format-{version} checkpoint migrated; spec fields filled {fill}")
         elif version != CHECKPOINT_FORMAT:
             raise ValueError(f"{path}: unsupported checkpoint format {version!r} (expected {CHECKPOINT_FORMAT})")
         missing, unknown = required - set(spec_dict), set(spec_dict) - required
@@ -328,7 +356,9 @@ class ShapeConvSAE(nn.Module):
         provenance = checkpoint.get("provenance") or {}
         if not provenance.get("train_subjects"):
             raise ValueError(f"{path} has no training-subject provenance; refusing to reuse it")
-        self.load_state_dict(checkpoint["state_dict"])
+        missing, unexpected = self.load_state_dict(checkpoint["state_dict"], strict=False)
+        if unexpected or (missing and (set(missing) != {"ar_coef"} or self.spec.pre_emphasis == "diff_ar")):
+            raise ValueError(f"{path}: state_dict mismatch (missing {missing}, unexpected {unexpected})")
         self.history = checkpoint["history"]
         self.provenance = provenance
         self.fit_meta = checkpoint.get("fit") or {
@@ -397,9 +427,25 @@ class ShapeConvSAE(nn.Module):
         atom itself (``atom_len`` samples).
         """
         atoms = self._project(self.atoms.detach())
-        if self.spec.pre_emphasis == "diff":
+        if self.spec.pre_emphasis == "diff_ar":
+            atoms = self._unwhiten(atoms)
+        if self.spec.pre_emphasis in ("diff", "diff_ar"):
             atoms = self._project(F.pad(atoms.cumsum(-1), (1, 0)))
         return atoms.squeeze(1).cpu().numpy()
+
+    def _unwhiten(self, atoms: torch.Tensor) -> torch.Tensor:
+        """Inverse of the AR whitening (all-pole recursion), truncated at ``4 * ar_order`` extra samples."""
+        p = self.spec.ar_order
+        if p == 0:
+            return atoms
+        coef = self.ar_coef.detach()
+        n_out = atoms.shape[-1] + 4 * p
+        out = torch.zeros(*atoms.shape[:-1], n_out, device=atoms.device, dtype=atoms.dtype)
+        for t in range(n_out):
+            drive = atoms[..., t] if t < atoms.shape[-1] else 0.0
+            back = sum(coef[i - 1] * out[..., t - i] for i in range(1, min(p, t) + 1))
+            out[..., t] = drive + back
+        return out
 
     @property
     def atoms_analysis_filter(self) -> np.ndarray:
@@ -410,16 +456,53 @@ class ShapeConvSAE(nn.Module):
         normalized for display. Under ``none`` it is the atom itself.
         """
         atoms = self._project(self.atoms.detach())
-        if self.spec.pre_emphasis == "diff":
+        if self.spec.pre_emphasis == "diff_ar" and self.spec.ar_order > 0:
+            # <s, W x> = <W^T s, x>: correlate with the causal whitening kernel.
+            kernel = self._whitening_kernel().flip(-1)
+            atoms = F.conv1d(F.pad(atoms, (self.spec.ar_order, self.spec.ar_order)), kernel)
+        if self.spec.pre_emphasis in ("diff", "diff_ar"):
             atoms = self._project(F.pad(atoms, (1, 0)) - F.pad(atoms, (0, 1)))
         return atoms.squeeze(1).cpu().numpy()
+
+    def _whitening_kernel(self) -> torch.Tensor:
+        """The causal whitening FIR ``[-a_p, ..., -a_1, 1]`` as a ``(1, 1, ar_order + 1)`` conv1d kernel."""
+        one = torch.ones(1, device=self.ar_coef.device, dtype=self.ar_coef.dtype)
+        return torch.cat([-self.ar_coef.flip(0), one]).view(1, 1, -1)
+
+    def _whiten(self, rows: torch.Tensor) -> torch.Tensor:
+        """Apply ``y[t] = x[t] - sum_i a_i x[t - i]`` to rows ``(m, T)``; identity while the filter is unfitted."""
+        p = self.spec.ar_order
+        if p == 0 or not bool(self.ar_coef.any()):
+            return rows
+        return F.conv1d(F.pad(rows.unsqueeze(1), (p, 0)), self._whitening_kernel()).squeeze(1)
 
     def _rows(self, X: torch.Tensor) -> torch.Tensor:
         """(window, channel) rows of a batch ``(B, C, T)``: pre-emphasis, then robust scaling; ``(B*C, T')``."""
         rows = X.to(self.device).flatten(0, 1)
-        if self.spec.pre_emphasis == "diff":
+        if self.spec.pre_emphasis in ("diff", "diff_ar"):
             rows = rows.diff(dim=-1)
+        if self.spec.pre_emphasis == "diff_ar":
+            rows = self._whiten(self._robust_scale(rows))
         return self._robust_scale(rows)
+
+    @torch.no_grad()
+    def _fit_ar(self, dataloader: DataLoader) -> None:
+        """Fit the AR whitening filter by pooled Yule-Walker on the differenced, scaled training rows."""
+        p = self.spec.ar_order
+        if p == 0:
+            return
+        self.ar_coef.zero_()
+        autocorr = torch.zeros(p + 1, device=self.device, dtype=torch.float64)
+        for x, _ in tqdm(dataloader, desc="ShapeConv SAE AR whitening fit"):
+            rows = self._rows(x).double()
+            for k in range(p + 1):
+                autocorr[k] += (rows[:, k:] * rows[:, : rows.shape[1] - k]).sum()
+        autocorr = autocorr / autocorr[0].clamp_min(_EPS)
+        index = torch.arange(p, device=self.device)
+        toeplitz = autocorr[(index[:, None] - index[None, :]).abs()]
+        toeplitz = toeplitz + _AR_RIDGE * torch.eye(p, device=self.device, dtype=torch.float64)
+        self.ar_coef.copy_(torch.linalg.solve(toeplitz, autocorr[1 : p + 1]).to(self.ar_coef.dtype))
+        log.info(f"Fitted AR({p}) whitening: a = {[round(float(v), 3) for v in self.ar_coef]}")
 
     @property
     def thresholds(self) -> np.ndarray:
@@ -427,11 +510,15 @@ class ShapeConvSAE(nn.Module):
         return self.log_thresh.detach().exp().cpu().numpy()
 
     @property
+    def nms_half(self) -> int:
+        """Half-width of the NMS neighbourhood in samples (``nms_half_width`` or ``atom_len // 2``)."""
+        return self.spec.atom_len // 2 if self.spec.nms_half_width is None else int(self.spec.nms_half_width)
+
+    @property
     def context(self) -> int:
-        """Unscored samples on each side of a training crop."""
-        length = self.spec.atom_len
+        """Unscored samples on each side of a training crop: all placements plus the NMS neighbourhood."""
         if self.train_spec.context_len is None:
-            return length - 1 + length // 2
+            return self.spec.atom_len - 1 + self.nms_half
         return self.train_spec.context_len
 
     # ------------------------------------------------------------------ primitives
@@ -493,15 +580,15 @@ class ShapeConvSAE(nn.Module):
         return amplitude, rho
 
     def _local_maxima(self, magnitude: torch.Tensor) -> torch.Tensor:
-        """Strict local maxima of a non-negative map within +-atom_len/2 samples, earliest on ties.
+        """Strict local maxima of a non-negative map within +-``nms_half`` samples, earliest on ties.
 
         A position survives when it is positive, strictly larger than every value in
-        the ``atom_len // 2`` samples before it, and at least as large as every
-        value in the ``atom_len // 2`` samples after it. A plateau therefore keeps
+        the ``nms_half`` samples before it, and at least as large as every value in
+        the ``nms_half`` samples after it. A plateau therefore keeps
         only its first sample. The comparison is per (row, channel); there is no
         competition across atoms or channels.
         """
-        half = self.spec.atom_len // 2
+        half = self.nms_half
         positive = magnitude > 0
         if half == 0:
             return positive
@@ -773,6 +860,8 @@ class ShapeConvSAE(nn.Module):
             raise ValueError("fit_unsupervised needs provenance['train_subjects'] (the subjects behind the loader)")
         generator = torch.Generator().manual_seed(self.random_state)
         loader = self._shuffled_loader(dataloader, generator)
+        if spec.pre_emphasis == "diff_ar":
+            self._fit_ar(loader)
         self._init_atoms(loader, generator)
         optimizer = torch.optim.Adam(self.parameters(), lr=train_spec.lr)
         self.history = []
@@ -835,6 +924,16 @@ class ShapeConvSAE(nn.Module):
 
     # ------------------------------------------------------------------ extraction
 
+    def _event_threshold(self) -> torch.Tensor:
+        """Per-atom extraction threshold ``(n_atoms, 1)``: ``amp_min`` absolute, or times the response std."""
+        threshold = torch.full((self.spec.n_atoms, 1), float(self.spec.amp_min), device=self.device)
+        if not self.spec.amp_min_relative:
+            return threshold
+        if self.atom_response_std is None:
+            log.warning("amp_min_relative requested but no response scale was measured (fit without a val loader)")
+            return threshold
+        return threshold * torch.as_tensor(self.atom_response_std, device=self.device).view(-1, 1)
+
     def _row_chunks(self, X: torch.Tensor):
         """Yield ``(start, code, rho)`` over chunks of the scaled (window, channel) rows of ``X``."""
         rows = self._rows(X).unsqueeze(1)
@@ -866,10 +965,11 @@ class ShapeConvSAE(nn.Module):
             including those the gate or the threshold rejected).
         """
         n_windows, n_channels, _ = X.shape
+        threshold = self._event_threshold()
         counts, peaks, best = [], [], []
         for _, code, rho in self._row_chunks(X):
             magnitude = code.abs()
-            counts.append((magnitude > self.spec.amp_min).sum(-1))
+            counts.append((magnitude > threshold).sum(-1))
             peaks.append(magnitude.amax(-1))
             best.append(rho.abs().amax(-1))
         shape = (n_windows, n_channels, self.spec.n_atoms)
@@ -893,9 +993,10 @@ class ShapeConvSAE(nn.Module):
         events is left to the caller.
         """
         n_channels = X.shape[1]
+        threshold = self._event_threshold()
         parts = []
         for start, code, _ in self._row_chunks(X):
-            index = torch.nonzero(code.abs() > self.spec.amp_min)
+            index = torch.nonzero(code.abs() > threshold)
             row = index[:, 0] + start
             parts.append(
                 {

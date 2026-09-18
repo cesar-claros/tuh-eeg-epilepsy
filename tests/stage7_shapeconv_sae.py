@@ -25,6 +25,10 @@ window AUROCs of the best atom's count and peak features, the per-atom table,
 recall on isolated versus close events, the dictionary-level event reconstruction
 correlation, timing error, count MAE, duplicates and false alarms per channel-minute.
 
+Levers (options, not defaults): --pre-emphasis diff_ar (AR(--ar-order) whitening after
+the difference, fitted on the training rows), --nms-half H (NMS half-width separate from
+the atom length), --amp-min-relative (extraction threshold in units of each atom's
+measured background response std).
 Stress conditions (targeted runs, not a grid): --amplitude 4 / 2 (event peak in
 background std), --event-free (no events: reports false alarms per channel-minute
 only; the gate does not apply), --band-pass (corpus-matched 1-45 Hz zero-phase
@@ -129,7 +133,11 @@ def parse(argv):
     p.add_argument("--lam", type=float, default=0.5, help="L1 weight (shrink)")
     p.add_argument("--topk", type=int, default=3, help="code entries per crop (topk)")
     p.add_argument("--amp-min", type=float, default=4.0, help="extraction: count activations with |a| > amp_min")
-    p.add_argument("--pre-emphasis", choices=("diff", "none"), default="diff")
+    p.add_argument("--pre-emphasis", choices=("diff", "none", "diff_ar"), default="diff")
+    p.add_argument("--ar-order", type=int, default=8, help="AR whitening order (diff_ar)")
+    p.add_argument("--nms-half", type=int, default=None, help="NMS half-width in samples (default atom_len // 2)")
+    p.add_argument("--amp-min-relative", action="store_true",
+                   help="amp_min in units of each atom's measured background response std")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--batch", type=int, default=16)
@@ -362,17 +370,22 @@ def main(argv=None) -> int:
     _desc_tensor("X (window batch)", x_train)
     _kv("windows with events per draw", 0 if args.event_free else int(args.n_windows - args.n_windows // 2))
     stress_flags = ("event_free", "band_pass", "second_morphology", "artifacts", "synchronous")
-    stress = [k for k in stress_flags if getattr(args, k)]
+    stress = [f"amplitude {args.amplitude:g}"] + [k for k in stress_flags if getattr(args, k)]
     if args.pair_gap:
         stress.append(f"pair_gap {args.pair_gap}")
-    _kv("stress", ", ".join(stress) or "none")
+    if args.nms_half is not None:
+        stress.append(f"nms_half {args.nms_half}")
+    if args.amp_min_relative:
+        stress.append("amp_min_relative")
+    _kv("stress", ", ".join(stress))
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
     _kv("mode / pre-emphasis", f"{args.mode} / {args.pre_emphasis}")
 
     spec = AtomSpec(
         n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, thresh=args.thresh,
-        topk=args.topk, amp_min=args.amp_min, pre_emphasis=args.pre_emphasis,
+        topk=args.topk, amp_min=args.amp_min, pre_emphasis=args.pre_emphasis, ar_order=args.ar_order,
+        nms_half_width=args.nms_half, amp_min_relative=args.amp_min_relative,
     )
     train_spec = TrainSpec(
         epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
@@ -400,6 +413,8 @@ def main(argv=None) -> int:
     if args.mode == "shrink":
         _kv("learned thresholds", [round(float(v), 2) for v in sae.thresholds])
     _kv("val response std per atom", [round(float(v), 2) for v in sae.atom_response_std])
+    if args.pre_emphasis == "diff_ar":
+        _kv("AR whitening coefficients", [round(float(v), 3) for v in sae.ar_coef.cpu()])
 
     _banner("OUTPUT")
     f = sae(x_test)
@@ -427,7 +442,7 @@ def main(argv=None) -> int:
     sae.save_artifacts(out_dir)
     other_spec = AtomSpec(
         n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, pre_emphasis=args.pre_emphasis,
-        rho_min=0.35, amp_min=2.0,
+        ar_order=args.ar_order, rho_min=0.35, amp_min=2.0,
     )
     reloaded = ShapeConvSAE(spec=other_spec, train_spec=train_spec, device="cpu", pretrained=out_dir / CHECKPOINT_NAME)
     checks.hard("saved spec restored on load", reloaded.spec == sae.spec)
@@ -479,8 +494,8 @@ def main(argv=None) -> int:
     if args.event_free:
         minutes = shape[0] * shape[1] * shape[2] / SFREQ / 60.0
         per_atom = [float((acts_test[:, 2] == atom).sum()) / minutes for atom in range(args.n_atoms)]
-        _kv("false alarms per channel-minute, per atom", [round(v, 3) for v in per_atom])
-        _kv("false alarms per channel-minute, total", f"{sum(per_atom):.3f}")
+        _kv("false_alarms_per_channel_minute (per atom)", [round(v, 3) for v in per_atom])
+        _kv("false_alarms_per_channel_minute (total)", f"{sum(per_atom):.3f}")
         _kv("gate", "not applicable (no events planted)")
         _sec("RESULT")
         _kv("deterministic failures", checks.failed or "none")

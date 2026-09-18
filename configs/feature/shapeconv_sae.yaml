@@ -18,10 +18,19 @@ spec:
   rho_min: 0.0      # optional cosine gate (the paper's norm term); 0 = off, the residual corrects
                     # the energy bias instead (design note 3.2). Sweep {0, 0.2, 0.35} if curious.
   amp_min: 0.0      # extraction: an NMS peak counts as an activation when |a| > amp_min
-  pre_emphasis: diff # diff: encode the first difference of each row (flattens the 1/f^2 EEG
-                    # spectrum so a threshold of 3 is ~3 sigma for any atom; sae_atoms.npy is in
-                    # that domain, sae_atoms_signal.npy is the integrated waveform). none: raw rows,
-                    # where smooth atoms fire on background everywhere (stage 7, 2026-09-18).
+  pre_emphasis: diff # diff: encode the first difference of each row (removes most of the 1/f^2
+                    # low-frequency dominance; a pre-emphasis, not a whitening: the per-atom
+                    # background response is measured, sae_atom_response_std.npy). diff_ar: the
+                    # difference followed by an AR(ar_order) whitening fitted on the training rows,
+                    # for band-limited signals (the 1-45 Hz band-pass broke the event gate with
+                    # diff alone in the synthetic stress test). none: raw rows, where smooth atoms
+                    # fire on background everywhere. sae_atoms.npy is in the encoded domain,
+                    # sae_atoms_signal.npy the integrated synthesis shape.
+  ar_order: 8       # whitening order (diff_ar only; structural, a checkpoint must match)
+  nms_half_width: null # NMS half-width in samples (null = atom_len // 2); sets the closest pair of
+                    # events that can both be detected; the training context follows it
+  amp_min_relative: false # amp_min in units of each atom's measured background response std
+                    # (needs a fit with a validation loader) instead of robust units of the row
 train_spec:
   _target_: src.models.components.shapeconv_sae.TrainSpec
   epochs: 30        # passes over the train dataloader; each pass draws fresh random crops, so

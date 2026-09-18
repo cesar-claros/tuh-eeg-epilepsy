@@ -166,3 +166,4 @@ tests/outputs/
 # SAE campaign driver logs (the per-run logs live under tests/outputs/)
 sae_phase1.log
 sae_stress.log
+sae_levers.log

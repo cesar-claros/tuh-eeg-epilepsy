@@ -365,6 +365,91 @@ def test_residual_pool_lifecycle() -> None:
     assert not torch.equal(model.atoms.detach()[0], before[0])
 
 
+def test_format3_checkpoint_migrates_new_fields() -> None:
+    loader, x = _tiny_loader()
+    model = _tiny_model()
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        model.save_artifacts(out)
+        legacy = torch.load(out / CHECKPOINT_NAME, weights_only=True)
+        legacy["format"] = 3
+        for key in ("ar_order", "nms_half_width", "amp_min_relative"):
+            legacy["spec"].pop(key)
+        legacy["state_dict"].pop("ar_coef")
+        torch.save(legacy, out / "format3.pt")
+        migrated = ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16), device="cpu", pretrained=out / "format3.pt")
+        assert migrated.spec == model.spec
+        assert torch.equal(migrated(x), model(x))
+        legacy["spec"]["pre_emphasis"] = "diff_ar"
+        torch.save(legacy, out / "format3_ar.pt")
+        _expect_value_error(
+            lambda: ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16, pre_emphasis="diff_ar"), device="cpu",
+                                 pretrained=out / "format3_ar.pt"),
+            "a diff_ar checkpoint without ar_coef was accepted",
+        )
+
+
+def test_nms_half_width_sets_neighbourhood_and_context() -> None:
+    wide = ShapeConvSAE(spec=AtomSpec(n_atoms=1, atom_len=16), device="cpu")
+    narrow = ShapeConvSAE(spec=AtomSpec(n_atoms=1, atom_len=16, nms_half_width=2), device="cpu")
+    pair = torch.zeros(1, 1, 40)
+    pair[..., 10], pair[..., 15] = 3.0, 3.0
+    assert torch.nonzero(wide._local_maxima(pair))[:, 2].tolist() == [10]
+    assert torch.nonzero(narrow._local_maxima(pair))[:, 2].tolist() == [10, 15]
+    assert (wide.nms_half, wide.context) == (8, 23) and (narrow.nms_half, narrow.context) == (2, 17)
+
+
+def test_relative_amp_min_uses_measured_response_scale() -> None:
+    from dataclasses import replace
+
+    loader, x = _tiny_loader(seed=11)
+    val_loader, _ = _tiny_loader(seed=12)
+    model = _tiny_model(seed=11, amp_min=2.0)
+    model.fit_unsupervised(loader, val_dataloader=val_loader, provenance=PROVENANCE)
+    assert model.atom_response_std is not None and model.atom_response_std.shape == (4,)
+    assert torch.allclose(model._event_threshold(), torch.full((4, 1), 2.0))
+    model.spec = replace(model.spec, amp_min_relative=True)
+    scale = torch.as_tensor(model.atom_response_std).view(-1, 1)
+    assert torch.allclose(model._event_threshold(), 2.0 * scale)
+    counts = model(x)[:, :4]
+    manual = torch.zeros(16, 4)
+    for start, code, _ in model._row_chunks(x):
+        manual[start : start + code.shape[0]] = (code.abs() > 2.0 * scale).sum(-1).float()
+    assert torch.equal(counts, manual.view(8, 2, 4).sum(1))
+
+
+def test_diff_ar_whitens_a_coloured_background() -> None:
+    generator = torch.Generator().manual_seed(13)
+    noise = torch.randn(8, 2, 1024, generator=generator)
+    x = torch.zeros_like(noise)
+    for t in range(2, 1024):  # AR(2) background, strongly coloured
+        x[..., t] = 1.5 * x[..., t - 1] - 0.7 * x[..., t - 2] + noise[..., t]
+    loader = DataLoader(TensorDataset(x, torch.zeros(8, dtype=torch.long)), batch_size=4)
+    model = ShapeConvSAE(
+        spec=AtomSpec(n_atoms=4, atom_len=16, pre_emphasis="diff_ar", ar_order=4),
+        train_spec=TrainSpec(epochs=1, crop_len=64, crops_per_row=4, crop_batch=64, n_init_samples=64),
+        device="cpu",
+    )
+    before = model._rows(x)
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    assert bool(model.ar_coef.abs().sum() > 0)
+    after = model._rows(x)
+    assert after.shape == before.shape == (16, 1023)
+
+    def lag1(rows: torch.Tensor) -> float:
+        a, b = rows[:, 1:], rows[:, :-1]
+        return float((a * b).sum() / (a.norm() * b.norm()))
+
+    assert abs(lag1(after)) < 0.15 < abs(lag1(before))
+    assert model.atoms_signal_domain.shape == (4, 16 + 4 * 4 + 1)
+    assert model.atoms_analysis_filter.shape == (4, 16 + 4 + 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        model.save_artifacts(Path(tmp))
+        reloaded = ShapeConvSAE(spec=model.spec, device="cpu", pretrained=Path(tmp) / CHECKPOINT_NAME)
+        assert torch.equal(reloaded.ar_coef, model.ar_coef) and torch.equal(reloaded(x), model(x))
+
+
 def test_diversity_sign_and_shift_aware() -> None:
     model = ShapeConvSAE(spec=AtomSpec(n_atoms=2, atom_len=16), device="cpu")
     # Support on the first 10 samples only, zero-mean there, so a shift by 3 is an exact linear shift.
