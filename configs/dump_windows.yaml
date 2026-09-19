@@ -1,0 +1,24 @@
+# @package _global_
+
+# Frozen window manifests of a data configuration (src/dump_windows.py): builds the
+# subject-level split and window plan without loading signal, checks it, and writes
+# windows_{train,val,test}.csv + manifest_provenance.json. Later runs reuse them with
+# data.windows_{train,val,test}_csv (and data.lazy_loading=true). Pass the SAME data
+# settings (signal_mode, filter_freq, target_sfreq, repair flags, seed) to every consumer.
+defaults:
+  - _self_
+  - data: tuh_eeg_epilepsy
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional local: default
+
+task_name: "dump_windows"
+
+# Output directory (feeds hydra.run.dir). Override, e.g.:
+#   python src/dump_windows.py data.lazy_loading=true data.signal_mode=bipolar \
+#       data.filter_freq=[1,45] data.seed=42 output_dir=logs/manifests/phase2_seed42
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
+tags: ["dev"]
+seed: null

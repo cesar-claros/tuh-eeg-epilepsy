@@ -12,11 +12,15 @@
 #* (src/sae_diagnostics.py). Test windows are never encoded here. No classifier is
 #* fitted here (Phase 3).
 #*
-#* Manifests: any run with the same data settings writes windows_{train,val,test}.csv
-#* to its output dir (e.g. the HYDRA control run of Phase 3, or a first train_sae.py
-#* run). Reusing them needs data.lazy_loading=true; every Python entry point asserts
-#* that the three plans are non-empty and subject-disjoint before fitting. EDIT
-#* DATA_DIR and MANIFEST_DIR.
+#* Manifests: src/dump_windows.py writes windows_{train,val,test}.csv plus
+#* manifest_provenance.json from the SAME data settings without loading signal:
+#*   python src/dump_windows.py data.lazy_loading=true data.signal_mode=bipolar \
+#*     data.filter_freq=[1,45] data.seed=42 output_dir=logs/manifests/phase2_seed42
+#* (any train run with these settings writes the same three files). The repair flags
+#* filter the plan, so the dump and every arm must use the same INTERPOLATE_BAD /
+#* DROP_BAD_SEGMENTS. Reusing manifests needs data.lazy_loading=true; every Python
+#* entry point asserts that the three plans are non-empty and subject-disjoint before
+#* fitting. EDIT DATA_DIR and MANIFEST_DIR.
 #*
 #* Outputs: one root per invocation (OUT_ROOT, default logs/sae_phase2/<date>_<time>),
 #* never reused: an arm directory that already holds files stops the script. Per arm,
