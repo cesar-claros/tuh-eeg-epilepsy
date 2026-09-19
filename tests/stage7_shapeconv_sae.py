@@ -17,13 +17,17 @@ Stochastic recovery GATE (decision of 2026-09-18 after Phase 1 campaign 1; fails
 run only with --strict): event-level matching on the test draw. The atom, its
 activation-to-onset offset and its polarity sign are calibrated on the VALIDATION
 draw (best validation F1); on the test draw, one-to-one matching within --match-tol
-samples must reach precision > 0.9 and recall > 0.9.
+samples (maximum cardinality, then minimum timing error) must reach precision > 0.9
+and recall > 0.9. Precision counts duplicate detections of a matched event as false
+positives.
 Reported DIAGNOSTICS (never fail the run): the single-atom template correlation
-(max |xcorr| in the encoded domain; demoted from a gate because feature splitting
-carves one event across atoms, so no single atom need equal the waveform), the
-window AUROCs of the best atom's count and peak features, the per-atom table,
-recall on isolated versus close events, the dictionary-level event reconstruction
-correlation, timing error, count MAE, duplicates and false alarms per channel-minute.
+(max |xcorr| between an atom and the template mapped into the encoded domain by the
+dictionary's own pre-emphasis; demoted from a gate because feature splitting carves
+one event across atoms, so no single atom need equal the waveform), the window
+AUROCs of the best atom's count and peak features, the per-atom table, recall on
+isolated versus close events, the dictionary-level event reconstruction correlation,
+timing error, count MAE, duplicates, unmatched activations per channel-minute (all)
+and false alarms per channel-minute (unmatched activations that are not duplicates).
 
 Levers (options, not defaults): --pre-emphasis diff_ar (AR(--ar-order) whitening after
 the difference, fitted on the training rows), --nms-half H (NMS half-width separate from
@@ -218,12 +222,19 @@ def _synthetic(np, args, seed: int):
 
 
 def _match_events(np, pred, true, tol: int):
-    """Greedy one-to-one matching of predicted onsets to true onsets within ``tol`` samples.
+    """One-to-one matching of predicted onsets to true onsets within ``tol`` samples.
 
     ``pred`` and ``true`` are integer arrays with columns (window, channel, sample).
-    Pairs are taken in order of increasing timing error within each (window,
-    channel). Returns the matched index arrays into ``pred`` and ``true``.
+    Within each (window, channel) the matching has maximum cardinality and, among
+    the maximum matchings, minimum total timing error (an assignment problem with
+    cost ``|dt|`` for feasible pairs and a cost larger than any feasible total for
+    the others). A greedy pass in order of timing error does not have this
+    property: true onsets ``[0, 6]`` and predictions ``[4, 10]`` at tolerance 6
+    admit two matches, and greedy takes the closest pair first and finds one.
+    Returns the matched index arrays into ``pred`` and ``true``.
     """
+    from scipy.optimize import linear_sum_assignment
+
     matched_p, matched_t = [], []
     keys = {tuple(k) for k in np.unique(np.concatenate([pred[:, :2], true[:, :2]]), axis=0)}
     for w, c in sorted(keys):
@@ -231,16 +242,14 @@ def _match_events(np, pred, true, tol: int):
         ti = np.flatnonzero((true[:, 0] == w) & (true[:, 1] == c))
         if len(pi) == 0 or len(ti) == 0:
             continue
-        error = np.abs(pred[pi, 2][:, None] - true[ti, 2][None, :])
-        pairs = np.argwhere(error <= tol)
-        used_p, used_t = set(), set()
-        for a, b in pairs[np.argsort(error[pairs[:, 0], pairs[:, 1]], kind="stable")]:
-            if a in used_p or b in used_t:
-                continue
-            used_p.add(a)
-            used_t.add(b)
-            matched_p.append(pi[a])
-            matched_t.append(ti[b])
+        error = np.abs(pred[pi, 2][:, None] - true[ti, 2][None, :]).astype(np.float64)
+        infeasible = tol * min(len(pi), len(ti)) + 1.0
+        cost = np.where(error <= tol, error, infeasible)
+        rows, cols = linear_sum_assignment(cost)
+        for a, b in zip(rows, cols):
+            if error[a, b] <= tol:
+                matched_p.append(pi[a])
+                matched_t.append(ti[b])
     return np.asarray(matched_p, dtype=np.int64), np.asarray(matched_t, dtype=np.int64)
 
 
@@ -305,11 +314,35 @@ def _event_metrics(np, acts, events, offset: int, sign: int, tol: int, shape, at
         "timing_error_samples": float(np.abs(pred[mp, 2] - true[mt, 2]).mean()) if n_match else float("nan"),
         "count_mae_per_window": float(np.abs(true_counts - pred_counts).mean()),
         "duplicates": duplicates,
+        "unmatched_per_channel_minute": len(unmatched) / minutes,
         "false_alarms_per_channel_minute": (len(unmatched) - duplicates) / minutes,
         "polarity_accuracy": polarity_ok,
         "n_true": n_true,
         "n_pred": n_pred,
     }
+
+
+def _encoded_template(np, torch, sae, template):
+    """The template in the dictionary's encoded domain, centered and unit-norm.
+
+    ``none``: the template. ``diff``: its first difference. ``diff_ar``: the first
+    difference followed by the fitted whitening filter, applied with ``ar_order``
+    zeros of lead-in before the template (the declared padding; the filter is
+    causal) and the ``ar_order``-sample tail the filter adds after it.
+    """
+    mode, p = sae.spec.pre_emphasis, sae.spec.ar_order
+    if mode == "none":
+        encoded = np.asarray(template, dtype=np.float64)
+    elif mode == "diff":
+        encoded = np.diff(template)
+    else:
+        row = torch.zeros(1, p + 1 + len(template) + p, dtype=torch.float32, device=sae.device)
+        row[0, p + 1 : p + 1 + len(template)] = torch.as_tensor(template, dtype=torch.float32)
+        with torch.no_grad():
+            whitened = sae._whiten(row.diff(dim=-1))
+        encoded = whitened[0, p:].cpu().numpy().astype(np.float64)  # first nonzero difference to the end of the tail
+    encoded = encoded - encoded.mean()
+    return encoded / np.linalg.norm(encoded)
 
 
 def _event_reconstruction_corr(torch, np, sae, x, events, atom_len: int) -> float:
@@ -480,8 +513,7 @@ def main(argv=None) -> int:
 
     _sec("recovery diagnostics (held-out test draw; references, not gates)")
     atoms = sae.atoms_numpy
-    target = np.diff(template) if args.pre_emphasis == "diff" else template
-    target = (target - target.mean()) / np.linalg.norm(target - target.mean())
+    target = _encoded_template(np, torch, sae, template)
     xcorr = np.array([np.abs(np.correlate(a, target, mode="full")).max() for a in atoms])
     best_atom = int(xcorr.argmax())
     _kv("per-atom max |xcorr| (encoded domain)", [round(float(v), 3) for v in xcorr])
@@ -535,8 +567,8 @@ def main(argv=None) -> int:
         acts = acts_test[acts_test[:, 2] == chosen][:, [0, 1, 3, 4]]
         scores = _event_metrics(np, acts, events_test, offset, sign, args.match_tol, shape, args.atom_len)
         for key in ("recall_isolated", "recall_close", "n_close", "recall_by_template", "timing_error_samples",
-                    "count_mae_per_window", "duplicates", "false_alarms_per_channel_minute", "polarity_accuracy",
-                    "n_true", "n_pred"):
+                    "count_mae_per_window", "duplicates", "unmatched_per_channel_minute",
+                    "false_alarms_per_channel_minute", "polarity_accuracy", "n_true", "n_pred"):
             _kv(key, f"{scores[key]:.3f}" if isinstance(scores[key], float) else scores[key])
         checks.soft(f"event precision (> {RECOVERY_MIN_PR})", scores["precision"] > RECOVERY_MIN_PR,
                     f"{scores['precision']:.3f}")

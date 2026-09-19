@@ -58,7 +58,7 @@ for entry in "${conditions[@]}"; do
   {
     echo "== $name"
     grep -E "stress|deterministic failures|gate below tolerance|template \|xcorr\||AR whitening" "$log" || true
-    grep -E "atom / offset / sign|event precision|event recall|recall_isolated|recall_close|false_alarms|val response std" "$log" || true
+    grep -E "atom / offset / sign|event precision|event recall|recall_isolated|recall_close|duplicates|unmatched_per|false_alarms|val response std" "$log" || true
     grep "thresh/response" "$log" | tail -1 || true
   } >> "$summary"
 done

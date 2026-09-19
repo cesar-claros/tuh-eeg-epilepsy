@@ -1,23 +1,38 @@
 """Full-window diagnostics of a fitted ShapeConv SAE on one split (Phase 2 measurements).
 
 Loads a dictionary (``feature.pretrained=<run>/sae_state.pt``) and the datamodule of the
-run, encodes every window of ``split`` (default ``val``) in full, and writes to
-``output_dir``:
+run, checks that the splits are subject-disjoint and that the dictionary's training
+subjects are not in the diagnosed held-out split, encodes every window of ``split``
+(default ``val``) in full, and writes to ``output_dir``:
 
-- ``sae_diagnostics.csv``: per atom, activations per valid channel-minute at two views
+- ``sae_diagnostics.csv``: per atom, activations per usable channel-minute at two views
   (every NMS peak, and above the extraction threshold: calibrated per-atom thresholds
-  when present, else ``amp_min``), the median and 99th percentile of the peak
-  magnitudes, the measured background response scale and the threshold-to-response
-  ratio, the peak frequency of the signal-domain shape, and the maximum absolute lag
-  coherence with any other atom;
+  when present, else ``amp_min``), the thresholded rate on the negative and on the
+  positive windows separately, the median and 99th percentile of the peak magnitudes,
+  the measured background response scale (RMS of the pre-threshold correlation on the
+  fit's validation crops), the threshold-to-response ratio and, in ``shrink`` mode, the
+  effective pre-shrink ratio ``(theta + tau) / response``, the peak frequency of the
+  signal-domain shape, the maximum absolute lag coherence with any other atom and, under
+  ``diff_ar``, the energy fraction of the inverse-whitening tail of the display shape;
+- ``sae_subject_rates.csv``: per subject of the split, its label, usable channel-minutes
+  and thresholded activation rate summed over atoms;
 - ``sae_atom_coherence.npy``: the ``(n_atoms, n_atoms)`` maximum absolute cross-correlation
-  over lags;
+  over lags; ``sae_encoded_autocorr.npy``: the normalized autocorrelation of the encoded
+  (pre-emphasized, scaled) rows at lags 0 to 16, a whitening check;
 - ``sae_atoms_snippets.png``: the signal-domain shape of the most active atoms next to
-  their highest-magnitude activations in the split, with the surrounding channels;
-- a log summary (flat rows, total rates, coherent pairs).
+  their highest-magnitude activations in the split, all channels in microvolts with a
+  stated spacing, channel names in loader order, and the recording, window and time of
+  each snippet;
+- ``sae_diagnostics_summary.csv`` and a log line: exposure (attempted, usable, excluded
+  channel-minutes), threshold source, total rates (all windows, negative windows,
+  positive windows), the median and quartiles of the per-subject rate over negative
+  subjects, silent atoms, coherent pairs, the median threshold ratios, the edge
+  activation fraction (startup region of the causal filters) and the maximum encoded
+  autocorrelation beyond lag 0.
 
-Rates are activation rates on the chosen development split, not event rates. Run on
-the HPC from ``code/``::
+Rates are activation rates on the chosen development split, not event rates, and rows
+that the extractor rejects (failed loads, flat channels, non-finite samples) count
+neither activations nor exposure. Run on the HPC from ``code/``::
 
     python src/sae_diagnostics.py feature.pretrained=logs/train_sae/runs/<ts>/sae_state.pt \\
         data.signal_mode=bipolar data.filter_freq=[1,45] split=val output_dir=logs/sae_diag/<name>
@@ -41,6 +56,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (  # noqa: E402
     RankedLogger,
     check_pretrained_provenance,
+    check_split_disjoint,
     extras,
     instantiate_feature,
     task_wrapper,
@@ -51,14 +67,16 @@ if TYPE_CHECKING:
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
+_HIST_BINS, _HIST_MAX = 4096, 128.0
+_AUTOCORR_LAGS = 16
+_SNIPPETS_PER_ATOM = 3
+_SNIPPET_ATOMS = 8
+
 
 def _coherence(atoms: np.ndarray) -> np.ndarray:
     """Maximum absolute cross-correlation over lags between unit-norm atoms, ``(K, K)``."""
     bank = torch.from_numpy(atoms).unsqueeze(1)
     return F.conv1d(bank, bank, padding=atoms.shape[1] - 1).abs().amax(-1).numpy()
-
-
-_HIST_BINS, _HIST_MAX = 4096, 128.0
 
 
 def _quantile(hist: torch.Tensor, q: float) -> float:
@@ -77,28 +95,64 @@ def _peak_frequency(shapes: np.ndarray, sfreq: float) -> np.ndarray:
     return freqs[spectrum[:, 1:].argmax(1) + 1]
 
 
-def _snippet_figure(path: Path, sae: Any, shapes: np.ndarray, snippets: dict[int, list], sfreq: float) -> None:
-    """One row per atom: the signal-domain shape, then its top activations with neighbouring channels."""
+def _unwhiten_tail_energy(sae: Any) -> np.ndarray:
+    """Energy fraction of the inverse-whitening tail (beyond ``atom_len``) of each display shape; nan unless diff_ar."""
+    n_atoms, length = sae.spec.n_atoms, sae.spec.atom_len
+    if sae.spec.pre_emphasis != "diff_ar" or sae.spec.ar_order == 0:
+        return np.full(n_atoms, np.nan)
+    with torch.no_grad():
+        shape = sae._unwhiten(sae._project(sae.atoms.detach())).squeeze(1)
+    energy = shape.pow(2)
+    return (energy[:, length:].sum(1) / energy.sum(1).clamp_min(1e-12)).cpu().numpy()
+
+
+def _robust_std(segment: np.ndarray) -> np.ndarray:
+    """Per-channel ``1.4826 * MAD`` of a segment ``(C, n)``, floored at a small value."""
+    centered = segment - np.median(segment, axis=1, keepdims=True)
+    return np.maximum(1.4826 * np.median(np.abs(centered), axis=1), 1e-9)
+
+
+def _snippet_figure(path: Path, shapes: np.ndarray, snippets: dict[int, list], sfreq: float,
+                    channel_names: list[str] | None, units: str) -> None:
+    """One row per atom: the signal-domain shape, then its top activations with every channel of the window.
+
+    Channels are drawn in loader order (alphabetical in this pipeline), which is
+    not montage adjacency. The spacing between channels is four times the median
+    robust standard deviation of the segment, stated in the panel title; the
+    activated channel is red.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     atoms = sorted(snippets)
-    fig, axes = plt.subplots(len(atoms), 4, figsize=(14, 2.2 * len(atoms)), squeeze=False)
+    fig, axes = plt.subplots(len(atoms), 1 + _SNIPPETS_PER_ATOM, figsize=(16, 2.6 * len(atoms)), squeeze=False)
     for row, atom in enumerate(atoms):
         t_shape = np.arange(shapes.shape[1]) / sfreq * 1000.0
         axes[row, 0].plot(t_shape, shapes[atom], color="black")
-        axes[row, 0].set_title(f"atom {atom}: signal-domain shape (ms)", fontsize=9)
-        for col, (magnitude, segment, channel) in enumerate(snippets[atom][:3], start=1):
-            t_seg = np.arange(segment.shape[1]) / sfreq * 1000.0
-            offsets = np.arange(segment.shape[0])[:, None] * 4.0
-            axes[row, col].plot(t_seg, (segment - offsets).T, color="0.6", linewidth=0.6)
-            axes[row, col].plot(t_seg, segment[channel] - offsets[channel], color="tab:red", linewidth=0.9)
-            axes[row, col].set_title(f"|a| = {magnitude:.1f}, channel {channel}", fontsize=9)
-            axes[row, col].set_yticks([])
+        axes[row, 0].set_title(f"atom {atom}: signal-domain shape (ms, unit norm)", fontsize=8)
+        for col, snippet in enumerate(snippets[atom][:_SNIPPETS_PER_ATOM], start=1):
+            segment, channel = snippet["segment"], snippet["channel"]
+            spacing = 4.0 * float(np.median(_robust_std(segment)))
+            t_seg = (np.arange(segment.shape[1]) + snippet["lo"]) / sfreq
+            offsets = np.arange(segment.shape[0])[:, None] * spacing
+            ax = axes[row, col]
+            ax.plot(t_seg, (segment - offsets).T, color="0.6", linewidth=0.5)
+            ax.plot(t_seg, segment[channel] - offsets[channel], color="tab:red", linewidth=0.9)
+            ax.axvline(snippet["sample"] / sfreq, color="tab:blue", linewidth=0.6, linestyle=":")
+            names = channel_names if channel_names and len(channel_names) == segment.shape[0] else None
+            ax.set_yticks(-offsets[:, 0])
+            ax.set_yticklabels(names if names else [str(c) for c in range(segment.shape[0])], fontsize=5)
+            name = names[channel] if names else str(channel)
+            ax.set_title(
+                f"|a| = {snippet['magnitude']:.1f}, {name}; {snippet['where']}; spacing {spacing:.0f} {units}",
+                fontsize=7,
+            )
+            ax.set_xlabel("window time (s)", fontsize=7)
     for ax in axes.flat:
-        ax.tick_params(labelsize=7)
+        ax.tick_params(labelsize=6)
+    fig.suptitle(f"channels in loader order (not montage adjacency); signal in {units}", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
@@ -111,7 +165,8 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     Raises
     ------
     ValueError
-        If ``feature.pretrained`` is not set or the split is unknown.
+        If ``feature.pretrained`` is not set, the split is unknown, or the split's
+        metadata is not aligned with its loader.
     """
     if not cfg.feature.get("pretrained"):
         raise ValueError("set feature.pretrained=<run>/sae_state.pt")
@@ -122,79 +177,156 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()
+    check_split_disjoint(datamodule)
     sae = instantiate_feature(cfg.feature)
-    check_pretrained_provenance(sae, datamodule, cfg.data, check_val=False)
+    # The diagnosed split must be held out from the dictionary: val when diagnosing val
+    # (test is always checked); diagnosing train is in-sample by construction.
+    check_pretrained_provenance(sae, datamodule, cfg.data, check_val=cfg.split == "val")
     sfreq = float(cfg.data.target_sfreq)
+    signal_scale = float(cfg.signal_scale)
     loader = getattr(datamodule, f"{cfg.split}_dataloader")()
-    n_atoms = sae.spec.n_atoms
-    threshold = sae._event_threshold().flatten()
+    meta = getattr(datamodule, f"{cfg.split}_df")
+    if len(meta) != len(loader.dataset):
+        raise ValueError(f"{cfg.split}_df has {len(meta)} rows but the loader has {len(loader.dataset)} windows")
+    channel_names = list(getattr(loader.dataset, "target_channels", None) or [])
+    n_atoms, atom_len = sae.spec.n_atoms, sae.spec.atom_len
+    threshold = sae._event_threshold().flatten().cpu()
     threshold_source = "calibrated" if sae.calibrated_thresholds is not None else "amp_min"
+    edge_len = atom_len + (sae.spec.ar_order if sae.spec.pre_emphasis == "diff_ar" else 0)
 
     peaks_all = torch.zeros(n_atoms, dtype=torch.long)
-    peaks_thr = torch.zeros(n_atoms, dtype=torch.long)
+    peaks_thr = torch.zeros(2, n_atoms, dtype=torch.long)  # by window label
+    peaks_edge = 0
     hist = torch.zeros(n_atoms, _HIST_BINS)
     top: dict[int, list] = {atom: [] for atom in range(n_atoms)}
-    rows_total, rows_flat, minutes = 0, 0, 0.0
-    margin = sae.spec.atom_len
+    autocorr = torch.zeros(_AUTOCORR_LAGS + 1, dtype=torch.float64)
+    minutes = torch.zeros(2)  # usable, by window label
+    window_counts: list[int] = []
+    window_minutes: list[float] = []
+    rows_total, rows_usable, n_positions = 0, 0, 0
+    attempted_minutes, offset = 0.0, 0
     with torch.no_grad():
-        for x, _ in loader:
+        for x, y in loader:
             n_windows, n_channels, n_times = x.shape
+            labels = torch.as_tensor(y).reshape(-1).long()
+            valid = sae._valid_rows(x.flatten(0, 1)).view(n_windows, n_channels)
+            row_minutes = n_times / sfreq / 60.0
             rows_total += n_windows * n_channels
-            rows_flat += int((x.abs().amax(-1) == 0).sum())
-            minutes += n_windows * n_channels * n_times / sfreq / 60.0
+            rows_usable += int(valid.sum())
+            attempted_minutes += n_windows * n_channels * row_minutes
+            for w in range(n_windows):
+                minutes[int(labels[w])] += float(valid[w].sum()) * row_minutes
+                window_minutes.append(float(valid[w].sum()) * row_minutes)
+            encoded = sae._rows(x).double()
+            for lag in range(_AUTOCORR_LAGS + 1):
+                autocorr[lag] += (encoded[:, lag:] * encoded[:, : encoded.shape[1] - lag]).sum().cpu()
+            counts_per_window = torch.zeros(n_windows, dtype=torch.long)
             for start, code, _ in sae._row_chunks(x):
                 magnitude = code.abs().cpu()
+                above = magnitude > threshold.view(1, -1, 1)
+                n_positions = magnitude.shape[2]
                 peaks_all += (magnitude > 0).sum(dim=(0, 2))
-                peaks_thr += (magnitude > threshold.cpu().view(1, -1, 1)).sum(dim=(0, 2))
+                peaks_edge += int(above[..., :edge_len].sum())
+                for local in range(magnitude.shape[0]):
+                    w = (start + local) // n_channels
+                    peaks_thr[int(labels[w])] += above[local].sum(dim=-1)
+                    counts_per_window[w] += int(above[local].sum())
                 for atom in range(n_atoms):
                     values = magnitude[:, atom][magnitude[:, atom] > 0]
                     if values.numel():
                         hist[atom] += torch.histc(values.clamp(max=_HIST_MAX), bins=_HIST_BINS, min=0.0, max=_HIST_MAX)
-                    for local, sample in zip(*torch.nonzero(magnitude[:, atom] > threshold[atom].cpu(), as_tuple=True)):
+                    for local, sample in zip(*torch.nonzero(above[:, atom], as_tuple=True)):
                         value = float(magnitude[local, atom, sample])
-                        if len(top[atom]) < 3 or value > top[atom][-1][0]:
-                            row = start + int(local)
-                            w, c = divmod(row, n_channels)
-                            lo, hi = max(int(sample) - margin, 0), min(int(sample) + 2 * margin, n_times)
-                            top[atom].append((value, x[w, :, lo:hi].numpy(), c))
-                            top[atom] = sorted(top[atom], key=lambda item: -item[0])[:3]
+                        if len(top[atom]) < _SNIPPETS_PER_ATOM or value > top[atom][-1]["magnitude"]:
+                            w, c = divmod(start + int(local), n_channels)
+                            lo, hi = max(int(sample) - atom_len, 0), min(int(sample) + 2 * atom_len, n_times)
+                            row = meta.iloc[offset + w]
+                            t_event = float(row["start"]) + int(sample) / sfreq
+                            where = (f"{Path(str(row['path'])).name} t={t_event:.2f} s, "
+                                     f"subject {row['subject']}, window {offset + w}")
+                            top[atom].append({
+                                "magnitude": value, "channel": c, "sample": int(sample), "lo": lo, "where": where,
+                                "segment": np.array(x[w, :, lo:hi].numpy(), copy=True) * signal_scale,
+                            })
+                            top[atom] = sorted(top[atom], key=lambda item: -item["magnitude"])[:_SNIPPETS_PER_ATOM]
+            window_counts.extend(int(v) for v in counts_per_window)
+            offset += n_windows
 
+    usable_minutes = float(minutes.sum())
+    denominator = max(usable_minutes, 1e-9)
     shapes = sae.atoms_signal_domain
     coherence = _coherence(sae.atoms_numpy)
     off = coherence - np.eye(n_atoms)
     response = sae.atom_response_std if sae.atom_response_std is not None else np.full(n_atoms, np.nan)
-    thresholds = threshold.cpu().numpy()
+    thresholds = threshold.numpy()
+    safe_response = np.where(response > 0, response, np.nan)
+    effective = thresholds + sae.thresholds if sae.spec.mode == "shrink" else thresholds
     table = pl.DataFrame(
         {
             "atom": np.arange(n_atoms),
-            "rate_all_per_channel_minute": peaks_all.numpy() / max(minutes, 1e-9),
-            "rate_thresholded_per_channel_minute": peaks_thr.numpy() / max(minutes, 1e-9),
+            "rate_all_per_channel_minute": peaks_all.numpy() / denominator,
+            "rate_thresholded_per_channel_minute": peaks_thr.sum(0).numpy() / denominator,
+            "rate_thresholded_neg_per_channel_minute": peaks_thr[0].numpy() / max(float(minutes[0]), 1e-9),
+            "rate_thresholded_pos_per_channel_minute": peaks_thr[1].numpy() / max(float(minutes[1]), 1e-9),
             "peak_median": [_quantile(hist[atom], 0.5) for atom in range(n_atoms)],
             "peak_p99": [_quantile(hist[atom], 0.99) for atom in range(n_atoms)],
-            "response_std": response,
+            "response_rms": response,
             "threshold": thresholds,
-            "threshold_over_response": thresholds / np.where(response > 0, response, np.nan),
+            "threshold_over_response": thresholds / safe_response,
+            "effective_threshold_over_response": effective / safe_response,
             "peak_freq_hz": _peak_frequency(shapes, sfreq),
             "max_coherence": off.max(1),
+            "unwhiten_tail_energy_frac": _unwhiten_tail_energy(sae),
         }
     )
     table.write_csv(output_dir / "sae_diagnostics.csv")
     np.save(output_dir / "sae_atom_coherence.npy", coherence)
-    most_active = [int(a) for a in table.sort("rate_thresholded_per_channel_minute", descending=True)["atom"][:8]]
+    autocorr_norm = (autocorr / autocorr[0].clamp_min(1e-12)).numpy()
+    np.save(output_dir / "sae_encoded_autocorr.npy", autocorr_norm)
+
+    subjects = pl.DataFrame({
+        "subject": [str(s) for s in meta["subject"]],
+        "label": [int(v) for v in meta["epilepsy"]],
+        "usable_channel_minutes": window_minutes,
+        "thresholded_activations": window_counts,
+    }).group_by("subject", "label").agg(pl.col("usable_channel_minutes").sum(), pl.col("thresholded_activations").sum())
+    subjects = subjects.with_columns(
+        (pl.col("thresholded_activations") / pl.col("usable_channel_minutes").clip(lower_bound=1e-9))
+        .alias("rate_thresholded_per_channel_minute")
+    ).sort("subject")
+    subjects.write_csv(output_dir / "sae_subject_rates.csv")
+    negative = subjects.filter(pl.col("label") == 0)["rate_thresholded_per_channel_minute"].to_numpy()
+
+    ranked = table.sort("rate_thresholded_per_channel_minute", descending=True)["atom"]
+    most_active = [int(a) for a in ranked[:_SNIPPET_ATOMS]]
     snippets = {atom: top[atom] for atom in most_active if top[atom]}
     if snippets:
-        _snippet_figure(output_dir / "sae_atoms_snippets.png", sae, shapes, snippets, sfreq)
+        _snippet_figure(output_dir / "sae_atoms_snippets.png", shapes, snippets, sfreq, channel_names, cfg.signal_units)
 
     summary = {
         "split": cfg.split,
-        "channel_minutes": minutes,
-        "rows_flat_fraction": rows_flat / max(rows_total, 1),
+        "channel_minutes_attempted": attempted_minutes,
+        "channel_minutes_usable": usable_minutes,
+        "channel_minutes_excluded": attempted_minutes - usable_minutes,
+        "rows_excluded_fraction": (rows_total - rows_usable) / max(rows_total, 1),
         "threshold_source": threshold_source,
         "total_rate_all": float(table["rate_all_per_channel_minute"].sum()),
         "total_rate_thresholded": float(table["rate_thresholded_per_channel_minute"].sum()),
-        "atoms_silent_thresholded": int((peaks_thr == 0).sum()),
+        "total_rate_thresholded_neg": float(table["rate_thresholded_neg_per_channel_minute"].sum()),
+        "total_rate_thresholded_pos": float(table["rate_thresholded_pos_per_channel_minute"].sum()),
+        "neg_subjects": int(len(negative)),
+        "neg_subject_rate_median": float(np.median(negative)) if len(negative) else float("nan"),
+        "neg_subject_rate_q25": float(np.quantile(negative, 0.25)) if len(negative) else float("nan"),
+        "neg_subject_rate_q75": float(np.quantile(negative, 0.75)) if len(negative) else float("nan"),
+        "atoms_silent_thresholded": int((peaks_thr.sum(0) == 0).sum()),
         "pairs_coherence_over_0.9": int((np.triu(off, 1) > 0.9).sum()),
         "median_threshold_over_response": float(np.nanmedian(table["threshold_over_response"].to_numpy())),
+        "median_effective_threshold_over_response": float(
+            np.nanmedian(table["effective_threshold_over_response"].to_numpy())
+        ),
+        "edge_activation_fraction": peaks_edge / max(int(peaks_thr.sum()), 1),
+        "edge_expected_fraction": edge_len / max(n_positions, 1),
+        "encoded_autocorr_max_abs_lag1_16": float(np.abs(autocorr_norm[1:]).max()),
     }
     log.info(f"SAE diagnostics on {cfg.split}: {summary}")  # noqa: G004
     pl.DataFrame([summary]).write_csv(output_dir / "sae_diagnostics_summary.csv")

@@ -185,16 +185,87 @@ def split_provenance(datamodule: Any, data_cfg: DictConfig) -> dict[str, Any]:
     -------
     dict[str, Any]
         ``train_subjects`` (sorted), ``data`` (the settings that define the signal),
-        and ``train_windows_sha256`` (a hash of the training window plan).
+        ``train_windows_sha256`` (a hash of the effective training window plan,
+        after eligibility and repair filtering) and, when the frames exist,
+        ``val_windows_sha256`` and ``test_windows_sha256`` (lineage).
     """
     df = datamodule.train_df
     subjects = sorted(str(s) for s in df["subject"].unique())
-    plan = "\n".join(f"{p}|{s}|{e}" for p, s, e in zip(df["path"], df["start"], df["end"]))
-    return {
+    provenance: dict[str, Any] = {
         "train_subjects": subjects,
         "data": {k: _plain(data_cfg.get(k)) for k in _PROVENANCE_DATA_KEYS if k in data_cfg},
-        "train_windows_sha256": hashlib.sha256(plan.encode()).hexdigest(),
+        "train_windows_sha256": window_plan_sha256(df),
     }
+    for split in ("val", "test"):
+        frame = getattr(datamodule, f"{split}_df", None)
+        if frame is not None and len(frame):
+            provenance[f"{split}_windows_sha256"] = window_plan_sha256(frame)
+    return provenance
+
+
+def window_plan_sha256(df: Any) -> str:
+    """SHA-256 of a window plan (``path``, ``start``, ``end`` per window, in order)."""
+    plan = "\n".join(f"{p}|{s}|{e}" for p, s, e in zip(df["path"], df["start"], df["end"]))
+    return hashlib.sha256(plan.encode()).hexdigest()
+
+
+def calibration_provenance(datamodule: Any, keep_label: int | None) -> dict[str, Any]:
+    """What the extraction-threshold calibration saw: its subjects and the training-plan fingerprint.
+
+    Parameters
+    ----------
+    datamodule : Any
+        A set-up datamodule exposing ``train_df`` (columns ``subject``, ``epilepsy``).
+    keep_label : int | None
+        The label filter of the calibration (``None`` = every training window).
+    """
+    df = datamodule.train_df
+    if keep_label is not None:
+        df = df[df["epilepsy"].astype(int) == int(keep_label)]
+    return {
+        "subjects": sorted(str(s) for s in df["subject"].unique()),
+        "keep_label": keep_label,
+        "train_windows_sha256": window_plan_sha256(datamodule.train_df),
+    }
+
+
+def check_split_disjoint(datamodule: Any) -> None:
+    """Refuse a window plan whose splits share a subject, are empty, or give a subject two labels.
+
+    The engine builds subject-level splits, and ``tests/stage2_windowing.py``
+    asserts them offline; this check runs the same assertion at the start of every
+    run, which matters when the plan comes from supplied ``windows_*.csv``
+    manifests.
+
+    Parameters
+    ----------
+    datamodule : Any
+        A set-up datamodule exposing ``train_df``, ``val_df`` and ``test_df``
+        (columns ``subject``, ``epilepsy``).
+
+    Raises
+    ------
+    ValueError
+        On an empty split, a subject in two splits, or a subject with more than
+        one label.
+    """
+    frames = {split: getattr(datamodule, f"{split}_df", None) for split in ("train", "val", "test")}
+    subjects: dict[str, set[str]] = {}
+    for split, frame in frames.items():
+        if frame is None or not len(frame):
+            raise ValueError(f"the {split} split has no windows")
+        subjects[split] = {str(s) for s in frame["subject"].unique()}
+    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+        overlap = sorted(subjects[a] & subjects[b])
+        if overlap:
+            raise ValueError(f"{len(overlap)} subjects are in both {a} and {b} (e.g. {overlap[:5]})")
+    labels: dict[str, set[int]] = {}
+    for frame in frames.values():
+        for subject, label in zip(frame["subject"], frame["epilepsy"]):
+            labels.setdefault(str(subject), set()).add(int(label))
+    mixed = sorted(s for s, ls in labels.items() if len(ls) > 1)
+    if mixed:
+        raise ValueError(f"{len(mixed)} subjects carry more than one label (e.g. {mixed[:5]})")
 
 
 def _subject_overlap(subjects: set[str], datamodule: Any, splits: list[str]) -> tuple[str, list[str]]:

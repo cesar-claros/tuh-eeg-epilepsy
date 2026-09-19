@@ -510,14 +510,35 @@ class ShapeConvSAE(nn.Module):
             return rows
         return F.conv1d(F.pad(rows.unsqueeze(1), (p, 0)), self._whitening_kernel()).squeeze(1)
 
+    @staticmethod
+    def _valid_rows(rows: torch.Tensor) -> torch.Tensor:
+        """Usable rows ``(m,)`` of raw rows ``(m, T)``: finite everywhere and not constant.
+
+        A constant row (the all-zero substitute the lazy loader emits for a failed
+        load, or a flat channel) and a row with non-finite samples carry no signal;
+        they are zeroed by ``_rows`` and excluded from the exposure that
+        ``calibrate_amp_min`` and the diagnostics divide by. A partially padded
+        row (short recording) counts as usable over its whole length.
+        """
+        finite = torch.isfinite(rows).all(dim=-1)
+        spread = torch.nan_to_num(rows.amax(dim=-1) - rows.amin(dim=-1), nan=0.0) > 0
+        return finite & spread
+
     def _rows(self, X: torch.Tensor) -> torch.Tensor:
-        """(window, channel) rows of a batch ``(B, C, T)``: pre-emphasis, then robust scaling; ``(B*C, T')``."""
-        rows = X.to(self.device).flatten(0, 1)
+        """(window, channel) rows of a batch ``(B, C, T)``: pre-emphasis, then robust scaling; ``(B*C, T')``.
+
+        Rows that ``_valid_rows`` rejects come back as zeros, so they yield no crop,
+        no k-means candidate, no autocorrelation and no activation.
+        """
+        raw = X.to(self.device).flatten(0, 1)
+        valid = self._valid_rows(raw)
+        rows = raw
         if self.spec.pre_emphasis in ("diff", "diff_ar"):
             rows = rows.diff(dim=-1)
         if self.spec.pre_emphasis == "diff_ar":
             rows = self._whiten(self._robust_scale(rows))
-        return self._robust_scale(rows)
+        rows = self._robust_scale(rows)
+        return torch.where(valid.unsqueeze(-1), rows, torch.zeros_like(rows))
 
     @torch.no_grad()
     def _fit_ar(self, dataloader: DataLoader) -> None:
@@ -826,9 +847,11 @@ class ShapeConvSAE(nn.Module):
         -------
         tuple[torch.Tensor, torch.Tensor]
             ``[residual_energy, signal_energy, n_starts, n_crops]`` summed over the
-            crops, and the per-atom standard deviation of the pre-threshold
-            correlation ``y`` over all positions (the empirical background response
-            scale of each atom on the development cohort, events included).
+            crops, and the per-atom root mean square of the pre-threshold
+            correlation ``y`` over all positions (``atom_response_std``: the
+            empirical background response scale of each atom on the development
+            cohort, events included; an RMS, not a mean-subtracted standard
+            deviation, although the two agree when ``y`` has zero mean).
         """
         generator = torch.Generator().manual_seed(self.random_state + 1)
         atoms = self._project(self.atoms)
@@ -989,76 +1012,105 @@ class ShapeConvSAE(nn.Module):
         false_alarms_per_channel_minute: float,
         sfreq: float,
         keep_label: int | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> None:
         """Set per-atom extraction thresholds so that background activations reach a target rate.
 
-        For every atom, the NMS peaks of the code on the loader's rows (taken as
-        background, for example event-free synthetic rows or windows of negative
-        training subjects) are collected, and the threshold is placed so that at
-        most ``false_alarms_per_channel_minute`` peaks per channel-minute exceed it.
-        With ``keep_label`` only the windows whose label equals it are used (the
+        For every atom, the NMS peaks of the code on the loader's usable rows (taken
+        as background, for example event-free synthetic rows or windows of negative
+        training subjects) are ranked, and the threshold is placed so that at most
+        ``false_alarms_per_channel_minute`` peaks per usable channel-minute exceed
+        it. With ``keep_label`` only the windows whose label equals it are used (the
         design note's calibration on negative training subjects); this is the one
         place the module reads labels, and it must see training windows only.
-        The allowance is ``floor(rate * channel_minutes)`` and the threshold is the
-        next larger peak; an atom with no more peaks than the allowance keeps a
+        Rows that ``_valid_rows`` rejects (failed loads, flat channels, non-finite
+        samples) contribute neither peaks nor exposure. The allowance is
+        ``floor(rate * usable_channel_minutes)`` and the threshold is the next
+        larger peak; an atom with no more peaks than the allowance keeps a
         threshold just below its smallest peak, and an atom with no peak gets a
-        near-zero threshold. The thresholds are stored in the checkpoint
-        (``amp_min_atom``), recorded in ``fit_meta["amp_min_calibration"]`` and take
-        precedence over ``amp_min``. On EEG the loader's rows are development-cohort
-        background, not verified event-free intervals, so the rate is an activation
-        rate in that cohort, not a clinical false-alarm rate.
+        near-zero threshold. Memory is bounded: only the largest ``cap`` peaks per
+        atom are retained during the single pass, where ``cap`` is the allowance
+        computed from an upper bound of the exposure (every window of the
+        dataset), so the result is the exact order statistic. The thresholds are
+        stored in the checkpoint (``amp_min_atom``), recorded with the exposure in
+        ``fit_meta["amp_min_calibration"]`` and take precedence over ``amp_min``.
+        The rate is per atom (the dictionary-wide allowance is ``n_atoms`` times
+        it), it is an in-sample statistic of the calibration rows, and on EEG those
+        rows are development-cohort background, not verified event-free intervals,
+        so it is an activation rate in that cohort, not a clinical false-alarm rate.
 
         Parameters
         ----------
         dataloader : DataLoader
-            Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)``; ``y`` is read only
-            for the ``keep_label`` filter.
+            Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)`` (the same ``C`` and
+            ``T`` in every batch); ``y`` is read only for the ``keep_label`` filter.
         false_alarms_per_channel_minute : float
             Target rate of surviving background activations per atom.
         sfreq : float
             Sampling rate of the windows, to convert samples to minutes.
         keep_label : int | None
             Use only windows with this label (``None`` uses every window).
+        provenance : dict | None
+            Recorded with the calibration (for example the calibration subjects and
+            the window-plan fingerprint, see ``src.utils.calibration_provenance``).
 
         Raises
         ------
         ValueError
-            If no window passes the label filter.
+            If no usable window passes the label filter, or the batches differ in
+            shape.
         """
-        peaks: list[list[torch.Tensor]] = [[] for _ in range(self.spec.n_atoms)]
-        minutes = 0.0
+        n_atoms, rate = self.spec.n_atoms, float(false_alarms_per_channel_minute)
+        n_windows = len(dataloader.dataset)
+        shape: tuple[int, ...] | None = None
+        cap = 0
+        tail = torch.zeros(n_atoms, 0, device=self.device)
+        n_peaks = torch.zeros(n_atoms, dtype=torch.long, device=self.device)
+        usable, attempted, n_used = 0.0, 0.0, 0
         for x, y in tqdm(dataloader, desc="ShapeConv SAE threshold calibration"):
             if keep_label is not None:
                 x = x[torch.as_tensor(y).reshape(-1) == keep_label]
-                if x.shape[0] == 0:
-                    continue
-            minutes += x.shape[0] * x.shape[1] * x.shape[2] / sfreq / 60.0
+            if x.shape[0] == 0:
+                continue
+            if shape is None:
+                shape = tuple(x.shape[1:])
+                cap = int(rate * n_windows * shape[0] * shape[1] / sfreq / 60.0) + 1
+            elif tuple(x.shape[1:]) != shape:
+                raise ValueError(f"calibration batches differ in shape: {shape} then {tuple(x.shape[1:])}")
+            row_minutes = shape[1] / sfreq / 60.0
+            valid = self._valid_rows(x.flatten(0, 1))
+            attempted += valid.numel() * row_minutes
+            usable += int(valid.sum()) * row_minutes
+            n_used += x.shape[0]
             for _, code, _ in self._row_chunks(x):
-                magnitude = code.abs()
-                for atom in range(self.spec.n_atoms):
-                    values = magnitude[:, atom][magnitude[:, atom] > 0]
-                    peaks[atom].append(values)
-        if minutes == 0.0:
-            raise ValueError(f"no window with label {keep_label!r} in the calibration loader")
-        allowed = int(false_alarms_per_channel_minute * minutes)
-        thresholds = torch.zeros(self.spec.n_atoms, device=self.device)
-        for atom in range(self.spec.n_atoms):
-            values = torch.cat(peaks[atom]) if peaks[atom] else torch.zeros(0, device=self.device)
-            if values.numel() == 0:
+                values = code.abs().transpose(0, 1).reshape(n_atoms, -1)
+                n_peaks += (values > 0).sum(dim=1)
+                merged = torch.cat([tail, values], dim=1)
+                tail = merged.topk(min(cap, merged.shape[1]), dim=1).values
+        if usable == 0.0:
+            raise ValueError(f"no usable window with label {keep_label!r} in the calibration loader")
+        allowed = int(rate * usable)
+        thresholds = torch.zeros(n_atoms, device=self.device)
+        for atom in range(n_atoms):
+            count = int(n_peaks[atom])
+            if count == 0:
                 thresholds[atom] = _EPS
-            elif values.numel() <= allowed:
-                thresholds[atom] = max(float(values.min()) - _EPS, _EPS)
+            elif count <= allowed:
+                thresholds[atom] = max(float(tail[atom, count - 1]) - _EPS, _EPS)
             else:
-                thresholds[atom] = torch.topk(values, allowed + 1).values[-1]
+                thresholds[atom] = tail[atom, allowed]
         self.amp_min_atom.copy_(thresholds)
         self.fit_meta = {**self.fit_meta, "amp_min_calibration": {
-            "false_alarms_per_channel_minute": float(false_alarms_per_channel_minute),
-            "channel_minutes": float(minutes), "sfreq": float(sfreq), "keep_label": keep_label,
+            "false_alarms_per_channel_minute": rate, "allowance_per_atom": allowed,
+            "channel_minutes": float(usable), "channel_minutes_attempted": float(attempted),
+            "channel_minutes_excluded": float(attempted - usable), "n_windows": n_used,
+            "sfreq": float(sfreq), "keep_label": keep_label, "provenance": dict(provenance or {}),
         }}
         log.info(
-            f"Calibrated per-atom thresholds at {false_alarms_per_channel_minute} per channel-minute over "
-            f"{minutes:.1f} channel-minutes: median {float(thresholds.median()):.2f}, "
-            f"range {float(thresholds.min()):.2f} to {float(thresholds.max()):.2f}"
+            f"Calibrated per-atom thresholds at {rate} per channel-minute over {usable:.1f} usable "
+            f"channel-minutes ({attempted - usable:.1f} excluded; allowance {allowed} peaks per atom): "
+            f"median {float(thresholds.median()):.2f}, range {float(thresholds.min()):.2f} to "
+            f"{float(thresholds.max()):.2f}"
         )
 
     @property

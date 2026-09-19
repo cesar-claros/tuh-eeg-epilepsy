@@ -289,12 +289,14 @@ class Trainer:
             feature_extractor.fit_unsupervised(train_dataloader, val_dataloader, provenance=provenance)
         if calibration and hasattr(feature_extractor, "calibrate_amp_min"):
             if feature_extractor.calibrated_thresholds is None:
+                from src.utils.utils import calibration_provenance
+
+                keep_label = calibration.get("keep_label", 0)
                 log.info(f"Calibrating extraction thresholds on training windows with label "
-                         f"{calibration.get('keep_label', 0)} at {calibration['false_alarms_per_channel_minute']} "
-                         f"per channel-minute")
+                         f"{keep_label} at {calibration['false_alarms_per_channel_minute']} per channel-minute")
                 feature_extractor.calibrate_amp_min(
                     train_dataloader, calibration["false_alarms_per_channel_minute"], calibration["sfreq"],
-                    keep_label=calibration.get("keep_label", 0),
+                    keep_label=keep_label, provenance=calibration_provenance(datamodule, keep_label),
                 )
             else:
                 log.info("Pretrained extractor already carries calibrated thresholds; keeping them")

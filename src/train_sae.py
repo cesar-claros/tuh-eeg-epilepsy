@@ -25,6 +25,8 @@ rootutils.setup_root(__file__, pythonpath=True)
 from src.models.components.shapeconv_sae import CHECKPOINT_NAME  # noqa: E402
 from src.utils import (  # noqa: E402
     RankedLogger,
+    calibration_provenance,
+    check_split_disjoint,
     dump_window_metadata,
     extras,
     instantiate_feature,
@@ -66,6 +68,7 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")  # noqa: G004
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()
+    check_split_disjoint(datamodule)
     output_dir = Path(cfg.paths.output_dir)
     dump_window_metadata(output_dir, datamodule)
 
@@ -84,6 +87,7 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         feature_extractor.calibrate_amp_min(
             datamodule.train_dataloader(), calibration["false_alarms_per_channel_minute"], calibration["sfreq"],
             keep_label=calibration["keep_label"],
+            provenance=calibration_provenance(datamodule, calibration["keep_label"]),
         )
     feature_extractor.save_artifacts(output_dir)
     log.info(  # noqa: G004

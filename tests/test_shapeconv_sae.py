@@ -10,8 +10,11 @@ of a format-2 checkpoint and of an old pickled instance, save-load-save
 preservation of the fit metadata, chunk-size invariance of the features, the
 provenance guards (subject overlap, the independent ``bipolar`` switch, a fitted
 extractor without provenance, classifier fit subjects), context-crop / full-row code
-equality, the residual-pool lifecycle, the pre-emphasis mappings, and the
-sign/shift behaviour of the diversity term.
+equality, the residual-pool lifecycle, the pre-emphasis mappings, the sign/shift
+behaviour of the diversity term, the bounded calibration against a brute-force order
+statistic (ties, no peaks, small allowance, label filter, chunk sizes, unusable rows),
+unusable rows in extraction and in the AR fit, the split preflight, and the
+maximum-cardinality event matching of the synthetic stage.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import polars as pl  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
@@ -468,6 +472,139 @@ def test_calibrated_thresholds_bound_background_rate() -> None:
         assert torch.equal(reloaded.amp_min_atom, model.amp_min_atom)
         assert reloaded.fit_meta["amp_min_calibration"]["false_alarms_per_channel_minute"] == 6.0
         assert (Path(tmp) / "sae_amp_min_atom.npy").exists()
+
+
+def _exact_calibration(model: ShapeConvSAE, x: torch.Tensor, y: torch.Tensor, rate: float, keep_label) -> np.ndarray:
+    """Brute-force reference of ``calibrate_amp_min``: every peak of every usable row, then the order statistic."""
+    if keep_label is not None:
+        x = x[y == keep_label]
+    valid = model._valid_rows(x.flatten(0, 1))
+    minutes = float(valid.sum()) * x.shape[2] / 256.0 / 60.0
+    allowed = int(rate * minutes)
+    peaks = [[] for _ in range(model.spec.n_atoms)]
+    with torch.no_grad():
+        for _, code, _ in model._row_chunks(x):
+            magnitude = code.abs()
+            for atom in range(model.spec.n_atoms):
+                peaks[atom].append(magnitude[:, atom][magnitude[:, atom] > 0])
+    out = np.zeros(model.spec.n_atoms)
+    for atom in range(model.spec.n_atoms):
+        values = torch.cat(peaks[atom])
+        if values.numel() == 0:
+            out[atom] = 1e-8
+        elif values.numel() <= allowed:
+            out[atom] = max(float(values.min()) - 1e-8, 1e-8)
+        else:
+            out[atom] = float(torch.topk(values, allowed + 1).values[-1])
+    return out
+
+
+def test_calibration_matches_exact_order_statistic() -> None:
+    """The bounded single-pass calibration equals the brute-force order statistic in every edge case."""
+    loader, _ = _tiny_loader(seed=31)
+    model = _tiny_model(seed=31)
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    with torch.no_grad():
+        model.log_thresh[0] = float(np.log(1e6))  # atom 0 never fires: the no-peak case
+    generator = torch.Generator().manual_seed(32)
+    base = torch.randn(6, 2, 256, generator=generator)
+    x = torch.cat([base, base[:2]])  # duplicated windows: tied peaks
+    y = torch.tensor([0, 0, 1, 0, 1, 0, 0, 0])
+    for rate, keep_label in ((0.5, None), (6.0, 0), (4000.0, 0)):  # 4000 exceeds every atom's peak count
+        expected = _exact_calibration(model, x, y, rate, keep_label)
+        for chunk_rows in (1, 5, 16):
+            model.chunk_rows = chunk_rows
+            model.calibrate_amp_min(DataLoader(TensorDataset(x, y), batch_size=3), rate, 256.0, keep_label=keep_label)
+            got = model.calibrated_thresholds
+            assert got is not None and np.allclose(got, expected, atol=1e-6), (rate, keep_label, chunk_rows)
+    assert model.calibrated_thresholds[0] < 1e-7, "an atom without peaks gets a near-zero threshold"
+    # The label filter equals an explicitly negative-only loader; positive windows do not enter.
+    model.calibrate_amp_min(DataLoader(TensorDataset(x, y), batch_size=3), 0.5, 256.0, keep_label=0)
+    filtered = model.calibrated_thresholds.copy()
+    negative_only = DataLoader(TensorDataset(x[y == 0], y[y == 0]), batch_size=3)
+    model.calibrate_amp_min(negative_only, 0.5, 256.0)
+    assert np.allclose(model.calibrated_thresholds, filtered)
+    meta = model.fit_meta["amp_min_calibration"]
+    assert meta["channel_minutes"] == meta["channel_minutes_attempted"] and meta["allowance_per_atom"] >= 0
+    # Failed loads (all-zero windows), flat channels and non-finite rows change neither the thresholds
+    # nor the usable exposure; the excluded exposure is reported.
+    broken = x[y == 0].clone()
+    broken = torch.cat([broken, torch.zeros(1, 2, 256), broken[:1]])
+    broken[-1, 0] = 3.0  # constant nonzero channel
+    broken[-1, 1, 10] = float("nan")
+    labels = torch.zeros(broken.shape[0], dtype=torch.long)
+    model.calibrate_amp_min(DataLoader(TensorDataset(broken, labels), batch_size=4), 0.5, 256.0, keep_label=0)
+    assert np.allclose(model.calibrated_thresholds, filtered)
+    meta = model.fit_meta["amp_min_calibration"]
+    assert abs(meta["channel_minutes_excluded"] - 4 * 256 / 256.0 / 60.0) < 1e-9
+    assert abs(meta["channel_minutes"] - 12 * 256 / 256.0 / 60.0) < 1e-9
+    _expect_value_error(
+        lambda: model.calibrate_amp_min(DataLoader(TensorDataset(torch.zeros(2, 2, 256), labels[:2]), batch_size=2),
+                                        0.5, 256.0),
+        "calibration on unusable rows only must be refused",
+    )
+
+
+def test_invalid_rows_contribute_nothing() -> None:
+    """A failed load, a flat channel or a non-finite row yields zero features and does not touch the AR fit."""
+    loader, x = _tiny_loader(seed=41)
+    model = _tiny_model(seed=41, pre_emphasis="diff_ar", ar_order=4)
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    reference = model.ar_coef.clone()
+    broken = x.clone()
+    broken[0] = 0.0  # failed load
+    broken[1, 0] = 2.5  # flat channel
+    broken[2, 1, 100] = float("inf")  # non-finite sample
+    features = model(broken)
+    assert torch.isfinite(features).all()
+    assert bool((features[0] == 0).all()), "an all-zero window must give zero features"
+    assert torch.allclose(model(x)[3:], features[3:]), "other windows are unaffected"
+    assert model.events(broken).filter(pl.col("window") == 0).height == 0
+    unusable = torch.cat([torch.zeros(1, 2, 256), torch.full((1, 2, 256), float("nan")), torch.ones(1, 2, 256)])
+    padded = DataLoader(TensorDataset(torch.cat([x, unusable]), torch.zeros(11, dtype=torch.long)), batch_size=4)
+    model._fit_ar(padded)
+    assert torch.allclose(model.ar_coef, reference, atol=1e-6), "unusable rows must not enter the autocorrelation"
+
+
+def test_split_disjoint_preflight() -> None:
+    """The manifest preflight refuses empty splits, shared subjects and subjects with two labels."""
+    from src.utils import check_split_disjoint
+
+    class _DM:
+        def __init__(self, train, val, test) -> None:
+            self.train_df, self.val_df, self.test_df = train, val, test
+
+    def frame(subjects, labels):
+        return pd.DataFrame({"subject": subjects, "epilepsy": labels, "path": subjects,
+                             "start": [0.0] * len(subjects), "end": [1.0] * len(subjects)})
+
+    check_split_disjoint(_DM(frame(["a", "b"], [0, 1]), frame(["c"], [0]), frame(["d"], [1])))
+    _expect_value_error(
+        lambda: check_split_disjoint(_DM(frame(["a", "b"], [0, 1]), frame(["b"], [1]), frame(["d"], [1]))),
+        "a subject in train and val must be refused",
+    )
+    _expect_value_error(
+        lambda: check_split_disjoint(_DM(frame(["a"], [0]), frame([], []), frame(["d"], [1]))),
+        "an empty split must be refused",
+    )
+    _expect_value_error(
+        lambda: check_split_disjoint(_DM(frame(["a", "a"], [0, 1]), frame(["c"], [0]), frame(["d"], [1]))),
+        "a subject with two labels must be refused",
+    )
+
+
+def test_event_matching_is_maximum_cardinality() -> None:
+    """The stage's matcher finds both feasible pairs where a greedy closest-first pass finds one."""
+    from tests.stage7_shapeconv_sae import _match_events
+
+    true = np.array([[0, 0, 0], [0, 0, 6]])
+    pred = np.array([[0, 0, 4], [0, 0, 10]])
+    mp, mt = _match_events(np, pred, true, tol=6)
+    assert len(mp) == 2 and sorted(mp.tolist()) == [0, 1] and sorted(mt.tolist()) == [0, 1]
+    # Among maximum matchings the timing cost is minimal: 4 -> 6 and 10 -> ... is infeasible, so 4 -> 0, 10 -> 6.
+    assert set(zip(mp.tolist(), mt.tolist())) == {(0, 0), (1, 1)}
+    mp, mt = _match_events(np, pred[:1], true, tol=6)
+    assert (mp.tolist(), mt.tolist()) == ([0], [1]), "a single prediction takes its closest feasible event"
 
 
 def test_diversity_sign_and_shift_aware() -> None:

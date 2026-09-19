@@ -16,8 +16,15 @@ defaults:
 task_name: "sae_diagnostics"
 
 # Which split to encode. val is the development split; test must stay unopened until
-# the locked evaluation of the proposal.
+# the locked evaluation of the proposal. Diagnosing val requires the dictionary's
+# training subjects to be outside val (checked); train is in-sample by construction.
 split: val
+
+# Snippet figure only: the loader returns MNE data in volts, so the segments are
+# multiplied by signal_scale and labelled with signal_units. Set 1.0 / "raw" if the
+# data path changes units.
+signal_scale: 1000000.0
+signal_units: "uV"
 
 # Output directory (feeds hydra.run.dir). Override, e.g.:
 #   python src/sae_diagnostics.py feature.pretrained=... output_dir=logs/sae_diag/D10

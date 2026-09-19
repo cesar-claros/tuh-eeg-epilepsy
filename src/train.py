@@ -16,6 +16,7 @@ root = rootutils.setup_root(__file__, pythonpath=True)
 from src.utils import (
     RankedLogger,
     check_pretrained_provenance,
+    check_split_disjoint,
     dump_window_metadata,
     extras,
     get_metric_value,
@@ -412,6 +413,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     # with different signal_mode / ica_keep_labels (same data.seed) can be
     # confirmed to use the same windows.
     datamodule.setup()
+    check_split_disjoint(datamodule)
     dump_window_metadata(Path(cfg.paths.output_dir), datamodule)
 
     # Optional multi-seed evaluation of the random HYDRA kernels: quantifies how
