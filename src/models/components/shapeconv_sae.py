@@ -17,17 +17,22 @@ opposite polarity on the two derivations around the focus.
 Atoms are learned without labels from random crops of the training windows; each
 crop carries context on both sides and only its central part is scored, so every
 scored sample has the full set of atom placements available. At extraction time each
-window yields, per atom, the channel-activation count (NMS peaks with
-``abs(a) > amp_min``, summed over channels), the peak absolute sparse coefficient,
+window yields, per atom, the channel-activation count (NMS peaks above the atom's
+extraction threshold, summed over channels), the peak absolute sparse coefficient,
 and the maximum absolute patch cosine over channels and time. ``events`` returns the
-activations themselves (window, channel, atom, sample, signed coefficient).
+activations themselves (window, channel, atom, sample, signed coefficient). The
+extraction threshold is, in order of precedence, a per-atom threshold calibrated to
+a background activation rate (``calibrate_amp_min``, the one place labels are read),
+``amp_min`` times the measured response scale (``amp_min_relative``), or ``amp_min``.
 
 Every (window, channel) row is first-differenced (``pre_emphasis="diff"``, the
-default; ``none`` skips it), then centered on its median, scaled by its MAD and
+default) or differenced and whitened by an AR filter fitted on the training rows
+(``diff_ar``; ``none`` skips both), then centered on its median, scaled by its MAD and
 clipped, so atoms, thresholds and coefficients are in robust-std units of the
-encoded row. The difference flattens the ``1/f^2`` EEG spectrum so that the
-background response of a matched filter is near unit variance for any atom; MAD
-scaling alone is not a whitening.
+encoded row. The difference removes most of the low-frequency dominance of the
+``1/f^2`` EEG spectrum; it is a pre-emphasis, not a whitening, so the background
+response scale of every atom is measured on validation crops
+(``atom_response_std``) rather than assumed.
 """
 
 from __future__ import annotations
@@ -94,7 +99,9 @@ class AtomSpec:
         Optional gate on the cosine between an atom and the centered patch it
         covers; matches with ``abs(rho) < rho_min`` are discarded. 0 disables it.
     amp_min : float
-        Extraction only: an NMS peak counts as an activation when ``abs(a) > amp_min``.
+        Extraction only: an NMS peak counts as an activation when ``abs(a) > amp_min``
+        (in response units with ``amp_min_relative``). Calibrated per-atom thresholds
+        (``calibrate_amp_min``) take precedence over it.
     pre_emphasis : str
         ``diff``: encode the first difference of every row (after which the row is
         scaled). EEG power falls as about ``1/f^2``, so a smooth atom correlated with
@@ -147,14 +154,16 @@ class TrainSpec:
     lr : float
         Adam learning rate.
     lam : float
-        L1 weight in ``shrink`` mode (per-sample L1 of the code on the scored part
-        of the crop, as in the demo).
+        L1 weight in ``shrink`` mode: the L1 norm of the code entries whose placement
+        overlaps the scored part of the crop, divided by ``crop_len`` (not the demo's
+        normalization; implementation document, section 5).
     crop_len : int
         Scored length of a training crop in samples (256 = 1 s at 256 Hz).
     context_len : int | None
         Unscored context added on each side of a crop, so that every scored sample
         has all ``atom_len`` atom placements and full NMS neighbourhoods available.
-        ``None`` uses ``atom_len - 1 + atom_len // 2``; 0 disables the context.
+        ``None`` uses ``atom_len - 1 + nms_half`` (``nms_half`` = ``nms_half_width``
+        or ``atom_len // 2``); 0 disables the context.
     crops_per_row : int
         Random crops drawn per (window, channel) row on every pass, in expectation
         (rows are drawn uniformly within each batch).
@@ -187,6 +196,8 @@ class ShapeConvSAE(nn.Module):
     the atoms are learned: either the trainer calls ``fit_unsupervised`` on the
     training dataloader (labels are never read), or a dictionary trained earlier by
     ``src/train_sae.py`` is loaded through ``pretrained`` and the fit is skipped.
+    ``calibrate_amp_min`` may then set per-atom extraction thresholds on background
+    windows (the one method that reads labels, through ``keep_label``).
 
     Parameters
     ----------
@@ -197,7 +208,8 @@ class ShapeConvSAE(nn.Module):
     train_spec : TrainSpec | None
         Unsupervised training schedule; ``None`` uses the defaults.
     random_state : int
-        Seed for the atom initialization, the batch order and the crop sampling.
+        Seed for the atom initialization, the batch order and the crop sampling
+        (the validation crops use ``random_state + 1``).
     device : str | None
         ``cpu`` | ``cuda`` | ``cuda:N`` | ``auto`` (cuda when available).
     chunk_rows : int
@@ -208,7 +220,8 @@ class ShapeConvSAE(nn.Module):
         Path to a ``sae_state.pt`` checkpoint written by ``save_artifacts``.
     override_spec : bool
         With ``pretrained``: keep the non-structural fields of ``spec`` (``thresh``,
-        ``topk``, ``rho_min``, ``amp_min``) instead of the saved ones. Logged.
+        ``topk``, ``rho_min``, ``amp_min``, ``nms_half_width``, ``amp_min_relative``)
+        instead of the saved ones. Logged.
 
     Raises
     ------
@@ -264,8 +277,11 @@ class ShapeConvSAE(nn.Module):
 
         An instance pickled before ``pre_emphasis`` existed encoded raw rows, so its
         spec is rebuilt with ``pre_emphasis="none"`` instead of inheriting the
-        class default; missing fit metadata is filled from the constructor values
-        it was fitted with and marked as migrated.
+        class default, and the fields added later (``ar_order``, ``nms_half_width``,
+        ``amp_min_relative``) get the values that reproduce the old behaviour. The
+        ``ar_coef`` and ``amp_min_atom`` buffers are registered when absent (zeros:
+        no whitening, no calibration); missing fit metadata is filled from the
+        constructor values it was fitted with and marked as migrated.
         """
         super().__setstate__(state)
         if getattr(self, "artifact_format", None) == CHECKPOINT_FORMAT:
@@ -329,14 +345,19 @@ class ShapeConvSAE(nn.Module):
         encoded exactly as it was trained. With ``override_spec`` the constructor's
         non-structural fields win and the difference is logged. The training
         schedule and seed the dictionary was fitted with are kept in ``fit_meta``
-        and are not replaced by the constructor's values.
+        and are not replaced by the constructor's values. The state dict (atoms,
+        log-thresholds, ``ar_coef``, ``amp_min_atom``) is loaded non-strictly:
+        ``amp_min_atom`` may be absent (uncalibrated or older file) and so may
+        ``ar_coef`` unless the spec is ``diff_ar``.
 
         Raises
         ------
         ValueError
             If the checkpoint format is unsupported, its spec is incomplete, a
-            structural field (``n_atoms``, ``atom_len``, ``mode``, ``pre_emphasis``)
-            differs from ``spec``, or it carries no training-subject provenance.
+            structural field (``n_atoms``, ``atom_len``, ``mode``, ``pre_emphasis``,
+            ``ar_order``) differs from ``spec``, it carries no training-subject
+            provenance, or its state dict lacks a required tensor (a ``diff_ar``
+            file without ``ar_coef``) or holds an unexpected one.
         """
         checkpoint = torch.load(Path(path), map_location=self.device, weights_only=True)
         saved = self._saved_spec(checkpoint, path)
@@ -381,10 +402,12 @@ class ShapeConvSAE(nn.Module):
     def save_artifacts(self, output_dir: Path) -> None:
         """Write ``sae_state.pt`` and the inspectable arrays.
 
-        ``sae_atoms.npy`` (encoded domain), ``sae_atoms_signal.npy`` (integrated
-        synthesis shapes, ``atom_len + 1`` samples), ``sae_atom_response_std.npy``
-        (when measured) and ``sae_training.csv``. The checkpoint stores the fit
-        metadata of the dictionary as fitted, not the constructor's current values.
+        ``sae_atoms.npy`` (encoded domain), ``sae_atoms_signal.npy`` (synthesis
+        shapes, see ``atoms_signal_domain``), ``sae_atom_response_std.npy`` (when
+        measured), ``sae_amp_min_atom.npy`` (when calibrated) and
+        ``sae_training.csv``. The checkpoint holds the format number, the spec, the
+        fit metadata of the dictionary as fitted (not the constructor's current
+        values), the state dict, the history, the provenance and the response scale.
         """
         output_dir = Path(output_dir)
         fit_meta = self.fit_meta or {"train_spec": asdict(self.train_spec), "random_state": self.random_state}
@@ -422,15 +445,18 @@ class ShapeConvSAE(nn.Module):
 
     @property
     def atoms_signal_domain(self) -> np.ndarray:
-        """Integrated synthesis shapes ``(n_atoms, atom_len + 1)`` under ``diff``; the atoms themselves under ``none``.
+        """Synthesis shapes in the signal domain: ``(n_atoms, atom_len + 1)`` under ``diff``.
 
         Under ``diff`` the inverse of ``atom_len`` differences from a zero baseline is
         ``[0, cumsum(s)]``, with ``atom_len + 1`` samples; a zero-sum atom returns to
-        that baseline. The shape is re-centered and re-normalized for display, so
-        its reconstruction scale is not kept, and the clip makes the preprocessing
-        irreversible in any case. It is the component the atom synthesizes, not the
-        filter it applies; see ``atoms_analysis_filter``. Under ``none`` it is the
-        atom itself (``atom_len`` samples).
+        that baseline. Under ``diff_ar`` the whitening is inverted first by the
+        all-pole recursion, truncated ``4 * ar_order`` samples past the atom, so the
+        shape has ``atom_len + 4 * ar_order + 1`` samples. The shape is re-centered
+        and re-normalized for display, so its reconstruction scale is not kept, and
+        the clip makes the preprocessing irreversible in any case. It is the
+        component the atom synthesizes, not the filter it applies; see
+        ``atoms_analysis_filter``. Under ``none`` it is the atom itself
+        (``atom_len`` samples).
         """
         atoms = self._project(self.atoms.detach())
         if self.spec.pre_emphasis == "diff_ar":
@@ -458,8 +484,10 @@ class ShapeConvSAE(nn.Module):
         """The original-domain analysis filter of each atom, ``(n_atoms, atom_len + 1)`` under ``diff``.
 
         ``<s, diff(x)> = <f, x>`` with ``f[u] = s[u - 1] - s[u]`` (``s[-1] = s[L] = 0``),
-        so ``f`` is what the encoder correlates with the scaled original row. Unit
-        normalized for display. Under ``none`` it is the atom itself.
+        so ``f`` is what the encoder correlates with the scaled original row. Under
+        ``diff_ar`` the whitening adjoint is applied first (correlation with the
+        causal kernel), giving ``atom_len + ar_order + 1`` samples. Unit normalized
+        for display. Under ``none`` it is the atom itself.
         """
         atoms = self._project(self.atoms.detach())
         if self.spec.pre_emphasis == "diff_ar" and self.spec.ar_order > 0:
@@ -827,16 +855,24 @@ class ShapeConvSAE(nn.Module):
         """Learn the atoms by sparse reconstruction of random context crops of the windows.
 
         The windows are re-shuffled every pass by a seeded copy of the loader (the
-        given loader keeps its order for feature extraction). Each batch is scaled
-        per (window, channel) row and cut into random crops; only the central
-        ``crop_len`` samples of a crop are scored. Labels are ignored. Atoms are
-        re-projected after every step. Atoms that never enter a code in an epoch
+        given loader keeps its order for feature extraction). Under ``diff_ar`` the
+        whitening filter is fitted first in one pass over that loader, then the
+        atoms are initialized by k-means. Each batch is pre-emphasized and scaled
+        per (window, channel) row and cut into random context crops; only the
+        central ``crop_len`` samples of a crop are scored. Labels are ignored. Atoms
+        are re-projected after every step. Atoms that never enter a code in an epoch
         are re-seeded from a pool of the worst-reconstructed residual patches of
-        that epoch, except after the last epoch. ``history`` records, per epoch, the
-        residual as a fraction of signal power (train and, if given, validation),
-        the nonzero code entries per crop, the training objective, the dead and
-        re-seeded atom counts and the step count. A module loaded from a checkpoint
-        (``fitted``) returns at once and keeps its provenance.
+        that epoch, except after the last epoch. ``history`` records, per epoch,
+        ``residual_frac`` (residual as a fraction of signal power on the scored
+        centers), ``active_per_crop`` (code entries whose placement starts inside
+        the scored center), ``objective``, ``val_residual_frac`` and
+        ``val_active_per_crop`` on fixed validation crops (``nan`` without a
+        validation loader), ``median_thresh_over_response`` (learned thresholds over
+        the per-atom response scale measured on those crops, kept as
+        ``atom_response_std``), ``n_dead``, ``n_reseeded`` and ``n_steps``. At the
+        end ``fit_meta`` freezes the training schedule, the seed and the context. A
+        module loaded from a checkpoint (``fitted``) returns at once and keeps its
+        provenance.
 
         Parameters
         ----------
@@ -963,8 +999,11 @@ class ShapeConvSAE(nn.Module):
         With ``keep_label`` only the windows whose label equals it are used (the
         design note's calibration on negative training subjects); this is the one
         place the module reads labels, and it must see training windows only.
-        An atom with fewer peaks than the allowance keeps a threshold at its
-        smallest peak. The thresholds are stored in the checkpoint and take
+        The allowance is ``floor(rate * channel_minutes)`` and the threshold is the
+        next larger peak; an atom with no more peaks than the allowance keeps a
+        threshold just below its smallest peak, and an atom with no peak gets a
+        near-zero threshold. The thresholds are stored in the checkpoint
+        (``amp_min_atom``), recorded in ``fit_meta["amp_min_calibration"]`` and take
         precedence over ``amp_min``. On EEG the loader's rows are development-cohort
         background, not verified event-free intervals, so the rate is an activation
         rate in that cohort, not a clinical false-alarm rate.
@@ -972,7 +1011,8 @@ class ShapeConvSAE(nn.Module):
         Parameters
         ----------
         dataloader : DataLoader
-            Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)``; ``y`` is ignored.
+            Yields ``(X, y)`` with ``X`` of shape ``(B, C, T)``; ``y`` is read only
+            for the ``keep_label`` filter.
         false_alarms_per_channel_minute : float
             Target rate of surviving background activations per atom.
         sfreq : float
@@ -1049,9 +1089,10 @@ class ShapeConvSAE(nn.Module):
         -------
         torch.Tensor
             ``(B, 3 * n_atoms)`` float32, three blocks of ``n_atoms`` columns:
-            channel-activation count (NMS peaks with ``abs(a) > amp_min``, summed
-            over channels and time; one multichannel event contributes once per
-            channel), peak absolute sparse coefficient over channels and time (the
+            channel-activation count (NMS peaks above the atom's extraction
+            threshold, calibrated, relative or ``amp_min``, summed over channels and
+            time; one multichannel event contributes once per channel), peak
+            absolute sparse coefficient over channels and time (the
             shrunk coefficient in ``shrink`` mode), and maximum absolute
             centered-patch cosine over channels and time (over all positions,
             including those the gate or the threshold rejected).
@@ -1080,9 +1121,10 @@ class ShapeConvSAE(nn.Module):
 
         The sample is the first sample of the atom placement within the encoded row
         (under ``diff`` pre-emphasis, sample ``j`` of the difference spans original
-        samples ``j`` and ``j + 1``). Activations with ``abs(coefficient) <= amp_min``
-        are excluded. Grouping of coincident activations across channels into
-        events is left to the caller.
+        samples ``j`` and ``j + 1``; under ``diff_ar`` the causal whitening adds the
+        ``ar_order`` earlier samples). Activations at or below the atom's extraction
+        threshold (calibrated, relative or ``amp_min``) are excluded. Grouping of
+        coincident activations across channels into events is left to the caller.
         """
         n_channels = X.shape[1]
         threshold = self._event_threshold()

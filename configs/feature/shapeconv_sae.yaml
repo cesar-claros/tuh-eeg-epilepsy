@@ -3,9 +3,10 @@ _target_: src.models.components.shapeconv_sae.ShapeConvSAE
 # code, tied conv_transpose1d decoder (documentation/shapeconv_sae_design.md). One
 # dictionary is shared by all channels. The trainer fits it without labels on the
 # training windows (fit_unsupervised) before extracting features, unless `pretrained`
-# is set. Output per window, three blocks of n_atoms: event counts (summed over
-# channels), peak |a|, best |cosine|. Writes sae_state.pt, sae_atoms.npy and
-# sae_training.csv to the run dir.
+# is set. Output per window, three blocks of n_atoms: channel-activation counts above
+# the extraction threshold (calibrated per atom, or amp_min), peak |a|, best |cosine|.
+# Writes sae_state.pt, sae_atoms.npy, sae_atoms_signal.npy, sae_atom_response_std.npy,
+# sae_amp_min_atom.npy (when calibrated) and sae_training.csv to the run dir.
 spec:
   _target_: src.models.components.shapeconv_sae.AtomSpec
   n_atoms: 64
@@ -48,10 +49,12 @@ train_spec:
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
 # the dictionary is loaded and fit_unsupervised is skipped. The checkpoint's AtomSpec is
-# restored (spec.n_atoms / atom_len / mode must match; thresh / topk / rho_min / amp_min are
-# taken from the checkpoint unless override_spec is true). train.py and eval.py refuse a
-# checkpoint whose training subjects fall in the held-out split or whose data settings
-# (signal_mode, target_sfreq, filter_freq, notch_freqs) differ from the run.
+# restored (spec.n_atoms / atom_len / mode / pre_emphasis / ar_order must match; thresh /
+# topk / rho_min / amp_min / nms_half_width / amp_min_relative are taken from the checkpoint
+# unless override_spec is true); its AR coefficients and calibrated thresholds come with
+# it. train.py, eval.py and sae_diagnostics.py refuse a checkpoint whose training subjects
+# fall in the held-out split or whose data settings (signal_mode, bipolar, target_sfreq,
+# filter_freq, notch_freqs, ICA selection, repair flags) differ from the run.
 pretrained: null
 override_spec: false
 # Device: cpu | cuda | cuda:N | auto. Extraction memory ~ chunk_rows * n_atoms * T
