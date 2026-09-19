@@ -17,12 +17,13 @@ subjects are not in the diagnosed held-out split, encodes every window of ``spli
 - ``sae_subject_rates.csv``: per subject of the split, its label, usable channel-minutes
   and thresholded activation rate summed over atoms;
 - ``sae_atom_coherence.npy``: the ``(n_atoms, n_atoms)`` maximum absolute cross-correlation
-  over lags; ``sae_encoded_autocorr.npy``: the normalized autocorrelation of the encoded
-  (pre-emphasized, scaled) rows at lags 0 to 16, a whitening check;
+  over lags; ``sae_encoded_autocorr.npy``: ``(2, 17)``, the normalized autocorrelation of
+  the encoded (pre-emphasized, scaled) rows at lags 0 to 16, pooled over rows (dominated
+  by high-variance rows) and as the median over usable rows (robust), a whitening check;
 - ``sae_atoms_snippets.png``: the signal-domain shape of the most active atoms next to
-  their highest-magnitude activations in the split, all channels in microvolts with a
-  stated spacing, channel names in loader order, and the recording, window and time of
-  each snippet;
+  their highest-magnitude activation in each of up to three subjects, all channels in
+  microvolts with a stated spacing and fixed axis limits, channel names in loader order,
+  and the subject, window, recording and time of each snippet;
 - ``sae_diagnostics_summary.csv`` and a log line: exposure (attempted, usable, excluded
   channel-minutes), threshold source, total rates (all windows, negative windows,
   positive windows), the median and quartiles of the per-subject rate over negative
@@ -112,14 +113,15 @@ def _robust_std(segment: np.ndarray) -> np.ndarray:
     return np.maximum(1.4826 * np.median(np.abs(centered), axis=1), 1e-9)
 
 
-def _snippet_figure(path: Path, shapes: np.ndarray, snippets: dict[int, list], sfreq: float,
+def _snippet_figure(path: Path, shapes: np.ndarray, atom_len: int, snippets: dict[int, list], sfreq: float,
                     channel_names: list[str] | None, units: str) -> None:
-    """One row per atom: the signal-domain shape, then its top activations with every channel of the window.
+    """One row per atom: the signal-domain shape, then its top activations (one per subject) with every channel.
 
     Channels are drawn in loader order (alphabetical in this pipeline), which is
     not montage adjacency. The spacing between channels is four times the median
-    robust standard deviation of the segment, stated in the panel title; the
-    activated channel is red.
+    robust standard deviation of the segment, stated in the panel title, and the
+    axis limits are fixed to that spacing, so a channel with a large excursion runs
+    off the panel instead of compressing the others; the activated channel is red.
     """
     import matplotlib
 
@@ -127,11 +129,16 @@ def _snippet_figure(path: Path, shapes: np.ndarray, snippets: dict[int, list], s
     import matplotlib.pyplot as plt
 
     atoms = sorted(snippets)
-    fig, axes = plt.subplots(len(atoms), 1 + _SNIPPETS_PER_ATOM, figsize=(16, 2.6 * len(atoms)), squeeze=False)
+    fig, axes = plt.subplots(len(atoms), 1 + _SNIPPETS_PER_ATOM, figsize=(16, 2.8 * len(atoms)), squeeze=False)
     for row, atom in enumerate(atoms):
         t_shape = np.arange(shapes.shape[1]) / sfreq * 1000.0
         axes[row, 0].plot(t_shape, shapes[atom], color="black")
-        axes[row, 0].set_title(f"atom {atom}: signal-domain shape (ms, unit norm)", fontsize=8)
+        if shapes.shape[1] > atom_len + 1:
+            axes[row, 0].axvline(atom_len / sfreq * 1000.0, color="0.5", linewidth=0.6, linestyle=":")
+            axes[row, 0].set_title(f"atom {atom}: signal-domain shape (ms; right of the line: unwhitening tail)",
+                                   fontsize=7)
+        else:
+            axes[row, 0].set_title(f"atom {atom}: signal-domain shape (ms, unit norm)", fontsize=7)
         for col, snippet in enumerate(snippets[atom][:_SNIPPETS_PER_ATOM], start=1):
             segment, channel = snippet["segment"], snippet["channel"]
             spacing = 4.0 * float(np.median(_robust_std(segment)))
@@ -141,19 +148,23 @@ def _snippet_figure(path: Path, shapes: np.ndarray, snippets: dict[int, list], s
             ax.plot(t_seg, (segment - offsets).T, color="0.6", linewidth=0.5)
             ax.plot(t_seg, segment[channel] - offsets[channel], color="tab:red", linewidth=0.9)
             ax.axvline(snippet["sample"] / sfreq, color="tab:blue", linewidth=0.6, linestyle=":")
+            ax.set_ylim(-(segment.shape[0]) * spacing, spacing)
             names = channel_names if channel_names and len(channel_names) == segment.shape[0] else None
             ax.set_yticks(-offsets[:, 0])
             ax.set_yticklabels(names if names else [str(c) for c in range(segment.shape[0])], fontsize=5)
             name = names[channel] if names else str(channel)
             ax.set_title(
-                f"|a| = {snippet['magnitude']:.1f}, {name}; {snippet['where']}; spacing {spacing:.0f} {units}",
-                fontsize=7,
+                f"|a| = {snippet['magnitude']:.1f} on {name}, spacing {spacing:.0f} {units}\n{snippet['where']}",
+                fontsize=6,
             )
-            ax.set_xlabel("window time (s)", fontsize=7)
+            ax.set_xlabel("window time (s)", fontsize=6)
     for ax in axes.flat:
         ax.tick_params(labelsize=6)
-    fig.suptitle(f"channels in loader order (not montage adjacency); signal in {units}", fontsize=8)
-    fig.tight_layout()
+    fig.suptitle(
+        f"most active atoms, top activation per subject; channels in loader order (not montage adjacency); {units}",
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.985))
     fig.savefig(path, dpi=130)
     plt.close(fig)
 
@@ -200,7 +211,11 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     hist = torch.zeros(n_atoms, _HIST_BINS)
     top: dict[int, list] = {atom: [] for atom in range(n_atoms)}
     autocorr = torch.zeros(_AUTOCORR_LAGS + 1, dtype=torch.float64)
+    row_autocorr: list[torch.Tensor] = []  # per usable row, lags 0 to 16
     minutes = torch.zeros(2)  # usable, by window label
+    subjects_of = meta["subject"].astype(str).to_numpy()
+    paths_of = meta["path"].astype(str).to_numpy()
+    starts_of = meta["start"].astype(float).to_numpy()
     window_counts: list[int] = []
     window_minutes: list[float] = []
     rows_total, rows_usable, n_positions = 0, 0, 0
@@ -218,8 +233,13 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
                 minutes[int(labels[w])] += float(valid[w].sum()) * row_minutes
                 window_minutes.append(float(valid[w].sum()) * row_minutes)
             encoded = sae._rows(x).double()
-            for lag in range(_AUTOCORR_LAGS + 1):
-                autocorr[lag] += (encoded[:, lag:] * encoded[:, : encoded.shape[1] - lag]).sum().cpu()
+            per_row = torch.stack(
+                [(encoded[:, lag:] * encoded[:, : encoded.shape[1] - lag]).sum(1) for lag in range(_AUTOCORR_LAGS + 1)],
+                dim=1,
+            ).cpu()
+            autocorr += per_row.sum(0)
+            usable_rows = per_row[:, 0] > 0
+            row_autocorr.append(per_row[usable_rows] / per_row[usable_rows, :1])
             counts_per_window = torch.zeros(n_windows, dtype=torch.long)
             for start, code, _ in sae._row_chunks(x):
                 magnitude = code.abs().cpu()
@@ -237,18 +257,27 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
                         hist[atom] += torch.histc(values.clamp(max=_HIST_MAX), bins=_HIST_BINS, min=0.0, max=_HIST_MAX)
                     for local, sample in zip(*torch.nonzero(above[:, atom], as_tuple=True)):
                         value = float(magnitude[local, atom, sample])
-                        if len(top[atom]) < _SNIPPETS_PER_ATOM or value > top[atom][-1]["magnitude"]:
-                            w, c = divmod(start + int(local), n_channels)
-                            lo, hi = max(int(sample) - atom_len, 0), min(int(sample) + 2 * atom_len, n_times)
-                            row = meta.iloc[offset + w]
-                            t_event = float(row["start"]) + int(sample) / sfreq
-                            where = (f"{Path(str(row['path'])).name} t={t_event:.2f} s, "
-                                     f"subject {row['subject']}, window {offset + w}")
-                            top[atom].append({
-                                "magnitude": value, "channel": c, "sample": int(sample), "lo": lo, "where": where,
-                                "segment": np.array(x[w, :, lo:hi].numpy(), copy=True) * signal_scale,
-                            })
-                            top[atom] = sorted(top[atom], key=lambda item: -item["magnitude"])[:_SNIPPETS_PER_ATOM]
+                        w, c = divmod(start + int(local), n_channels)
+                        subject = subjects_of[offset + w]
+                        # One snippet per subject and atom: the largest activation of that subject.
+                        current = next((s for s in top[atom] if s["subject"] == subject), None)
+                        if current is not None and value <= current["magnitude"]:
+                            continue
+                        full = len(top[atom]) >= _SNIPPETS_PER_ATOM
+                        if current is None and full and value <= top[atom][-1]["magnitude"]:
+                            continue
+                        lo, hi = max(int(sample) - atom_len, 0), min(int(sample) + 2 * atom_len, n_times)
+                        t_event = starts_of[offset + w] + int(sample) / sfreq
+                        recording = Path(paths_of[offset + w]).name
+                        where = f"{subject}, window {offset + w}, {recording}, t = {t_event:.2f} s"
+                        if current is not None:
+                            top[atom].remove(current)
+                        top[atom].append({
+                            "magnitude": value, "channel": c, "sample": int(sample), "lo": lo, "where": where,
+                            "subject": subject,
+                            "segment": np.array(x[w, :, lo:hi].numpy(), copy=True) * signal_scale,
+                        })
+                        top[atom] = sorted(top[atom], key=lambda item: -item["magnitude"])[:_SNIPPETS_PER_ATOM]
             window_counts.extend(int(v) for v in counts_per_window)
             offset += n_windows
 
@@ -282,7 +311,9 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     table.write_csv(output_dir / "sae_diagnostics.csv")
     np.save(output_dir / "sae_atom_coherence.npy", coherence)
     autocorr_norm = (autocorr / autocorr[0].clamp_min(1e-12)).numpy()
-    np.save(output_dir / "sae_encoded_autocorr.npy", autocorr_norm)
+    per_row_median = (torch.cat(row_autocorr).median(0).values.numpy() if row_autocorr
+                      else np.full(_AUTOCORR_LAGS + 1, np.nan))
+    np.save(output_dir / "sae_encoded_autocorr.npy", np.stack([autocorr_norm, per_row_median]))
 
     subjects = pl.DataFrame({
         "subject": [str(s) for s in meta["subject"]],
@@ -301,7 +332,8 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     most_active = [int(a) for a in ranked[:_SNIPPET_ATOMS]]
     snippets = {atom: top[atom] for atom in most_active if top[atom]}
     if snippets:
-        _snippet_figure(output_dir / "sae_atoms_snippets.png", shapes, snippets, sfreq, channel_names, cfg.signal_units)
+        _snippet_figure(output_dir / "sae_atoms_snippets.png", shapes, atom_len, snippets, sfreq, channel_names,
+                        cfg.signal_units)
 
     summary = {
         "split": cfg.split,
@@ -327,6 +359,7 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "edge_activation_fraction": peaks_edge / max(int(peaks_thr.sum()), 1),
         "edge_expected_fraction": edge_len / max(n_positions, 1),
         "encoded_autocorr_max_abs_lag1_16": float(np.abs(autocorr_norm[1:]).max()),
+        "encoded_autocorr_row_median_max_abs_lag1_16": float(np.nanmax(np.abs(per_row_median[1:]))),
     }
     log.info(f"SAE diagnostics on {cfg.split}: {summary}")  # noqa: G004
     pl.DataFrame([summary]).write_csv(output_dir / "sae_diagnostics_summary.csv")
