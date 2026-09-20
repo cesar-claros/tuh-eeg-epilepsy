@@ -147,6 +147,8 @@ def parse(argv):
                    help="training-crop artifact gate: drop crops above this multiple of the batch median energy")
     p.add_argument("--min-usage-frac", type=float, default=0.0,
                    help="re-seed atoms whose epoch usage is below this fraction of the mean usage")
+    p.add_argument("--atom-lowpass-hz", type=float, default=None,
+                   help="band-limit the atoms during training (cutoff in Hz at 256 Hz)")
     p.add_argument("--calibrate-fa", type=float, default=None,
                    help="calibrate per-atom thresholds to this false-alarm rate per channel-minute on an "
                         "event-free draw (seed + 3); takes precedence over --amp-min")
@@ -426,6 +428,8 @@ def main(argv=None) -> int:
         stress.append(f"min_usage_frac {args.min_usage_frac:g}")
     if args.ar_fit != "pooled":
         stress.append(f"ar_fit {args.ar_fit}")
+    if args.atom_lowpass_hz is not None:
+        stress.append(f"atom_lowpass_hz {args.atom_lowpass_hz:g}")
     _kv("stress", ", ".join(stress))
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
@@ -439,7 +443,7 @@ def main(argv=None) -> int:
     train_spec = TrainSpec(
         epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
         crop_batch=512, n_init_samples=2000, max_crop_energy_ratio=args.crop_energy_ratio,
-        min_usage_frac=args.min_usage_frac,
+        min_usage_frac=args.min_usage_frac, atom_lowpass_hz=args.atom_lowpass_hz, sfreq=SFREQ,
     )
     provenance = {"train_subjects": ["synthetic-train"], "data": {"signal_mode": "synthetic"}}
 

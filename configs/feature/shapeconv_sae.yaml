@@ -55,6 +55,12 @@ train_spec:
                     # saturated segments and 53 of 64 atoms fired on nothing else. Phase 2b: 10.
   min_usage_frac: 0.0 # re-seed atoms whose epoch usage is below this fraction of the mean usage
                     # (0 = only zero-usage atoms). Phase 2b: 0.01.
+  atom_lowpass_hz: null # band limit of the atoms during training (windowed-sinc low-pass before the
+                    # zero-mean unit-norm projection, at init, after every step and at re-seeds);
+                    # null = unconstrained. Phase 2b screen: 44-51 of 64 atoms drifted above the
+                    # 45 Hz band-pass edge (no signal there) and went silent. Phase 2c: 45 (=
+                    # data.filter_freq[1]).
+  sfreq: 256        # only converts atom_lowpass_hz to cycles per sample; = data.target_sfreq
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
 # the dictionary is loaded and fit_unsupervised is skipped. The checkpoint's AtomSpec is

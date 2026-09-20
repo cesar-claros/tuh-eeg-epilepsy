@@ -69,6 +69,7 @@ _ACTIVE_USAGE_FRAC = 0.01  # monitor: an atom is "active" in an epoch when its u
 _STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis", "ar_order")
 _RESEED_PER_STEP = 4
 _RESEED_POOL_FACTOR = 4
+_LOWPASS_HALF = 16  # half-length of the atom band-limit FIR (33 taps)
 CHECKPOINT_NAME = "sae_state.pt"
 CHECKPOINT_FORMAT = 5
 # Spec fields absent from older checkpoints and the values that reproduce their behaviour.
@@ -200,6 +201,19 @@ class TrainSpec:
         fraction of the mean usage over atoms (0 = only atoms with zero usage, the
         original rule). Motivation (Phase 2 screen): atoms firing a few times per
         epoch on artifact edges were never re-seeded.
+    atom_lowpass_hz : float | None
+        Band limit of the atoms during training: after the initialization, after
+        every optimizer step and at every re-seed, each atom is low-pass filtered
+        (windowed sinc, cutoff ``atom_lowpass_hz`` at ``sfreq``) before the zero-mean,
+        unit-norm projection. ``None`` leaves the atoms unconstrained. Motivation
+        (Phase 2b screen): the k-means initialization was in-band, but 44 to 51 of
+        64 atoms ended with 94 percent of their energy above the 45 Hz edge of the
+        band-pass, where the signal has no power, because atoms that lose the
+        competition follow the residual, and the residual of a band-limited signal
+        is its stop band; re-seeds from the residual pool were born there too.
+    sfreq : float
+        Sampling rate the atoms are trained at, only used to convert
+        ``atom_lowpass_hz`` to cycles per sample (must equal ``data.target_sfreq``).
     """
 
     epochs: int = 30
@@ -213,6 +227,8 @@ class TrainSpec:
     n_init_samples: int = 20000
     max_crop_energy_ratio: float | None = None
     min_usage_frac: float = 0.0
+    atom_lowpass_hz: float | None = None
+    sfreq: float = 256.0
 
 
 class ShapeConvSAE(nn.Module):
@@ -634,6 +650,24 @@ class ShapeConvSAE(nn.Module):
         atoms = atoms - atoms.mean(-1, keepdim=True)
         return atoms / atoms.norm(dim=-1, keepdim=True).clamp_min(_EPS)
 
+    def _lowpass_kernel(self) -> torch.Tensor | None:
+        """Hann-windowed sinc low-pass ``(1, 1, 2 * _LOWPASS_HALF + 1)`` at ``atom_lowpass_hz``, or ``None``."""
+        cutoff_hz = self.train_spec.atom_lowpass_hz
+        if cutoff_hz is None:
+            return None
+        cutoff = float(cutoff_hz) / float(self.train_spec.sfreq)  # cycles per sample
+        n = torch.arange(-_LOWPASS_HALF, _LOWPASS_HALF + 1, dtype=torch.float32, device=self.device)
+        kernel = 2.0 * cutoff * torch.sinc(2.0 * cutoff * n)
+        kernel = kernel * torch.hann_window(2 * _LOWPASS_HALF + 1, periodic=False, device=self.device)
+        return (kernel / kernel.sum()).view(1, 1, -1)
+
+    def _constrain(self, atoms: torch.Tensor) -> torch.Tensor:
+        """Training-time atom constraint: optional band limit, then zero mean and unit norm; ``(K, 1, L)``."""
+        kernel = self._lowpass_kernel()
+        if kernel is not None:
+            atoms = F.conv1d(atoms, kernel, padding=_LOWPASS_HALF)
+        return self._project(atoms)
+
     @staticmethod
     def _robust_scale(x: torch.Tensor) -> torch.Tensor:
         """Center every row on its median, scale by 1.4826 * MAD, clip at +-20.
@@ -854,7 +888,7 @@ class ShapeConvSAE(nn.Module):
         kmeans.fit(candidates.cpu().numpy())
         centers = torch.as_tensor(kmeans.cluster_centers_, dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            self.atoms.copy_(self._project(centers).unsqueeze(1))
+            self.atoms.copy_(self._constrain(centers.unsqueeze(1)))
         self.atoms_init = self.atoms_numpy
         log.info(f"Initialized {spec.n_atoms} atoms by k-means on {len(candidates)} sub-sequences")
 
@@ -902,7 +936,7 @@ class ShapeConvSAE(nn.Module):
             return n_dead, 0
         chosen = self._pool_energy.topk(n_new).indices
         targets = dead[:n_new]
-        self.atoms[targets] = self._project(self._pool_patches[chosen]).unsqueeze(1)
+        self.atoms[targets] = self._constrain(self._pool_patches[chosen].unsqueeze(1))
         self.log_thresh[targets] = self.log_thresh.median()
         for param in (self.atoms, self.log_thresh):
             state = optimizer.state.get(param)
@@ -1038,19 +1072,22 @@ class ShapeConvSAE(nn.Module):
                     loss.backward()
                     optimizer.step()
                     with torch.no_grad():
-                        self.atoms.copy_(self._project(self.atoms))
+                        self.atoms.copy_(self._constrain(self.atoms))
                     self._collect_reseed_patches(residual)
                     usage += used
                     totals += stats
                     loss_sum += float(loss.detach())
                     n_steps += 1
-            last = epoch + 1 == train_spec.epochs
-            n_dead, n_new = (int(self._dead_mask(usage).sum()), 0) if last else self._reset_dead_atoms(usage, optimizer)
-            all_energy = torch.cat(energies) if energies else torch.zeros(1, device=self.device)
+            # Validation is measured on the trained state of the epoch, before any re-seed
+            # replaces atoms (Phase 2b: measuring after the re-seed reported the raw pool
+            # patches, residual fractions of 4 to 15, not the dictionary).
             val = None
             if val_dataloader is not None:
                 val, response_std = self._val_stats(val_dataloader)
             thresholds = self.log_thresh.detach().exp()
+            last = epoch + 1 == train_spec.epochs
+            n_dead, n_new = (int(self._dead_mask(usage).sum()), 0) if last else self._reset_dead_atoms(usage, optimizer)
+            all_energy = torch.cat(energies) if energies else torch.zeros(1, device=self.device)
             record = {
                 "epoch": epoch + 1,
                 "residual_frac": float(totals[0] / totals[1].clamp_min(_EPS)),

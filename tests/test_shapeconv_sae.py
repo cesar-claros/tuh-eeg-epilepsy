@@ -15,8 +15,8 @@ behaviour of the diversity term, the bounded calibration against a brute-force o
 statistic (ties, no peaks, small allowance, label filter, chunk sizes, unusable rows),
 unusable rows in extraction and in the AR fit, the split preflight, the
 maximum-cardinality event matching of the synthetic stage, the format-4 migration,
-the training-crop energy gate, the usage-based re-seeding rule and the row-normalized
-AR fit.
+the training-crop energy gate, the usage-based re-seeding rule, the row-normalized
+AR fit, the atom band limit, and the validation-before-re-seed order.
 """
 
 from __future__ import annotations
@@ -692,6 +692,48 @@ def test_row_normalized_ar_fit_weights_rows_equally() -> None:
     pooled_shift = float((pooled_loud.ar_coef - pooled.ar_coef).abs().max())
     normalized_shift = float((normalized_loud.ar_coef - normalized.ar_coef).abs().max())
     assert normalized_shift < pooled_shift, "the loud row must move the pooled fit more than the row-normalized fit"
+
+
+def _energy_above(atoms: np.ndarray, cutoff_hz: float, sfreq: float = 256.0) -> np.ndarray:
+    spectrum = np.abs(np.fft.rfft(atoms, n=1024, axis=1)) ** 2
+    freqs = np.fft.rfftfreq(1024, d=1.0 / sfreq)
+    return spectrum[:, freqs > cutoff_hz].sum(1) / spectrum.sum(1)
+
+
+def test_atom_band_limit_keeps_atoms_in_band() -> None:
+    """With ``atom_lowpass_hz`` every stored atom stays zero-mean, unit-norm and in-band; without it, not enforced."""
+    generator = torch.Generator().manual_seed(81)
+    alternating = torch.tensor([1.0, -1.0] * 8).view(1, 1, 16)  # Nyquist content, far above 45 Hz at 256 Hz
+    stop_band = alternating + 0.1 * torch.randn(4, 1, 16, generator=generator)
+    free = _tiny_model(seed=81)
+    assert torch.allclose(free._constrain(stop_band), free._project(stop_band)), "no band limit: constrain = project"
+    limited = _tiny_model(seed=81)
+    limited.train_spec = TrainSpec(**{**limited.train_spec.__dict__, "atom_lowpass_hz": 45.0, "sfreq": 256.0})
+    constrained = limited._constrain(stop_band)
+    assert torch.allclose(constrained.mean(-1), torch.zeros(4, 1), atol=1e-6)
+    assert torch.allclose(constrained.norm(dim=-1), torch.ones(4, 1), atol=1e-5)
+    before = _energy_above(stop_band.squeeze(1).numpy(), 45.0)
+    after = _energy_above(constrained.squeeze(1).numpy(), 45.0)
+    assert before.min() > 0.5 and after.max() < before.min(), "the low-pass must remove stop-band energy"
+    loader, x = _tiny_loader(seed=81)
+    limited.fit_unsupervised(loader, provenance=PROVENANCE)
+    assert _energy_above(limited.atoms_numpy, 45.0).max() < 0.3, "trained atoms stay band-limited (transition band)"
+    assert limited.fit_meta["train_spec"]["atom_lowpass_hz"] == 45.0
+    assert limited(x).shape == (8, 12)
+
+
+def test_validation_measured_before_reseed() -> None:
+    """The epoch record's validation values describe the trained dictionary, not the re-seeded one."""
+    loader, x = _tiny_loader(seed=91)
+    model = _tiny_model(seed=91)
+    model.train_spec = TrainSpec(**{**model.train_spec.__dict__, "epochs": 2, "min_usage_frac": 2.0})
+    order: list[str] = []
+    val_stats, reset = model._val_stats, model._reset_dead_atoms
+    model._val_stats = lambda loader: (order.append("val"), val_stats(loader))[1]
+    model._reset_dead_atoms = lambda usage, optimizer: (order.append("reseed"), reset(usage, optimizer))[1]
+    model.fit_unsupervised(loader, val_dataloader=loader, provenance=PROVENANCE)
+    assert model.history[0]["n_reseeded"] > 0, "the rule must have re-seeded atoms after epoch 1"
+    assert order[:2] == ["val", "reseed"], order
 
 
 def test_diversity_sign_and_shift_aware() -> None:
