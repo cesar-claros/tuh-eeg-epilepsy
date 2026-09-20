@@ -13,8 +13,10 @@ extractor without provenance, classifier fit subjects), context-crop / full-row 
 equality, the residual-pool lifecycle, the pre-emphasis mappings, the sign/shift
 behaviour of the diversity term, the bounded calibration against a brute-force order
 statistic (ties, no peaks, small allowance, label filter, chunk sizes, unusable rows),
-unusable rows in extraction and in the AR fit, the split preflight, and the
-maximum-cardinality event matching of the synthetic stage.
+unusable rows in extraction and in the AR fit, the split preflight, the
+maximum-cardinality event matching of the synthetic stage, the format-4 migration,
+the training-crop energy gate, the usage-based re-seeding rule and the row-normalized
+AR fit.
 """
 
 from __future__ import annotations
@@ -605,6 +607,91 @@ def test_event_matching_is_maximum_cardinality() -> None:
     assert set(zip(mp.tolist(), mt.tolist())) == {(0, 0), (1, 1)}
     mp, mt = _match_events(np, pred[:1], true, tol=6)
     assert (mp.tolist(), mt.tolist()) == ([0], [1]), "a single prediction takes its closest feasible event"
+
+
+def test_format4_checkpoint_migrates_ar_fit() -> None:
+    """A format-4 checkpoint (before ``ar_fit``) loads with the pooled rule and identical features."""
+    loader, x = _tiny_loader(seed=51)
+    model = _tiny_model(seed=51)
+    model.fit_unsupervised(loader, provenance=PROVENANCE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        model.save_artifacts(out)
+        assert (out / "sae_atoms_init.npy").exists() and model.atoms_init is not None
+        legacy = torch.load(out / CHECKPOINT_NAME, weights_only=True)
+        legacy["format"] = 4
+        legacy["spec"].pop("ar_fit")
+        legacy.pop("atoms_init")
+        torch.save(legacy, out / "format4.pt")
+        migrated = ShapeConvSAE(spec=AtomSpec(n_atoms=4, atom_len=16), device="cpu", pretrained=out / "format4.pt")
+        assert migrated.spec == model.spec and migrated.spec.ar_fit == "pooled"
+        assert migrated.atoms_init is None
+        assert torch.equal(migrated(x), model(x))
+    _expect_value_error(lambda: ShapeConvSAE(spec=AtomSpec(ar_fit="median"), device="cpu"), "unknown ar_fit accepted")
+
+
+def test_crop_energy_gate_drops_artifact_crops() -> None:
+    """The gate removes crops far above the batch median energy, reports them, and leaves extraction unchanged."""
+    generator = torch.Generator().manual_seed(61)
+    x = torch.randn(8, 2, 256, generator=generator)
+    x[0, 0, 60:120] += 40.0 * torch.sin(torch.arange(60) / 2.0)  # a railed burst on one row
+    ungated = _tiny_model(seed=61)
+    crops, energy, dropped = ungated._crops(x, torch.Generator().manual_seed(1))
+    assert dropped == 0 and energy.numel() == crops.shape[0]
+    gated = _tiny_model(seed=61)
+    gated.train_spec = TrainSpec(**{**gated.train_spec.__dict__, "max_crop_energy_ratio": 10.0})
+    kept, energy_all, dropped = gated._crops(x, torch.Generator().manual_seed(1))
+    assert dropped > 0 and kept.shape[0] == crops.shape[0] - dropped
+    assert float(gated._center(kept).pow(2).sum(dim=(1, 2)).max()) <= 10.0 * float(energy_all.median()) + 1e-3
+    assert float(energy.max()) > 10.0 * float(energy.median()), "the fixture must contain a gated crop"
+    loader = DataLoader(TensorDataset(x, torch.zeros(8, dtype=torch.long)), batch_size=4)
+    gated.fit_unsupervised(loader, provenance=PROVENANCE)
+    record = gated.history[-1]
+    assert 0.0 < record["crops_dropped_frac"] < 0.5 and record["crop_energy_mean_over_median"] > 1.0
+    assert 0 <= record["n_active_atoms"] <= 4
+    assert gated(x).shape == (8, 12), "extraction does not depend on the gate"
+
+
+def test_usage_rule_reseeds_rare_atoms() -> None:
+    """With ``min_usage_frac`` an atom far below the mean usage counts as dead; with 0 only zero usage does."""
+    model = _tiny_model()
+    usage = torch.tensor([1, 400, 400, 400])
+    assert model._dead_mask(usage).tolist() == [False, False, False, False]
+    model.train_spec = TrainSpec(**{**model.train_spec.__dict__, "min_usage_frac": 0.01})
+    assert model._dead_mask(usage).tolist() == [True, False, False, False]
+    assert model._dead_mask(torch.tensor([0, 0, 0, 0])).tolist() == [True] * 4, "zero usage stays dead under the rule"
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    model._collect_reseed_patches(torch.randn(4, 1, 64, generator=torch.Generator().manual_seed(7)))
+    before = model.atoms.detach().clone()
+    dead, reseeded = model._reset_dead_atoms(usage, optimizer)
+    assert (dead, reseeded) == (1, 1) and not torch.equal(model.atoms.detach()[0], before[0])
+    assert torch.equal(model.atoms.detach()[1:], before[1:])
+
+
+def test_row_normalized_ar_fit_weights_rows_equally() -> None:
+    """Row-normalized fit: equal-variance rows give the pooled result; a railed row moves it less than pooled."""
+    generator = torch.Generator().manual_seed(71)
+    noise = torch.randn(6, 1, 600, generator=generator)
+    rows = noise.clone()
+    for i in range(1, 600):
+        rows[..., i] = 0.9 * rows[..., i - 1] + noise[..., i]
+    pooled = _tiny_model(seed=71, pre_emphasis="diff_ar", ar_order=3)
+    normalized = _tiny_model(seed=71, pre_emphasis="diff_ar", ar_order=3, ar_fit="row_normalized")
+    even = DataLoader(TensorDataset(rows, torch.zeros(6, dtype=torch.long)), batch_size=3)
+    pooled._fit_ar(even)
+    normalized._fit_ar(even)
+    assert torch.allclose(pooled.ar_coef, normalized.ar_coef, atol=0.05), "same-variance rows: same fit"
+    loud = rows.clone()
+    loud[0, 0, 100:400] += 40.0 * torch.sin(torch.arange(300) / 3.0)  # a railed burst: heavy-tailed after MAD scaling
+    loud_loader = DataLoader(TensorDataset(loud, torch.zeros(6, dtype=torch.long)), batch_size=3)
+    pooled_loud, normalized_loud = _tiny_model(seed=71, pre_emphasis="diff_ar", ar_order=3), _tiny_model(
+        seed=71, pre_emphasis="diff_ar", ar_order=3, ar_fit="row_normalized"
+    )
+    pooled_loud._fit_ar(loud_loader)
+    normalized_loud._fit_ar(loud_loader)
+    pooled_shift = float((pooled_loud.ar_coef - pooled.ar_coef).abs().max())
+    normalized_shift = float((normalized_loud.ar_coef - normalized.ar_coef).abs().max())
+    assert normalized_shift < pooled_shift, "the loud row must move the pooled fit more than the row-normalized fit"
 
 
 def test_diversity_sign_and_shift_aware() -> None:

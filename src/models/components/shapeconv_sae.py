@@ -54,24 +54,28 @@ from tqdm import tqdm
 
 from src.models.components.hydra_transform import HydraTransform
 
-__all__ = ["CHECKPOINT_NAME", "AtomSpec", "ShapeConvSAE", "TrainSpec"]
+__all__ = ["CHECKPOINT_NAME", "ROBUST_CLIP", "AtomSpec", "ShapeConvSAE", "TrainSpec"]
 
 _EPS = 1e-8
 _ENERGY_FLOOR = 1e-6
 _FLAT_PATCH_NORM = 1e-3
 _MAD_TO_STD = 1.4826
 _CLIP = 20.0
+ROBUST_CLIP = _CLIP
 _MODES = ("shrink", "topk")
 _PRE_EMPHASIS = ("none", "diff", "diff_ar")
+_AR_FITS = ("pooled", "row_normalized")
+_ACTIVE_USAGE_FRAC = 0.01  # monitor: an atom is "active" in an epoch when its usage reaches 1 percent of the mean
 _STRUCTURAL_FIELDS = ("n_atoms", "atom_len", "mode", "pre_emphasis", "ar_order")
 _RESEED_PER_STEP = 4
 _RESEED_POOL_FACTOR = 4
 CHECKPOINT_NAME = "sae_state.pt"
-CHECKPOINT_FORMAT = 4
+CHECKPOINT_FORMAT = 5
 # Spec fields absent from older checkpoints and the values that reproduce their behaviour.
 _SPEC_MIGRATIONS = {
-    2: {"pre_emphasis": "none", "ar_order": 8, "nms_half_width": None, "amp_min_relative": False},
-    3: {"ar_order": 8, "nms_half_width": None, "amp_min_relative": False},
+    2: {"pre_emphasis": "none", "ar_order": 8, "nms_half_width": None, "amp_min_relative": False, "ar_fit": "pooled"},
+    3: {"ar_order": 8, "nms_half_width": None, "amp_min_relative": False, "ar_fit": "pooled"},
+    4: {"ar_fit": "pooled"},
 }
 _AR_RIDGE = 1e-6
 
@@ -127,6 +131,13 @@ class AtomSpec:
         Interpret ``amp_min`` in units of each atom's measured background response
         standard deviation (``atom_response_std``, from the validation crops) instead
         of robust-std units of the row. Requires a fit with a validation loader.
+    ar_fit : str
+        How the whitening filter is fitted (``diff_ar``). ``pooled``: Yule-Walker on
+        the autocorrelation summed over all training rows, which weights every row by
+        its variance, so heavy-tailed (artifact) rows dominate and the typical row is
+        not whitened (Phase 2 screen: median lag-1 autocorrelation 0.75 after
+        whitening). ``row_normalized``: Yule-Walker on the mean over rows of each
+        row's own normalized autocorrelation, so every usable row counts once.
     """
 
     n_atoms: int = 64
@@ -140,6 +151,7 @@ class AtomSpec:
     ar_order: int = 8
     nms_half_width: int | None = None
     amp_min_relative: bool = False
+    ar_fit: str = "pooled"
 
 
 @dataclass(frozen=True)
@@ -175,6 +187,19 @@ class TrainSpec:
     n_init_samples : int
         Sub-sequences sampled across the whole training loader for the k-means
         initialization of the atoms.
+    max_crop_energy_ratio : float | None
+        Training-crop artifact gate. A crop (and a k-means candidate patch) whose
+        scored energy exceeds this multiple of the median energy of its batch is
+        excluded from the objective, the usage counts, the residual pool and the
+        initialization; extraction is unchanged. ``None`` keeps every non-flat crop.
+        Motivation (Phase 2 screen): the squared-error objective on robust-scaled,
+        clipped rows is dominated by the few railed or saturated segments, so the
+        atoms fit those and 53 of 64 fired on nothing else.
+    min_usage_frac : float
+        An atom is re-seeded at the end of an epoch when its usage is below this
+        fraction of the mean usage over atoms (0 = only atoms with zero usage, the
+        original rule). Motivation (Phase 2 screen): atoms firing a few times per
+        epoch on artifact edges were never re-seeded.
     """
 
     epochs: int = 30
@@ -186,6 +211,8 @@ class TrainSpec:
     crop_batch: int = 1024
     lambda_div: float = 0.0
     n_init_samples: int = 20000
+    max_crop_energy_ratio: float | None = None
+    min_usage_frac: float = 0.0
 
 
 class ShapeConvSAE(nn.Module):
@@ -246,6 +273,8 @@ class ShapeConvSAE(nn.Module):
             raise ValueError(f"spec.mode must be one of {_MODES}, got {self.spec.mode!r}")
         if self.spec.pre_emphasis not in _PRE_EMPHASIS:
             raise ValueError(f"spec.pre_emphasis must be one of {_PRE_EMPHASIS}, got {self.spec.pre_emphasis!r}")
+        if self.spec.ar_fit not in _AR_FITS:
+            raise ValueError(f"spec.ar_fit must be one of {_AR_FITS}, got {self.spec.ar_fit!r}")
         self.random_state = random_state
         self.chunk_rows = chunk_rows
         self.device = HydraTransform._resolve_device(device)
@@ -261,6 +290,7 @@ class ShapeConvSAE(nn.Module):
         self.provenance: dict[str, Any] = {}
         self.fit_meta: dict[str, Any] = {}
         self.atom_response_std: np.ndarray | None = None
+        self.atoms_init: np.ndarray | None = None
         self.artifact_format = CHECKPOINT_FORMAT
         self.fitted = False
         self._pool_energy = torch.zeros(0, device=self.device)
@@ -301,6 +331,8 @@ class ShapeConvSAE(nn.Module):
             }
         if not hasattr(self, "atom_response_std"):
             self.atom_response_std = None
+        if not hasattr(self, "atoms_init"):
+            self.atoms_init = None
         self.artifact_format = CHECKPOINT_FORMAT
 
     def validate_artifact(self) -> None:
@@ -392,6 +424,8 @@ class ShapeConvSAE(nn.Module):
         }
         response = checkpoint.get("atom_response_std")
         self.atom_response_std = None if response is None else np.asarray(response, dtype=np.float32)
+        init = checkpoint.get("atoms_init")
+        self.atoms_init = None if init is None else np.asarray(init, dtype=np.float32)
         self.artifact_format = CHECKPOINT_FORMAT
         self.fitted = True
         log.info(
@@ -402,7 +436,8 @@ class ShapeConvSAE(nn.Module):
     def save_artifacts(self, output_dir: Path) -> None:
         """Write ``sae_state.pt`` and the inspectable arrays.
 
-        ``sae_atoms.npy`` (encoded domain), ``sae_atoms_signal.npy`` (synthesis
+        ``sae_atoms.npy`` (encoded domain), ``sae_atoms_init.npy`` (the k-means
+        initialization, encoded domain), ``sae_atoms_signal.npy`` (synthesis
         shapes, see ``atoms_signal_domain``), ``sae_atom_response_std.npy`` (when
         measured), ``sae_amp_min_atom.npy`` (when calibrated) and
         ``sae_training.csv``. The checkpoint holds the format number, the spec, the
@@ -420,10 +455,13 @@ class ShapeConvSAE(nn.Module):
                 "history": self.history,
                 "provenance": self.provenance,
                 "atom_response_std": None if self.atom_response_std is None else self.atom_response_std.tolist(),
+                "atoms_init": None if self.atoms_init is None else self.atoms_init.tolist(),
             },
             output_dir / CHECKPOINT_NAME,
         )
         np.save(output_dir / "sae_atoms.npy", self.atoms_numpy)
+        if self.atoms_init is not None:
+            np.save(output_dir / "sae_atoms_init.npy", self.atoms_init)
         np.save(output_dir / "sae_atoms_signal.npy", self.atoms_signal_domain)
         if self.atom_response_std is not None:
             np.save(output_dir / "sae_atom_response_std.npy", self.atom_response_std)
@@ -542,7 +580,13 @@ class ShapeConvSAE(nn.Module):
 
     @torch.no_grad()
     def _fit_ar(self, dataloader: DataLoader) -> None:
-        """Fit the AR whitening filter by pooled Yule-Walker on the differenced, scaled training rows."""
+        """Fit the AR whitening filter by Yule-Walker on the differenced, scaled training rows.
+
+        ``ar_fit="pooled"`` sums the autocorrelation over all rows (each row weighted
+        by its variance); ``"row_normalized"`` averages each usable row's own
+        normalized autocorrelation (each row weighted once). Both give a valid
+        autocorrelation sequence; the Toeplitz system gets a small ridge.
+        """
         p = self.spec.ar_order
         if p == 0:
             return
@@ -550,8 +594,14 @@ class ShapeConvSAE(nn.Module):
         autocorr = torch.zeros(p + 1, device=self.device, dtype=torch.float64)
         for x, _ in tqdm(dataloader, desc="ShapeConv SAE AR whitening fit"):
             rows = self._rows(x).double()
-            for k in range(p + 1):
-                autocorr[k] += (rows[:, k:] * rows[:, : rows.shape[1] - k]).sum()
+            per_row = torch.stack(
+                [(rows[:, k:] * rows[:, : rows.shape[1] - k]).sum(1) for k in range(p + 1)], dim=1
+            )
+            if self.spec.ar_fit == "row_normalized":
+                usable = per_row[:, 0] > 0
+                autocorr += (per_row[usable] / per_row[usable, :1]).sum(0)
+            else:
+                autocorr += per_row.sum(0)
         autocorr = autocorr / autocorr[0].clamp_min(_EPS)
         index = torch.arange(p, device=self.device)
         toeplitz = autocorr[(index[:, None] - index[None, :]).abs()]
@@ -692,11 +742,31 @@ class ShapeConvSAE(nn.Module):
         length = self.spec.atom_len
         return max(self.context - length + 1, 0), self.context + self.train_spec.crop_len
 
-    def _crops(self, x: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+    def _energy_gate(self, energy: torch.Tensor) -> torch.Tensor:
+        """Keep mask of patches by scored energy: non-flat and, with a gate, at most that multiple of the median.
+
+        With ``max_crop_energy_ratio`` set, patches above that multiple of the median
+        energy of the batch's non-flat patches are removed, so the gate is relative
+        to the batch's own typical energy.
+        """
+        keep = energy > _ENERGY_FLOOR
+        ratio = self.train_spec.max_crop_energy_ratio
+        if ratio is not None and bool(keep.any()):
+            keep = keep & (energy <= float(ratio) * energy[keep].median())
+        return keep
+
+    def _crops(self, x: torch.Tensor, generator: torch.Generator) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Random crops ``(n, 1, crop_len + 2 context)`` of a window batch, centered on their scored part.
 
         Rows are drawn uniformly within the batch, ``crops_per_row`` per row in
-        expectation. Crops whose scored part is flat (failed loads) are dropped.
+        expectation. Crops whose scored part is flat (failed loads) are dropped, and
+        so are crops above the energy gate when ``max_crop_energy_ratio`` is set.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, int]
+            The kept crops, the scored energies of all non-flat crops (for the
+            heavy-tail monitor), and the number of crops the energy gate removed.
 
         Raises
         ------
@@ -711,7 +781,10 @@ class ShapeConvSAE(nn.Module):
         n_crops = rows.shape[0] * train_spec.crops_per_row
         crops = self._sample_subsequences(rows, total, n_crops, generator).unsqueeze(1)
         crops = crops - self._center(crops).mean(-1, keepdim=True)
-        return crops[self._center(crops).pow(2).sum(dim=(1, 2)) > _ENERGY_FLOOR]
+        energy = self._center(crops).pow(2).sum(dim=(1, 2))
+        keep = self._energy_gate(energy)
+        n_dropped = int((energy > _ENERGY_FLOOR).sum()) - int(keep.sum())
+        return crops[keep], energy[energy > _ENERGY_FLOOR].detach(), n_dropped
 
     def _step(
         self, crops: torch.Tensor, atoms: torch.Tensor
@@ -767,7 +840,9 @@ class ShapeConvSAE(nn.Module):
         samples = []
         for x, _ in tqdm(dataloader, desc="ShapeConv SAE k-means init"):
             rows = self._rows(x)
-            samples.append(self._sample_subsequences(rows, spec.atom_len, per_batch, generator))
+            patches = self._sample_subsequences(rows, spec.atom_len, per_batch, generator)
+            patches = patches - patches.mean(-1, keepdim=True)
+            samples.append(patches[self._energy_gate(patches.pow(2).sum(-1))])
         candidates = self._project(torch.cat(samples))
         candidates = candidates[candidates.abs().amax(-1) > 0]
         if len(candidates) < spec.n_atoms:
@@ -780,6 +855,7 @@ class ShapeConvSAE(nn.Module):
         centers = torch.as_tensor(kmeans.cluster_centers_, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             self.atoms.copy_(self._project(centers).unsqueeze(1))
+        self.atoms_init = self.atoms_numpy
         log.info(f"Initialized {spec.n_atoms} atoms by k-means on {len(candidates)} sub-sequences")
 
     @torch.no_grad()
@@ -811,12 +887,14 @@ class ShapeConvSAE(nn.Module):
 
     @torch.no_grad()
     def _reset_dead_atoms(self, usage: torch.Tensor, optimizer: torch.optim.Optimizer) -> tuple[int, int]:
-        """Re-seed atoms that never fired in the epoch from the residual pool; returns (dead, re-seeded).
+        """Re-seed the dead atoms of the epoch from the residual pool; returns (dead, re-seeded).
 
-        Re-seeded atoms get the median threshold and cleared Adam moments. Atoms
-        without a valid replacement patch are left as they are.
+        Dead: usage below ``min_usage_frac`` times the mean usage over atoms (zero
+        usage when the fraction is 0). Re-seeded atoms get the median threshold and
+        cleared Adam moments. Atoms without a valid replacement patch are left as
+        they are.
         """
-        dead = torch.nonzero(usage == 0).flatten()
+        dead = torch.nonzero(self._dead_mask(usage)).flatten()
         n_dead = int(dead.numel())
         n_new = min(n_dead, int(self._pool_energy.numel()))
         if n_new == 0:
@@ -833,6 +911,13 @@ class ShapeConvSAE(nn.Module):
                 state["exp_avg_sq"][targets] = 0.0
         self._clear_pool()
         return n_dead, n_new
+
+    def _dead_mask(self, usage: torch.Tensor) -> torch.Tensor:
+        """Atoms with zero epoch usage, plus those below ``min_usage_frac`` of the mean usage when it is set."""
+        dead = usage == 0
+        if self.train_spec.min_usage_frac > 0:
+            dead = dead | (usage.float() < self.train_spec.min_usage_frac * usage.float().mean())
+        return dead
 
     def _clear_pool(self) -> None:
         """Empty the residual pool; called at every epoch start and on every re-seed exit."""
@@ -859,7 +944,7 @@ class ShapeConvSAE(nn.Module):
         sum_sq = torch.zeros(self.spec.n_atoms, device=self.device)
         count = 0.0
         for x, _ in val_dataloader:
-            crops = self._crops(x, generator)
+            crops, _, _ = self._crops(x, generator)
             for start in range(0, crops.shape[0], self.train_spec.crop_batch):
                 batch = crops[start : start + self.train_spec.crop_batch]
                 _, stats, _, _ = self._step(batch, atoms)
@@ -892,8 +977,12 @@ class ShapeConvSAE(nn.Module):
         ``val_active_per_crop`` on fixed validation crops (``nan`` without a
         validation loader), ``median_thresh_over_response`` (learned thresholds over
         the per-atom response scale measured on those crops, kept as
-        ``atom_response_std``), ``n_dead``, ``n_reseeded`` and ``n_steps``. At the
-        end ``fit_meta`` freezes the training schedule, the seed and the context. A
+        ``atom_response_std``), ``n_dead``, ``n_reseeded``, ``n_steps``,
+        ``n_active_atoms`` (atoms whose usage reached 1 percent of the mean),
+        ``crops_dropped_frac`` (share of non-flat crops the energy gate removed) and
+        ``crop_energy_mean_over_median`` (heavy-tail monitor of the crop energies the
+        squared-error objective sees). At the end ``fit_meta`` freezes the training
+        schedule, the seed and the context. A
         module loaded from a checkpoint (``fitted``) returns at once and keeps its
         provenance.
 
@@ -935,9 +1024,12 @@ class ShapeConvSAE(nn.Module):
             self._clear_pool()
             usage = torch.zeros(spec.n_atoms, dtype=torch.long, device=self.device)
             totals = torch.zeros(4, device=self.device)
-            loss_sum, n_steps = 0.0, 0
+            loss_sum, n_steps, n_dropped = 0.0, 0, 0
+            energies: list[torch.Tensor] = []
             for x, _ in tqdm(loader, desc=f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}"):
-                crops = self._crops(x, generator)
+                crops, energy, dropped = self._crops(x, generator)
+                energies.append(energy)
+                n_dropped += dropped
                 order = torch.randperm(crops.shape[0], generator=generator).to(self.device)
                 for start in range(0, crops.shape[0], train_spec.crop_batch):
                     batch = crops[order[start : start + train_spec.crop_batch]]
@@ -953,7 +1045,8 @@ class ShapeConvSAE(nn.Module):
                     loss_sum += float(loss.detach())
                     n_steps += 1
             last = epoch + 1 == train_spec.epochs
-            n_dead, n_new = (int((usage == 0).sum()), 0) if last else self._reset_dead_atoms(usage, optimizer)
+            n_dead, n_new = (int(self._dead_mask(usage).sum()), 0) if last else self._reset_dead_atoms(usage, optimizer)
+            all_energy = torch.cat(energies) if energies else torch.zeros(1, device=self.device)
             val = None
             if val_dataloader is not None:
                 val, response_std = self._val_stats(val_dataloader)
@@ -973,13 +1066,18 @@ class ShapeConvSAE(nn.Module):
                 "n_dead": n_dead,
                 "n_reseeded": n_new,
                 "n_steps": n_steps,
+                "n_active_atoms": int((usage.float() >= _ACTIVE_USAGE_FRAC * usage.float().mean()).sum()),
+                "crops_dropped_frac": n_dropped / max(int(all_energy.numel()), 1),
+                "crop_energy_mean_over_median": float(all_energy.mean() / all_energy.median().clamp_min(_EPS)),
             }
             self.history.append(record)
             log.info(
                 f"ShapeConv SAE epoch {epoch + 1}/{train_spec.epochs}: residual {record['residual_frac']:.1%} "
                 f"of signal power (val {record['val_residual_frac']:.1%}), starts/crop "
                 f"{record['active_per_crop']:.2f}, objective {record['objective']:.4f}, "
-                f"dead {n_dead}, re-seeded {n_new}, steps {n_steps}"
+                f"dead {n_dead}, re-seeded {n_new}, active atoms {record['n_active_atoms']}, "
+                f"crops dropped {record['crops_dropped_frac']:.1%}, crop energy mean/median "
+                f"{record['crop_energy_mean_over_median']:.1f}, steps {n_steps}"
             )
         self._clear_pool()
         self.atom_response_std = None if response_std is None else response_std.cpu().numpy().astype(np.float32)

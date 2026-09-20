@@ -142,6 +142,11 @@ def parse(argv):
     p.add_argument("--nms-half", type=int, default=None, help="NMS half-width in samples (default atom_len // 2)")
     p.add_argument("--amp-min-relative", action="store_true",
                    help="amp_min in units of each atom's measured background response std")
+    p.add_argument("--ar-fit", choices=("pooled", "row_normalized"), default="pooled", help="AR fit rule (diff_ar)")
+    p.add_argument("--crop-energy-ratio", type=float, default=None,
+                   help="training-crop artifact gate: drop crops above this multiple of the batch median energy")
+    p.add_argument("--min-usage-frac", type=float, default=0.0,
+                   help="re-seed atoms whose epoch usage is below this fraction of the mean usage")
     p.add_argument("--calibrate-fa", type=float, default=None,
                    help="calibrate per-atom thresholds to this false-alarm rate per channel-minute on an "
                         "event-free draw (seed + 3); takes precedence over --amp-min")
@@ -415,6 +420,12 @@ def main(argv=None) -> int:
         stress.append("amp_min_relative")
     if args.calibrate_fa is not None:
         stress.append(f"calibrate_fa {args.calibrate_fa:g}")
+    if args.crop_energy_ratio is not None:
+        stress.append(f"crop_energy_ratio {args.crop_energy_ratio:g}")
+    if args.min_usage_frac > 0:
+        stress.append(f"min_usage_frac {args.min_usage_frac:g}")
+    if args.ar_fit != "pooled":
+        stress.append(f"ar_fit {args.ar_fit}")
     _kv("stress", ", ".join(stress))
     _kv("events per channel", args.events_per_channel)
     _kv("template length / atom length", f"{args.template_len} / {args.atom_len}")
@@ -423,11 +434,12 @@ def main(argv=None) -> int:
     spec = AtomSpec(
         n_atoms=args.n_atoms, atom_len=args.atom_len, mode=args.mode, thresh=args.thresh,
         topk=args.topk, amp_min=args.amp_min, pre_emphasis=args.pre_emphasis, ar_order=args.ar_order,
-        nms_half_width=args.nms_half, amp_min_relative=args.amp_min_relative,
+        nms_half_width=args.nms_half, amp_min_relative=args.amp_min_relative, ar_fit=args.ar_fit,
     )
     train_spec = TrainSpec(
         epochs=args.epochs, lr=args.lr, lam=args.lam, crop_len=256, crops_per_row=16,
-        crop_batch=512, n_init_samples=2000,
+        crop_batch=512, n_init_samples=2000, max_crop_energy_ratio=args.crop_energy_ratio,
+        min_usage_frac=args.min_usage_frac,
     )
     provenance = {"train_subjects": ["synthetic-train"], "data": {"signal_mode": "synthetic"}}
 

@@ -34,6 +34,8 @@
 #*   nohup bash run_sae_phase2.sh > sae_phase2.log 2>&1 &
 #* Resource probe first (one epoch, both pre-emphasis families, separate root):
 #*   ARMS="D10 A10" EPOCHS=1 OUT_ROOT=logs/sae_phase2/probe_$(date +%Y%m%d_%H%M%S) bash run_sae_phase2.sh
+#* Phase 2b (after the first screen: artifact gate, usage re-seeding, row-normalized AR):
+#*   CROP_ENERGY_RATIO=10 MIN_USAGE_FRAC=0.01 AR_FIT=row_normalized nohup bash run_sae_phase2.sh > sae_phase2b.log 2>&1 &
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
@@ -52,6 +54,11 @@ CROP_BATCH="${CROP_BATCH:-1024}"
 INTERPOLATE_BAD="${INTERPOLATE_BAD:-false}"
 DROP_BAD_SEGMENTS="${DROP_BAD_SEGMENTS:-false}"
 DEVICE="${DEVICE:-auto}"
+# Phase 2b levers (defaults reproduce the first screen): training-crop artifact gate,
+# usage-based re-seeding, row-normalized AR fit. Phase 2b: 10 / 0.01 / row_normalized.
+CROP_ENERGY_RATIO="${CROP_ENERGY_RATIO:-null}"
+MIN_USAGE_FRAC="${MIN_USAGE_FRAC:-0.0}"
+AR_FIT="${AR_FIT:-pooled}"
 
 cd "$(dirname "$0")"
 
@@ -96,7 +103,7 @@ EOF
 cp "$MANIFEST_DIR"/windows_{train,val,test}.csv "$OUT_ROOT"/
 env | grep -E "^(OMP|MKL|TORCH|CUDA)_" | sort > "$OUT_ROOT/threads.txt" || true
 nvidia-smi -L > "$OUT_ROOT/gpu.txt" 2>/dev/null || echo "no GPU visible" > "$OUT_ROOT/gpu.txt"
-echo "ARMS=$ARMS EPOCHS=$EPOCHS SEED=$SEED K=$N_ATOMS L=$ATOM_LEN AR=$AR_ORDER FA=$CALIBRATE_FA CROP_BATCH=$CROP_BATCH INTERPOLATE_BAD=$INTERPOLATE_BAD DROP_BAD_SEGMENTS=$DROP_BAD_SEGMENTS MANIFEST_DIR=$MANIFEST_DIR" | tee "$OUT_ROOT/settings.txt"
+echo "ARMS=$ARMS EPOCHS=$EPOCHS SEED=$SEED K=$N_ATOMS L=$ATOM_LEN AR=$AR_ORDER FA=$CALIBRATE_FA CROP_BATCH=$CROP_BATCH INTERPOLATE_BAD=$INTERPOLATE_BAD DROP_BAD_SEGMENTS=$DROP_BAD_SEGMENTS CROP_ENERGY_RATIO=$CROP_ENERGY_RATIO MIN_USAGE_FRAC=$MIN_USAGE_FRAC AR_FIT=$AR_FIT MANIFEST_DIR=$MANIFEST_DIR" | tee "$OUT_ROOT/settings.txt"
 failures="$OUT_ROOT/failures.txt"
 : > "$failures"
 
@@ -110,6 +117,8 @@ common=(
   feature.spec.mode=shrink "feature.spec.n_atoms=$N_ATOMS" "feature.spec.atom_len=$ATOM_LEN"
   "feature.spec.ar_order=$AR_ORDER" "feature.calibrate_fa=$CALIBRATE_FA" feature.calibrate_label=0
   "feature.train_spec.epochs=$EPOCHS" "feature.train_spec.crop_batch=$CROP_BATCH"
+  "feature.train_spec.max_crop_energy_ratio=$CROP_ENERGY_RATIO" "feature.train_spec.min_usage_frac=$MIN_USAGE_FRAC"
+  "feature.spec.ar_fit=$AR_FIT"
   "feature.random_state=$SEED" "feature.device=$DEVICE"
 )
 

@@ -25,7 +25,8 @@ subjects are not in the diagnosed held-out split, encodes every window of ``spli
   microvolts with a stated spacing and fixed axis limits, channel names in loader order,
   and the subject, window, recording and time of each snippet;
 - ``sae_diagnostics_summary.csv`` and a log line: exposure (attempted, usable, excluded
-  channel-minutes), threshold source, total rates (all windows, negative windows,
+  channel-minutes), the fraction of encoded samples at the robust clip and of usable rows
+  with at least one clipped sample (artifact prevalence), threshold source, total rates (all windows, negative windows,
   positive windows), the median and quartiles of the per-subject rate over negative
   subjects, silent atoms, coherent pairs, the median threshold ratios, the edge
   activation fraction (startup region of the causal filters) and the maximum encoded
@@ -54,6 +55,7 @@ from omegaconf import DictConfig
 
 rootutils.setup_root(__file__, pythonpath=True)
 
+from src.models.components.shapeconv_sae import ROBUST_CLIP  # noqa: E402
 from src.utils import (  # noqa: E402
     RankedLogger,
     check_pretrained_provenance,
@@ -220,6 +222,7 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     window_minutes: list[float] = []
     rows_total, rows_usable, n_positions = 0, 0, 0
     attempted_minutes, offset = 0.0, 0
+    clipped_samples, rows_with_clip, encoded_samples = 0, 0, 0
     with torch.no_grad():
         for x, y in loader:
             n_windows, n_channels, n_times = x.shape
@@ -240,6 +243,10 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             autocorr += per_row.sum(0)
             usable_rows = per_row[:, 0] > 0
             row_autocorr.append(per_row[usable_rows] / per_row[usable_rows, :1])
+            at_clip = encoded.abs() >= ROBUST_CLIP
+            clipped_samples += int(at_clip.sum())
+            rows_with_clip += int(at_clip.any(1).sum())
+            encoded_samples += int(usable_rows.sum()) * encoded.shape[1]
             counts_per_window = torch.zeros(n_windows, dtype=torch.long)
             for start, code, _ in sae._row_chunks(x):
                 magnitude = code.abs().cpu()
@@ -341,6 +348,8 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "channel_minutes_usable": usable_minutes,
         "channel_minutes_excluded": attempted_minutes - usable_minutes,
         "rows_excluded_fraction": (rows_total - rows_usable) / max(rows_total, 1),
+        "clipped_sample_fraction": clipped_samples / max(encoded_samples, 1),
+        "rows_with_clip_fraction": rows_with_clip / max(rows_usable, 1),
         "threshold_source": threshold_source,
         "total_rate_all": float(table["rate_all_per_channel_minute"].sum()),
         "total_rate_thresholded": float(table["rate_thresholded_per_channel_minute"].sum()),

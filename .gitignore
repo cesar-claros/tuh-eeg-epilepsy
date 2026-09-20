@@ -168,4 +168,4 @@ sae_phase1.log
 sae_stress.log
 sae_levers.log
 sae_calibration.log
-sae_phase2.log
+sae_phase2*.log

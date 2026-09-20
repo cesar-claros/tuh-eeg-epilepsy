@@ -32,6 +32,9 @@ spec:
                     # events that can both be detected; the training context follows it
   amp_min_relative: false # amp_min in units of each atom's measured background response std
                     # (needs a fit with a validation loader) instead of robust units of the row
+  ar_fit: pooled    # diff_ar only. pooled: Yule-Walker on the autocorrelation summed over rows (rows
+                    # weighted by variance: artifact rows dominate, the typical row stays coloured;
+                    # Phase 2 screen). row_normalized: mean of each row's normalized autocorrelation
 train_spec:
   _target_: src.models.components.shapeconv_sae.TrainSpec
   epochs: 30        # passes over the train dataloader; each pass draws fresh random crops, so
@@ -46,6 +49,12 @@ train_spec:
   crop_batch: 1024  # crops per optimizer step
   lambda_div: 0.0   # diversity penalty: mean max |cross-correlation| over lags between atoms (0 = off)
   n_init_samples: 20000
+  max_crop_energy_ratio: null # training-crop artifact gate: drop crops (and k-means patches) whose
+                    # scored energy exceeds this multiple of the batch median; null = keep all
+                    # non-flat crops. Phase 2 screen: the squared error was dominated by railed /
+                    # saturated segments and 53 of 64 atoms fired on nothing else. Phase 2b: 10.
+  min_usage_frac: 0.0 # re-seed atoms whose epoch usage is below this fraction of the mean usage
+                    # (0 = only zero-usage atoms). Phase 2b: 0.01.
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py (or a previous train run). When set,
 # the dictionary is loaded and fit_unsupervised is skipped. The checkpoint's AtomSpec is
