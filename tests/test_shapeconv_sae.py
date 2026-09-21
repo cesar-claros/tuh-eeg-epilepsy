@@ -16,7 +16,8 @@ statistic (ties, no peaks, small allowance, label filter, chunk sizes, unusable 
 unusable rows in extraction and in the AR fit, the split preflight, the
 maximum-cardinality event matching of the synthetic stage, the format-4 migration,
 the training-crop energy gate, the usage-based re-seeding rule, the row-normalized
-AR fit, the atom band limit, and the validation-before-re-seed order.
+AR fit, the atom band limit, the validation-before-re-seed order, and the pooling and
+selection helpers of the Phase 3 readout.
 """
 
 from __future__ import annotations
@@ -734,6 +735,21 @@ def test_validation_measured_before_reseed() -> None:
     model.fit_unsupervised(loader, val_dataloader=loader, provenance=PROVENANCE)
     assert model.history[0]["n_reseeded"] > 0, "the rule must have re-seeded atoms after epoch 1"
     assert order[:2] == ["val", "reseed"], order
+
+
+def test_readout_helpers_pool_and_select() -> None:
+    """Subject-mean pooling, mixed-label refusal, and the C selection rule of the Phase 3 readout."""
+    from src.readout import _select, _subject_labels, _subject_mean
+
+    subjects = np.array(["b", "a", "b", "a", "c"])
+    unique, pooled, counts = _subject_mean(np.array([1.0, 2.0, 3.0, 4.0, 5.0]), subjects)
+    assert unique.tolist() == ["a", "b", "c"] and pooled.tolist() == [3.0, 2.0, 5.0] and counts.tolist() == [2, 2, 1]
+    assert _subject_labels(np.array([1, 0, 1, 0, 1]), subjects).tolist() == [0, 1, 1]
+    _expect_value_error(lambda: _subject_labels(np.array([1, 0, 0, 0, 1]), subjects), "mixed labels must be refused")
+    rows = [{"C": c, "val_subject_auroc": auroc} for c, auroc in ((0.1, 0.70), (1.0, 0.75), (10.0, 0.75))]
+    assert _select(rows)["C"] == 1.0, "exact tie goes to the smaller C"
+    rows[2]["val_subject_auroc"] = 0.7500001
+    assert _select(rows)["C"] == 10.0, "a real difference wins"
 
 
 def test_diversity_sign_and_shift_aware() -> None:

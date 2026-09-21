@@ -1,0 +1,9 @@
+_target_: src.models.components.spectral_features.SpectralFeatures
+# Simple spectral control for the Phase 3 readout: Welch PSD per (window, channel) row,
+# log10 absolute and relative power in five bands (delta, theta, alpha, beta, low gamma
+# up to the 45 Hz band-pass edge). No fitted parameters. 20 channels x 5 bands x 2 = 200
+# features per window.
+sfreq: 256
+bands: [[1, 4], [4, 8], [8, 13], [13, 30], [30, 45]]
+nperseg: 512      # 2 s segments, 50 percent overlap
+device: auto

@@ -1,0 +1,37 @@
+# @package _global_
+
+# Phase 3 development readout of one arm (src/readout.py): feature extractor fitted on
+# training subjects only, feature scaler on training windows, L2 logistic regression
+# over the declared C grid with inverse window-count subject weights, subject-mean
+# pooling, selection by validation subject AUROC (ties toward smaller C). The test
+# split is never loaded. Same manifests and data settings as the dictionaries.
+defaults:
+  - _self_
+  - data: tuh_eeg_epilepsy
+  - feature: shapeconv_sae
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional local: default
+
+task_name: "readout"
+
+# Name of the arm in the outputs (e.g. D05, hydra, spectral, kmeans_diff).
+arm: "arm"
+# Feature family: sae (feature.pretrained or `dictionaries`), kmeans (feature=shapeconv_sae
+# with feature.train_spec.epochs=0, fitted and calibrated here), hydra
+# (feature=hydra_transformer), spectral (feature=spectral).
+features: sae
+# Optional list of sae_state.pt paths read out as an equal-weight ensemble (one
+# training-only classifier per dictionary, subject scores averaged). null = feature.pretrained.
+dictionaries: null
+# The complete readout grid, the same for every arm (proposal, Phase 3 step 2).
+c_grid: [0.1, 1.0, 10.0]
+# Inverse window-count subject weights (uniform when every subject has the same count).
+subject_weights: true
+
+# Output directory (feeds hydra.run.dir).
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
+tags: ["dev"]
+seed: null
