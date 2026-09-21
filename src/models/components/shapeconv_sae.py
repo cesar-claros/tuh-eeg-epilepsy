@@ -999,12 +999,17 @@ class ShapeConvSAE(nn.Module):
         The windows are re-shuffled every pass by a seeded copy of the loader (the
         given loader keeps its order for feature extraction). Under ``diff_ar`` the
         whitening filter is fitted first in one pass over that loader, then the
-        atoms are initialized by k-means. Each batch is pre-emphasized and scaled
-        per (window, channel) row and cut into random context crops; only the
-        central ``crop_len`` samples of a crop are scored. Labels are ignored. Atoms
-        are re-projected after every step. Atoms that never enter a code in an epoch
-        are re-seeded from a pool of the worst-reconstructed residual patches of
-        that epoch, except after the last epoch. ``history`` records, per epoch,
+        atoms are initialized by k-means (candidates through the energy gate when
+        ``max_crop_energy_ratio`` is set; centers through the band limit when
+        ``atom_lowpass_hz`` is set; saved as ``atoms_init``). Each batch is
+        pre-emphasized and scaled per (window, channel) row and cut into random
+        context crops; only the central ``crop_len`` samples of a crop are scored,
+        and crops above the energy gate are dropped. Labels are ignored. Atoms are
+        re-constrained (band limit, zero mean, unit norm) after every step. Dead
+        atoms (zero usage, or usage below ``min_usage_frac`` of the mean) are
+        re-seeded from a pool of the worst-reconstructed residual patches of that
+        epoch, except after the last epoch; validation is measured before the
+        re-seed. ``history`` records, per epoch,
         ``residual_frac`` (residual as a fraction of signal power on the scored
         centers), ``active_per_crop`` (code entries whose placement starts inside
         the scored center), ``objective``, ``val_residual_frac`` and
