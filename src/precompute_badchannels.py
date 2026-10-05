@@ -14,7 +14,9 @@ Detection runs on the referential 10-20 channels (before bipolar) of a high-pass
   (``mne.preprocessing.annotate_amplitude`` with a ``flat`` threshold; railing pins the signal
   at a constant, i.e. flat). If more than ``--max_bad_frac`` of channels are bad, interpolation
   is unreliable, so the sidecar is flagged ``too_many_bad_channels`` (the engine can then drop
-  the recording rather than interpolate it).
+  the recording rather than interpolate it). A recording that PyPREP cannot characterize (no
+  usable channel, too few good channels for RANSAC, or too few samples for its filter) gets the
+  same flag with the error in ``note`` and counts as ``unrepairable`` in the summary.
 - Bad segments: ``annotate_amplitude`` peak/flat detection on the GOOD channels only (so a bad
   channel's railing does not flag segments that interpolation would otherwise fix).
 
@@ -214,18 +216,28 @@ def _detect_one(edf_path: Path, params: dict) -> str:
         #    a separate absolute-threshold flat check: on low-amplitude recordings a fixed uV
         #    threshold marks normal quiet EEG as "flat" and over-rejects (it was flagging every
         #    channel on a 6 uV-ptp recording).
-        nc = NoisyChannels(det, random_state=params["seed"], do_detrend=False)
-        nc.find_all_bads(ransac=params["ransac"])
-        bad = set(nc.get_bads())
+        #    PyPREP raises on a recording it cannot characterize: no usable channel at all
+        #    (IndexError), too few good channels left for RANSAC (OSError), or too few samples for
+        #    its filter (ValueError). Interpolation cannot repair such a recording, so it gets a
+        #    sidecar flagged too_many_bad_channels (the engine then drops it) instead of none: a
+        #    missing sidecar would keep the recording, unrepaired and without a trace.
+        nc, failure = None, ""
+        try:
+            nc = NoisyChannels(det, random_state=params["seed"], do_detrend=False)
+            nc.find_all_bads(ransac=params["ransac"])
+        except (OSError, ValueError, IndexError) as e:
+            failure = f"detection failed, recording marked unrepairable: {type(e).__name__}: {e}"
+            logger.warning(f"{edf_path.name}: {failure}")
+        bad = set(nc.get_bads()) if nc is not None else set()
         bad_channels = sorted(bad)
         n_eeg = len(eeg)
-        too_many = (len(bad_channels) / n_eeg) > params["max_bad_frac"]
+        too_many = bool(failure) or (len(bad_channels) / n_eeg) > params["max_bad_frac"]
 
         # 4) High-amplitude (peak) and railed (flat) artifact segments on the GOOD channels only.
         #    flat is a near-zero threshold so only true railing/clipping is caught, not quiet EEG.
         good = [c for c in det.ch_names if c not in bad]
         bad_segments = []
-        if good:
+        if good and not failure:
             annots, _ = mne.preprocessing.annotate_amplitude(
                 det.copy().pick(good), peak=peak_v, flat=flat_v,
                 bad_percent=params["seg_bad_percent"], min_duration=params["min_seg_s"],
@@ -233,8 +245,8 @@ def _detect_one(edf_path: Path, params: dict) -> str:
             bad_segments = [[round(float(o), 4), round(float(o + d), 4)]
                             for o, d in zip(annots.onset, annots.duration)]
 
-        _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, "", params, periodic)
-        return "ok"
+        _write_sidecar(sidecar, bad_channels, bad_segments, n_eeg, too_many, failure, params, periodic)
+        return "unrepairable" if failure else "ok"
     except Exception as e:  # noqa: BLE001
         logger.error(f"bad-channel detection failed for {edf_path.name}: {type(e).__name__}: {e}")
         return "error"
@@ -316,7 +328,7 @@ def main() -> None:
     else:
         results = Parallel(n_jobs=args.n_jobs)(
             delayed(_detect_one)(p, params) for p in tqdm(paths, desc="bad-channel detection"))
-    counts = {k: results.count(k) for k in ("ok", "skip", "few_channels", "error")}
+    counts = {k: results.count(k) for k in ("ok", "skip", "few_channels", "unrepairable", "error")}
     logger.info(f"Done: {counts}. Sidecars written next to each .edf as *{BADS_SUFFIX}.")
 
 
