@@ -243,7 +243,9 @@ def test_step_loss_masks_unusable_channels() -> None:
 def _planted(seed: int, n_windows: int = 24) -> torch.Tensor:
     """Windows ``(n, 3, 512)``: two fixed multichannel templates alternate, one event per 32 samples, plus noise."""
     generator = torch.Generator().manual_seed(seed)
-    templates = WaveformSAE._unit(torch.randn(2, 3, 16, generator=torch.Generator().manual_seed(0)))
+    # The template seed must differ from the model's ``random_state``: ``init="random"`` draws a
+    # tensor of this same shape from its own seed, and an equal seed starts the fit at the answer.
+    templates = WaveformSAE._unit(torch.randn(2, 3, 16, generator=torch.Generator().manual_seed(123)))
     x = 0.05 * torch.randn(n_windows, 3, 512, generator=generator)
     for window in range(n_windows):
         for block in range(16):
@@ -267,11 +269,11 @@ def _fitted(epochs: int) -> tuple[WaveformSAE, torch.Tensor]:
 
 
 def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
-    model, _ = _fitted(epochs=12)
+    model, _ = _fitted(epochs=30)
     history = model.history
-    assert model.fitted and len(history) == 12
+    assert model.fitted and len(history) == 30
     assert all(np.isfinite(value) for record in history for value in record.values())
-    assert history[-1]["residual_frac"] < history[0]["residual_frac"]
+    assert history[-1]["residual_frac"] < 0.5 * history[0]["residual_frac"]
     norms = torch.linalg.vector_norm(model.atoms.detach(), dim=(1, 2))
     assert torch.allclose(norms, torch.ones(2), atol=1e-5)
     assert 0.0 <= history[-1]["selected_zero_frac"] <= 1.0
