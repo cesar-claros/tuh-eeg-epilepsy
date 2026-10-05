@@ -1,0 +1,44 @@
+_target_: src.models.components.waveform_sae.WaveformSAE
+# Waveform SAE: multichannel learned waveforms (K, C, L), channel-summed correlation, ReLU,
+# top-R positions per atom and pooling window, tied conv_transpose1d decoder, reconstruction
+# loss only (documentation/waveform_sae_implementation.md; mathematics in
+# documentation/Minimal Waveform Autoencoder Mathematics.md). The sparsity comes from the
+# selection: there is no threshold and no L1 penalty. The number of channels is read from the
+# data. Dictionary training only (src/train_sae.py feature=waveform_sae); classifier features
+# are not implemented yet. Writes sae_state.pt, sae_atoms.npy, sae_atoms_signal.npy,
+# sae_training.csv, sae_atom_stats.csv and sae_channels.txt to the run dir.
+spec:
+  _target_: src.models.components.waveform_sae.WaveformSpec
+  n_atoms: 64
+  atom_len: 80      # samples; 312 ms at data.target_sfreq=256. Even lengths are supported.
+  pool_len: 32      # pooling window P in samples (125 ms). P < atom_len: dense tiling, each atom
+                    # overlaps its own placements (filter-bank regime). P >> atom_len, e.g. 256:
+                    # at most top_r activations per atom per second (event regime). The window
+                    # length must be a multiple of P or its tail is trimmed (30720 = 960 * 32).
+  top_r: 1          # positions kept per atom and pooling window (1 <= top_r <= pool_len)
+  pre_emphasis: diff # diff: encode the first difference of each row (same as the ShapeConv SAE);
+                    # none: the scaled row. sae_atoms.npy is in the encoded domain,
+                    # sae_atoms_signal.npy the integrated synthesis shape.
+  atom_norm: unit   # unit: unit Frobenius norm over (C, L), re-imposed after every step.
+                    # free: unit norm at initialization only; the loss sets the scale.
+  center_atoms: false # subtract the temporal mean of every channel component before the norm
+train_spec:
+  _target_: src.models.components.waveform_sae.WaveformTrainSpec
+  epochs: 30        # passes over the train dataloader; updates = epochs * windows *
+                    # crops_per_window / crop_batch. With lazy_loading each pass re-reads the EDFs.
+                    # 0 keeps the initialization (frozen-initialization control).
+  lr: 0.001         # Adam; atom entries are about 1 / sqrt(C * L), so lower than the ShapeConv SAE
+  crop_len: 1024    # scored samples per training crop; a multiple of spec.pool_len. Each crop
+                    # also carries a margin of ceil((L + P - 2) / P) * P samples on each side.
+  crops_per_window: 16 # random grid-aligned crops per window per pass (in expectation)
+  crop_batch: 64    # crops per optimizer step
+  max_crop_energy_ratio: 10.0 # drop training crops (and initialization patches) whose scored
+                    # energy exceeds this multiple of the batch median; null keeps all non-flat crops
+  init: patches     # patches: random multichannel data patches; random: Gaussian atoms
+random_state: 42
+# Path to a sae_state.pt written by src/train_sae.py feature=waveform_sae. When set, the
+# dictionary is loaded and fit_unsupervised is skipped; every spec field must equal the
+# checkpoint's.
+pretrained: null
+# Device: cpu | cuda | cuda:N | auto.
+device: auto

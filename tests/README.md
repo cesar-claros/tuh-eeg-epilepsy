@@ -16,6 +16,7 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 6 | `stage6_classifier_scoring.py` | `make_pipeline(scaler, clf)` fit → decision scores, window- and subject-level accuracy | no (synthetic) |
 | 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on an independent synthetic train draw (spike-and-wave of random polarity), monitored on a val draw, scored on a test draw; deterministic invariants (dimension, chunk invariance, seed reproducibility of two fits, checkpoint round trip, refusal without provenance) FAIL the run; the gate (`--strict`) is event-level precision and recall > 0.9 with maximum-cardinality matching within `--match-tol`; template `\|xcorr\|` and window AUROCs are diagnostics; stress and lever flags in the docstring | no (synthetic) |
 | - | `test_shapeconv_sae.py` | pass/fail unit invariants (pytest or plain python, 25 tests): projection, adjoint identity, analytic shrink response, NMS ties, checkpoint round trip, refusals and migrations, chunk invariance, provenance guards, context crops, residual pool, AR whitening, calibrated thresholds against a brute-force order statistic, unusable rows, split preflight, event matching | no |
+| - | `test_waveform_sae.py` | pass/fail unit invariants of the Waveform SAE (pytest or plain python, 16 tests): agreement with the prototype forward pass, selection example and tie rule, support bound, index conventions and adjoint identity for even and odd atom lengths, autograd against the closed-form gradient, crop / full-window equality, atom constraint, shared row pipeline and unusable channels, energy gate, grid-aligned crops, masked loss, a small fit on planted waveforms, checkpoint round trip and refusals | no |
 
 ## Data flow
 
@@ -42,6 +43,7 @@ uv run python tests/stage4_hydra_transform.py
 uv run python tests/stage5_sparse_scaler.py
 uv run python tests/stage6_classifier_scoring.py
 uv run python tests/test_shapeconv_sae.py
+uv run python tests/test_waveform_sae.py
 uv run python tests/stage7_shapeconv_sae.py --n-windows 64 --epochs 20 --strict
 uv run python tests/stage7_shapeconv_sae.py --mode topk --amp-min 3
 
@@ -74,4 +76,5 @@ yet declared in `pyproject.toml`** and may need adding before these run:
 The scripts detect missing imports and print which packages are needed.
 
 The `stageN_*.py` scripts are diagnostic (stage 7 also fails on broken
-invariants); `test_shapeconv_sae.py` is a pass/fail unit test that pytest collects.
+invariants); `test_shapeconv_sae.py` and `test_waveform_sae.py` are pass/fail unit
+tests that pytest collects.

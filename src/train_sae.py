@@ -1,10 +1,12 @@
-"""Entry point that trains a ShapeConv SAE dictionary alone (no features, no classifier).
+"""Entry point that trains an SAE dictionary alone (no features, no classifier).
 
-Fits the atoms without labels on the training windows, scores the validation
-windows for the loss curve, and writes ``sae_state.pt`` (plus ``sae_atoms.npy``,
-``sae_training.csv`` and the ``windows_*.csv`` split files) to the run directory.
-A later ``src/train.py feature=shapeconv_sae feature.pretrained=<run>/sae_state.pt``
-run reuses the dictionary and skips the fit. Keep ``data.seed`` (and the split
+Works for every feature extractor that exposes ``fit_unsupervised``:
+``feature=shapeconv_sae`` (the default) and ``feature=waveform_sae``. Fits the atoms
+without labels on the training windows, scores the validation windows for the loss
+curve, and writes ``sae_state.pt`` (plus ``sae_atoms.npy``, ``sae_training.csv`` and
+the ``windows_*.csv`` split files) to the run directory. A later
+``src/train.py feature=shapeconv_sae feature.pretrained=<run>/sae_state.pt`` run
+reuses a ShapeConv dictionary and skips the fit. Keep ``data.seed`` (and the split
 ratios) identical between the two runs, or ``train.py`` refuses the checkpoint
 because its training subjects would land in the test set.
 """
@@ -17,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import hydra
 import lightning
 import rootutils
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 rootutils.setup_root(__file__, pythonpath=True)
@@ -75,7 +78,9 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor = instantiate_feature(cfg.feature)
     if not hasattr(feature_extractor, "fit_unsupervised"):
-        raise TypeError(f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae")
+        raise TypeError(
+            f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae or feature=waveform_sae"
+        )
     if getattr(feature_extractor, "fitted", False):
         raise ValueError("train_sae.py trains a new dictionary; unset feature.pretrained")
 
@@ -91,7 +96,7 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         )
     feature_extractor.save_artifacts(output_dir)
     log.info(  # noqa: G004
-        "Reuse with: python src/train.py feature=shapeconv_sae "
+        f"Reuse with: feature={HydraConfig.get().runtime.choices['feature']} "
         f"feature.pretrained={output_dir / CHECKPOINT_NAME} data.seed={cfg.data.seed}"
     )
 
