@@ -29,6 +29,7 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
+from torch import nn  # noqa: E402
 from torch.utils.data import DataLoader, TensorDataset  # noqa: E402
 
 from src.models.components.shapeconv_sae import ShapeConvSAE  # noqa: E402
@@ -238,6 +239,27 @@ def test_step_loss_masks_unusable_channels() -> None:
     assert torch.allclose(loss, 0.5 * residual.pow(2).sum() / n_scored)
     assert torch.allclose(stats[0], residual.pow(2).sum()) and float(stats[5]) == 5.0
     assert torch.allclose(per_atom[0], model._center(code).pow(2).sum(dim=(0, 2)))
+
+
+def test_recentering_moves_edge_energy_to_the_center() -> None:
+    model = _model(n_atoms=2, atom_len=8)
+    atoms = torch.zeros(2, 3, 8)
+    atoms[0, :, :3] = 1.0  # centroid 1.0, center 3.5: shift by 2 (the whole-sample part of 2.5)
+    atoms[1, :, 3:5] = 1.0  # centroid 3.5: stays
+    model.atoms = nn.Parameter(WaveformSAE._unit(atoms))
+    optimizer = torch.optim.Adam([model.atoms], lr=1e-3)
+    model.atoms.sum().backward()
+    optimizer.step()
+    before = model.atoms.detach().clone()
+    assert model._recenter(optimizer) == 1
+    after = model.atoms.detach()
+    assert torch.allclose(after[1], WaveformSAE._unit(before[1:2])[0])
+    assert float(after[0, :, :2].abs().sum()) == 0.0
+    assert torch.allclose(after[0, :, 2:], WaveformSAE._unit(before[0:1])[0, :, :6], atol=1e-5)
+    assert torch.allclose(torch.linalg.vector_norm(after, dim=(1, 2)), torch.ones(2), atol=1e-6)
+    moments = optimizer.state[model.atoms]["exp_avg"]
+    assert float(moments[0, :, :2].abs().sum()) == 0.0 and bool((moments[0, :, 2:] != 0).all())
+    assert model._recenter(optimizer) == 0
 
 
 def _planted(seed: int, n_windows: int = 24) -> torch.Tensor:

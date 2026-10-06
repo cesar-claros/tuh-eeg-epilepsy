@@ -124,6 +124,16 @@ class WaveformTrainSpec:
         ``patches``: atoms start as random multichannel patches of the training
         windows (through the energy gate). ``random``: Gaussian atoms (the
         prototype's initialization).
+    recenter_atoms : bool
+        After every epoch but the last, shift each atom along time so that its
+        energy centroid sits at the center of its support (whole samples, zero
+        fill; the Adam moments move with it). A shift is a symmetry of the
+        decoder, so the reconstruction is kept. Motivation (synthetic recovery,
+        2026-10-06): a waveform that lands over an edge of the atom at the start
+        stays cut off, because the missing part lies outside the support at every
+        selected placement and receives no gradient; the fit then stops at two to
+        three times the residual of the planted solution, for atoms up to twice
+        the waveform length. Re-centering brings the missing part inside.
     """
 
     epochs: int = 30
@@ -133,6 +143,7 @@ class WaveformTrainSpec:
     crop_batch: int = 64
     max_crop_energy_ratio: float | None = 10.0
     init: str = "patches"
+    recenter_atoms: bool = True
 
 
 def _shuffled(dataloader: DataLoader, generator: torch.Generator) -> DataLoader:
@@ -639,6 +650,44 @@ class WaveformSAE(nn.Module):
             "positive_frac": per_atom[2] / slots,
         }
 
+    @staticmethod
+    def _shifted(t: torch.Tensor, shift: int) -> torch.Tensor:
+        """``t`` moved by ``shift`` samples along the last axis (positive = later), zero filled."""
+        out = torch.zeros_like(t)
+        if shift > 0:
+            out[..., shift:] = t[..., :-shift]
+        elif shift < 0:
+            out[..., :shift] = t[..., -shift:]
+        else:
+            out.copy_(t)
+        return out
+
+    @torch.no_grad()
+    def _recenter(self, optimizer: torch.optim.Optimizer) -> int:
+        """Shift every atom whose energy centroid is at least one sample off center; returns the number moved.
+
+        The shift is the whole-sample part of the offset, so an atom is never
+        moved by less than one sample. The Adam moments of the atom move with it,
+        and the constraint is re-imposed afterwards (the zero fill lowers the
+        norm of a shifted atom).
+        """
+        atoms = self.atoms
+        energy = atoms.pow(2).sum(1)
+        positions = torch.arange(atoms.shape[-1], device=atoms.device, dtype=atoms.dtype)
+        centroid = (energy * positions).sum(-1) / energy.sum(-1).clamp_min(_EPS)
+        shifts = ((atoms.shape[-1] - 1) / 2 - centroid).trunc().long()
+        moved = torch.nonzero(shifts).flatten().tolist()
+        state = optimizer.state.get(atoms) or {}
+        for k in moved:
+            shift = int(shifts[k])
+            atoms[k] = self._shifted(atoms[k], shift)
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key in state:
+                    state[key][k] = self._shifted(state[key][k], shift)
+        if moved:
+            atoms.copy_(self._constrain(atoms))
+        return len(moved)
+
     def _median_coherence(self) -> float:
         """Median over atom pairs of the maximum absolute normalized cross-correlation over lags."""
         atoms = self._unit(self._dictionary().detach())
@@ -661,7 +710,9 @@ class WaveformSAE(nn.Module):
         encoded rows and cut into crops; only the central ``crop_len`` samples of a
         crop are scored, and crops above the energy gate are dropped. Labels are
         ignored. The loss is differentiated through the atom constraint, and the
-        constraint is re-imposed on the parameter after every step. ``history``
+        constraint is re-imposed on the parameter after every step. After every
+        epoch but the last, with ``recenter_atoms``, atoms whose energy centroid is
+        off center are shifted (validation is measured before). ``history``
         records, per epoch: ``objective``; ``residual_frac``, ``gain`` and
         ``residual_frac_at_gain`` on the training crops and, with the ``val_``
         prefix, on fixed validation crops (NaN without a validation loader);
@@ -669,7 +720,7 @@ class WaveformSAE(nn.Module):
         ``n_effective_atoms`` (participation ratio of the energy shares) and
         ``max_energy_share``; ``median_coherence``; ``atom_norm_min`` and
         ``atom_norm_max``; ``crops_dropped_frac`` and ``crop_energy_mean_over_median``;
-        ``n_steps``. ``atom_stats`` keeps the per-atom table of the last epoch
+        ``n_recentered``; ``n_steps``. ``atom_stats`` keeps the per-atom table of the last epoch
         (validation crops when available). A module loaded from a checkpoint
         (``fitted``) returns at once and keeps its provenance.
 
@@ -728,6 +779,11 @@ class WaveformSAE(nn.Module):
             last = val or (totals, per_atom)
             table = self._atom_table(totals, per_atom)
             share = table["energy_share"]
+            coherence = self._median_coherence()
+            # Measured on the trained state of the epoch; the re-centering (never after the
+            # last epoch) only prepares the next one.
+            final = epoch + 1 == train_spec.epochs
+            n_recentered = self._recenter(optimizer) if train_spec.recenter_atoms and not final else 0
             all_energy = torch.cat(energies)
             n_nonflat = int(all_energy.numel())
             record = {
@@ -738,13 +794,14 @@ class WaveformSAE(nn.Module):
                 "selected_zero_frac": float(1.0 - table["positive_frac"].mean()),
                 "n_effective_atoms": float(1.0 / share.pow(2).sum()) if float(share.sum()) > 0 else 0.0,
                 "max_energy_share": float(share.max()),
-                "median_coherence": self._median_coherence(),
+                "median_coherence": coherence,
                 "atom_norm_min": float(table["norm"].min()),
                 "atom_norm_max": float(table["norm"].max()),
                 "crops_dropped_frac": n_dropped / max(n_nonflat, 1),
                 "crop_energy_mean_over_median": (
                     float(all_energy.mean() / all_energy.median().clamp_min(_EPS)) if n_nonflat else float("nan")
                 ),
+                "n_recentered": n_recentered,
                 "n_steps": n_steps,
             }
             self.history.append(record)
@@ -753,7 +810,7 @@ class WaveformSAE(nn.Module):
                 f"signal power (val {record['val_residual_frac']:.1%}), gain {record['gain']:.2f}, "
                 f"effective atoms {record['n_effective_atoms']:.1f}/{spec.n_atoms}, zero slots "
                 f"{record['selected_zero_frac']:.1%}, median coherence {record['median_coherence']:.2f}, "
-                f"crops dropped {record['crops_dropped_frac']:.1%}, steps {n_steps}"
+                f"crops dropped {record['crops_dropped_frac']:.1%}, re-centered {n_recentered}, steps {n_steps}"
             )
         if last is not None:
             self.atom_stats = {

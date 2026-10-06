@@ -35,6 +35,11 @@ train_spec:
   max_crop_energy_ratio: 10.0 # drop training crops (and initialization patches) whose scored
                     # energy exceeds this multiple of the batch median; null keeps all non-flat crops
   init: patches     # patches: random multichannel data patches; random: Gaussian atoms
+  recenter_atoms: true # after every epoch but the last, shift each atom so its energy centroid is
+                    # at the center of its support (zero fill; Adam moments follow). Synthetic
+                    # recovery 2026-10-06: a waveform that lands over an atom edge at the start
+                    # stays cut off (no gradient outside the support); the fit then stops at 2-3x
+                    # the residual of the planted solution even at twice the waveform length.
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py feature=waveform_sae. When set, the
 # dictionary is loaded and fit_unsupervised is skipped; every spec field must equal the
