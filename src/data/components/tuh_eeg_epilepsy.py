@@ -26,6 +26,10 @@ import traceback
 import torch
 import numpy as np
 
+# The 10-20 template montage. MNE 1.13 renamed 'standard_1020' to 'colin27_1020' (same
+# positions) and warns on the old name; older MNE has only the old name.
+_MONTAGE_1020 = "colin27_1020" if "colin27_1020" in mne.channels.get_builtin_montages() else "standard_1020"
+
 # The benign mixed-sampling-frequency edge-artifact warning is emitted both when
 # reading (read_raw_edf) and when materializing data (load_data) for preload=False
 # EDFs. Our EEG channels are at the native (maximum) rate so they are never
@@ -490,7 +494,7 @@ class TUHEEGEpilepsy:
     @staticmethod
     def _generate_ic_dipoles(
         file_path: Path,
-        montage_name: str = 'standard_1020',
+        montage_name: str = _MONTAGE_1020,
     ) -> None:
         """Fit one equivalent-current dipole per IC topography and cache it.
 
@@ -509,7 +513,7 @@ class TUHEEGEpilepsy:
         ----------
         file_path : Path
             Path to the original ``.edf`` (used to locate the sibling ICA files).
-        montage_name : str, default='standard_1020'
+        montage_name : str, default=_MONTAGE_1020
             Standard montage supplying the template electrode positions.
         """
         try:
@@ -869,7 +873,7 @@ class TUHEEGEpilepsy:
         }
         raw.rename_channels(mapping_strip)
 
-        montage1020 = mne.channels.make_standard_montage("standard_1020")
+        montage1020 = mne.channels.make_standard_montage(_MONTAGE_1020)
         # Map each raw channel that is a 10-20 electrode to its canonical name,
         # matching case-insensitively so both stripped EDF names (e.g. "FP1") and
         # already-clean names (e.g. "Fp1") are recognised as EEG.
@@ -901,7 +905,7 @@ class TUHEEGEpilepsy:
 
     @staticmethod
     def _set_montage(raw: mne.io.BaseRaw) -> None:
-        montage = mne.channels.make_standard_montage("standard_1020")
+        montage = mne.channels.make_standard_montage(_MONTAGE_1020)
         raw.set_montage(montage, on_missing="ignore")
 
     @staticmethod
