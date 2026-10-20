@@ -1,0 +1,45 @@
+# @package _global_
+
+# Whole-window activation diagnostics of a fitted Waveform SAE on one split
+# (src/waveform_diagnostics.py): per atom, activation and strong-activation rates per
+# window-minute (all windows, negative and positive windows), amplitude quantiles, the
+# intervals between strong activations, the spatial and spectral descriptors of the atom,
+# per-subject strong rates, and a snippet figure of selected atoms.
+defaults:
+  - _self_
+  - data: tuh_eeg_epilepsy
+  - feature: waveform_sae
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional local: default
+
+task_name: "waveform_diagnostics"
+
+# Which split to encode. val is the development split; test must stay unopened. Diagnosing
+# val requires the dictionary's training subjects to be outside val (checked).
+split: val
+
+# An activation is "strong" when its coefficient exceeds strong_factor times the atom's mean
+# positive coefficient on the fit's whole validation windows (the checkpoint's atom_stats).
+# Counts are constant under top-R selection, so the strong rate is the informative rate.
+strong_factor: 3.0
+
+# Atoms in the snippet figure: an explicit list of indices, or null for the n_snippet_atoms
+# atoms with the largest energy share in the checkpoint. snippets_per_atom = the number of
+# subjects shown per atom (the largest strong activation of each).
+snippet_atoms: null
+n_snippet_atoms: 8
+snippets_per_atom: 3
+
+# Snippet figure only: the loader returns MNE data in volts, so the segments are
+# multiplied by signal_scale and labelled with signal_units.
+signal_scale: 1000000.0
+signal_units: "uV"
+
+# Output directory (feeds hydra.run.dir). Override, e.g.:
+#   python src/waveform_diagnostics.py feature.pretrained=... output_dir=logs/waveform_diag/P32_free
+output_dir: ${paths.log_dir}/${task_name}/runs/${paths.timestamp}
+
+tags: ["dev"]
+seed: null

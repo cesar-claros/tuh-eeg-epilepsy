@@ -41,6 +41,7 @@ from src.models.components.waveform_sae import (  # noqa: E402
     WaveformTrainSpec,
 )
 from src.utils import check_pretrained_provenance  # noqa: E402
+from src.waveform_diagnostics import atom_descriptors, quantile_from_hist  # noqa: E402
 
 PROVENANCE = {"train_subjects": ["s1", "s2"], "data": {"signal_mode": "bipolar", "target_sfreq": 256}}
 
@@ -407,6 +408,24 @@ def test_spec_and_unfitted_guards() -> None:
     except NotImplementedError:
         return
     raise AssertionError("forward returned features that are not defined")
+
+
+def test_diagnostics_descriptors_and_histogram_quantiles() -> None:
+    sfreq, length = 256.0, 64
+    atoms = np.zeros((2, 4, length), dtype=np.float32)
+    atoms[0, 2, 10:20] = 1.0  # one channel, one block: rank one, dominant channel 2 with all the energy
+    atoms[1] = np.sin(2 * np.pi * 10.0 * np.arange(length) / sfreq)[None, :]  # 10 Hz on every channel equally
+    names = ["a", "b", "c", "d"]
+    d = atom_descriptors(atoms, names, sfreq)
+    assert d["dominant_channel"] == ["c", "a"] and abs(d["dominant_energy_frac"][0] - 1.0) < 1e-6
+    assert d["n_channels_90"] == [1, 4] and abs(d["rank_one_frac"][0] - 1.0) < 1e-6 and d["rank_one_frac"][1] > 0.99
+    assert abs(d["peak_hz_encoded"][1] - 10.0) < 1.0 and abs(d["norm"][0] - np.sqrt(10.0)) < 1e-5
+    hist = np.zeros(100)
+    hist[10] = 3.0  # 3 values in the bin [10, 11) of a histogram over [0, 100]
+    hist[50] = 1.0
+    assert abs(quantile_from_hist(hist, 0.5, 100.0) - 10.5) < 1e-9
+    assert abs(quantile_from_hist(hist, 0.99, 100.0) - 50.5) < 1e-9
+    assert np.isnan(quantile_from_hist(np.zeros(5), 0.5, 1.0))
 
 
 if __name__ == "__main__":
