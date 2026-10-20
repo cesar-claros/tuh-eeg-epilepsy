@@ -30,7 +30,12 @@ train_spec:
   lr: 0.001         # Adam; atom entries are about 1 / sqrt(C * L), so lower than the ShapeConv SAE
   crop_len: 1024    # scored samples per training crop; a multiple of spec.pool_len. Each crop
                     # also carries a margin of ceil((L + P - 2) / P) * P samples on each side.
-  crops_per_window: 16 # random grid-aligned crops per window per pass (in expectation)
+  crop_sampling: random # random: crops_per_window crops at random grid positions, with replacement,
+                    # crops may overlap (the ShapeConv SAE scheme). tiled: every window is cut into the
+                    # consecutive crops that fit with their margins (29 per 2-minute window), scored
+                    # centers disjoint, every sample of the tiled span scored once per epoch; the
+                    # tiling phase is a random grid offset per loaded batch.
+  crops_per_window: 16 # random sampling only: crops per window per pass (in expectation)
   crop_batch: 64    # crops per optimizer step
   max_crop_energy_ratio: 10.0 # drop training crops (and initialization patches) whose scored
                     # energy exceeds this multiple of the batch median; null keeps all non-flat crops
@@ -40,6 +45,9 @@ train_spec:
                     # recovery 2026-10-06: a waveform that lands over an atom edge at the start
                     # stays cut off (no gradient outside the support); the fit then stops at 2-3x
                     # the residual of the planted solution even at twice the waveform length.
+  full_window_val: true # also measure the validation residual, gain and per-atom table on whole
+                    # windows (every sample) in the same pass over the val loader: val_full_* columns,
+                    # sae_atom_stats.csv from whole windows. GPU only, no extra reading; chunked.
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py feature=waveform_sae. When set, the
 # dictionary is loaded and fit_unsupervised is skipped; every spec field must equal the
@@ -47,3 +55,6 @@ random_state: 42
 pretrained: null
 # Device: cpu | cuda | cuda:N | auto.
 device: auto
+# Whole windows encoded per pass in the full-window validation (8 two-minute windows at 256 Hz
+# with 64 atoms: about 0.4 GiB). Lower it on a small GPU.
+chunk_windows: 8

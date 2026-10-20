@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.models.components.hydra_transform import HydraTransform
-from src.models.components.shapeconv_sae import CHECKPOINT_NAME, ShapeConvSAE
+from src.models.components.shapeconv_sae import CHECKPOINT_NAME, ROBUST_CLIP, ShapeConvSAE
 
 __all__ = ["CHECKPOINT_NAME", "MODEL_TAG", "WaveformSAE", "WaveformSpec", "WaveformTrainSpec"]
 
@@ -46,6 +46,7 @@ _ENERGY_FLOOR = 1e-6
 _PRE_EMPHASIS = ("none", "diff")
 _ATOM_NORMS = ("unit", "free")
 _INITS = ("patches", "random")
+_SAMPLINGS = ("random", "tiled")
 _INIT_POOL_FACTOR = 8  # candidate patches drawn per atom for the data-patch initialization
 MODEL_TAG = "waveform_sae"
 CHECKPOINT_FORMAT = 1
@@ -111,9 +112,18 @@ class WaveformTrainSpec:
         ShapeConv SAE's.
     crop_len : int
         Scored length of a training crop in samples; a multiple of ``pool_len``.
+    crop_sampling : str
+        ``random``: ``crops_per_window`` crops per window at random grid positions,
+        with replacement, so crops can overlap (the ShapeConv SAE's scheme; every
+        sample has the same chance of being scored in an epoch). ``tiled``: every
+        window is cut into the consecutive crops that fit with their margins, so
+        each epoch scores every sample of the tiled span exactly once; the tiling
+        starts at a random multiple of ``pool_len`` within the slack that the tiling
+        leaves, drawn once per loaded batch, so the few samples outside one epoch's
+        tiling are inside another's.
     crops_per_window : int
-        Random crops drawn per window on every pass, in expectation (windows are
-        drawn uniformly within each batch).
+        ``random`` sampling only: crops drawn per window on every pass, in
+        expectation (windows are drawn uniformly within each batch).
     crop_batch : int
         Crops per optimizer step.
     max_crop_energy_ratio : float | None
@@ -134,16 +144,23 @@ class WaveformTrainSpec:
         selected placement and receives no gradient; the fit then stops at two to
         three times the residual of the planted solution, for atoms up to twice
         the waveform length. Re-centering brings the missing part inside.
+    full_window_val : bool
+        Also measure the validation statistics on whole windows (every sample,
+        not the crop centers) in the same pass over the validation loader: the
+        ``val_full_*`` history columns, and the per-atom table from whole windows.
+        No extra reading; the windows are encoded in chunks of ``chunk_windows``.
     """
 
     epochs: int = 30
     lr: float = 1e-3
     crop_len: int = 1024
+    crop_sampling: str = "random"
     crops_per_window: int = 16
     crop_batch: int = 64
     max_crop_energy_ratio: float | None = 10.0
     init: str = "patches"
     recenter_atoms: bool = True
+    full_window_val: bool = True
 
 
 def _shuffled(dataloader: DataLoader, generator: torch.Generator) -> DataLoader:
@@ -181,6 +198,10 @@ class WaveformSAE(nn.Module):
         ``cpu`` | ``cuda`` | ``cuda:N`` | ``auto`` (cuda when available).
     pretrained : str | Path | None
         Path to a ``sae_state.pt`` checkpoint written by ``save_artifacts``.
+    chunk_windows : int
+        Whole windows encoded per pass in the full-window validation (memory scales
+        with ``chunk_windows * n_atoms * T``; 8 two-minute windows at 256 Hz with 64
+        atoms need about 0.4 GiB with the selection's sort indices).
 
     Raises
     ------
@@ -196,12 +217,14 @@ class WaveformSAE(nn.Module):
         random_state: int = 42,
         device: str | None = "auto",
         pretrained: str | Path | None = None,
+        chunk_windows: int = 8,
     ) -> None:
         super().__init__()
         self.spec = spec or WaveformSpec()
         self.train_spec = train_spec or WaveformTrainSpec()
         self._check_specs()
         self.random_state = random_state
+        self.chunk_windows = max(int(chunk_windows), 1)
         self.device = HydraTransform._resolve_device(device)
         self.register_parameter("atoms", None)
         self.history: list[dict[str, float]] = []
@@ -219,6 +242,7 @@ class WaveformSAE(nn.Module):
             ("spec.pre_emphasis", spec.pre_emphasis, _PRE_EMPHASIS),
             ("spec.atom_norm", spec.atom_norm, _ATOM_NORMS),
             ("train_spec.init", train_spec.init, _INITS),
+            ("train_spec.crop_sampling", train_spec.crop_sampling, _SAMPLINGS),
         ):
             if value not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
@@ -493,20 +517,25 @@ class WaveformSAE(nn.Module):
 
     def _crops(
         self, x: torch.Tensor, generator: torch.Generator
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Random grid-aligned crops ``(n, C, crop_len + 2 * margin)`` of a window batch.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]:
+        """Grid-aligned crops ``(n, C, crop_len + 2 * margin)`` of a window batch.
 
         A crop starts at a multiple of ``pool_len`` in the encoded row, so its pooling
-        grid is the window's grid. Windows are drawn uniformly within the batch,
-        ``crops_per_window`` per window in expectation. Crops whose scored part is
-        flat (failed loads) are dropped, and so are crops above the energy gate.
+        grid is the window's grid. With ``crop_sampling="tiled"`` the crops of a
+        window are consecutive and their scored centers are disjoint; the tiling
+        starts at a random grid offset within the slack it leaves, drawn once per
+        batch. With ``"random"`` windows and starts are drawn uniformly with
+        replacement, ``crops_per_window`` per window in expectation. Crops whose
+        scored part is flat (failed loads) are dropped, and so are crops above the
+        energy gate.
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]
             The kept crops, their usable-channel masks ``(n, C)``, the scored
-            energies of all non-flat crops (heavy-tail monitor), and the number of
-            crops the energy gate removed.
+            energies of all non-flat crops (heavy-tail monitor), the number of
+            crops the energy gate removed, and ``[clipped samples, usable samples]``
+            of the encoded rows (float64; the clip monitor).
 
         Raises
         ------
@@ -517,15 +546,27 @@ class WaveformSAE(nn.Module):
         total = self.train_spec.crop_len + 2 * self.margin
         if rows.shape[-1] < total:
             raise ValueError(f"windows of {rows.shape[-1]} samples are shorter than crop_len + 2 * margin = {total}")
-        views = rows.unfold(-1, total, self.spec.pool_len)
-        n_crops = rows.shape[0] * self.train_spec.crops_per_window
-        window = torch.randint(0, rows.shape[0], (n_crops,), generator=generator).to(rows.device)
-        start = torch.randint(0, views.shape[2], (n_crops,), generator=generator).to(rows.device)
-        crops = views[window, :, start]
+        n_windows, n_channels, n_times = rows.shape
+        if self.train_spec.crop_sampling == "tiled":
+            crop_len = self.train_spec.crop_len
+            n_tiles = (n_times - total) // crop_len + 1
+            slack = n_times - total - (n_tiles - 1) * crop_len
+            n_phases = slack // self.spec.pool_len + 1
+            offset = int(torch.randint(0, n_phases, (1,), generator=generator)) * self.spec.pool_len
+            tiles = rows[..., offset:].unfold(-1, total, crop_len)[:, :, :n_tiles]
+            crops = tiles.permute(0, 2, 1, 3).reshape(n_windows * n_tiles, n_channels, total)
+            window = torch.arange(n_windows, device=rows.device).repeat_interleave(n_tiles)
+        else:
+            views = rows.unfold(-1, total, self.spec.pool_len)
+            n_crops = n_windows * self.train_spec.crops_per_window
+            window = torch.randint(0, n_windows, (n_crops,), generator=generator).to(rows.device)
+            start = torch.randint(0, views.shape[2], (n_crops,), generator=generator).to(rows.device)
+            crops = views[window, :, start]
         energy = self._center(crops).pow(2).sum(dim=(1, 2))
         keep = self._gate(energy)
         nonflat = energy > _ENERGY_FLOOR
-        return crops[keep], valid[window][keep], energy[nonflat], int(nonflat.sum()) - int(keep.sum())
+        clipped = torch.stack([(rows.abs() >= ROBUST_CLIP).sum(), valid.sum() * rows.shape[-1]]).double()
+        return crops[keep], valid[window][keep], energy[nonflat], int(nonflat.sum()) - int(keep.sum()), clipped
 
     def _step(
         self, crops: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor
@@ -538,35 +579,62 @@ class WaveformSAE(nn.Module):
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            The loss; ``[residual energy, signal energy, <signal, reconstruction>,
-            reconstruction energy, positive code entries, crops]`` on the scored
-            part; and per atom ``(3, K)`` the sum of squared coefficients, the sum of
-            coefficients and the number of positive coefficients whose position lies
-            in the scored part. Statistics are float64.
+            The loss, then the two statistics tensors of ``_statistics`` on the
+            scored part.
         """
         code = self._select(self._responses(crops, atoms))
         mask = valid.unsqueeze(-1).to(crops.dtype)
         target = self._center(crops)
         reconstruction = self._center(self._decode(code, atoms)) * mask
-        residual = target - reconstruction
-        loss = 0.5 * residual.pow(2).sum() / (mask.sum() * target.shape[-1]).clamp_min(1.0)
+        loss = 0.5 * (target - reconstruction).pow(2).sum() / (mask.sum() * target.shape[-1]).clamp_min(1.0)
         with torch.no_grad():
-            scored = self._center(code)
-            positive = (scored > 0).to(crops.dtype)
-            stats = torch.stack(
-                [
-                    residual.pow(2).sum(),
-                    target.pow(2).sum(),
-                    (target * reconstruction).sum(),
-                    reconstruction.pow(2).sum(),
-                    positive.sum(),
-                    crops.new_tensor(float(crops.shape[0])),
-                ]
-            ).double()
-            per_atom = torch.stack(
-                [scored.pow(2).sum(dim=(0, 2)), scored.sum(dim=(0, 2)), positive.sum(dim=(0, 2))]
-            ).double()
+            stats, per_atom = self._statistics(target, reconstruction, self._center(code))
         return loss, stats, per_atom
+
+    def _statistics(
+        self, target: torch.Tensor, reconstruction: torch.Tensor, code: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Summed statistics of scored rows ``(n, C, S)``, their masked reconstruction and their code ``(n, K, S)``.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``[residual energy, signal energy, <signal, reconstruction>, reconstruction
+            energy, positive code entries, items, pooling windows per atom]`` and per
+            atom ``(3, K)`` the sum of squared coefficients, the sum of coefficients
+            and the number of positive coefficients. Both float64.
+        """
+        positive = (code > 0).to(target.dtype)
+        n_items, scored_len = target.shape[0], target.shape[-1]
+        stats = torch.stack(
+            [
+                (target - reconstruction).pow(2).sum(),
+                target.pow(2).sum(),
+                (target * reconstruction).sum(),
+                reconstruction.pow(2).sum(),
+                positive.sum(),
+                target.new_tensor(float(n_items)),
+                target.new_tensor(float(n_items * (scored_len // self.spec.pool_len))),
+            ]
+        ).double()
+        per_atom = torch.stack([code.pow(2).sum(dim=(0, 2)), code.sum(dim=(0, 2)), positive.sum(dim=(0, 2))]).double()
+        return stats, per_atom
+
+    @torch.no_grad()
+    def _window_stats(
+        self, rows: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``_statistics`` on whole encoded rows ``(B, C, T')``, every sample scored, in chunks of ``chunk_windows``."""
+        totals = torch.zeros(7, dtype=torch.float64, device=self.device)
+        per_atom = torch.zeros(3, self.spec.n_atoms, dtype=torch.float64, device=self.device)
+        for start in range(0, rows.shape[0], self.chunk_windows):
+            chunk, mask = rows[start : start + self.chunk_windows], valid[start : start + self.chunk_windows]
+            code = self._select(self._responses(chunk, atoms))
+            reconstruction = self._decode(code, atoms) * mask.unsqueeze(-1).to(chunk.dtype)
+            stats, atom_sums = self._statistics(chunk, reconstruction, code)
+            totals += stats
+            per_atom += atom_sums
+        return totals, per_atom
 
     def _sample_patches(self, dataloader: DataLoader, generator: torch.Generator) -> torch.Tensor:
         """``n_atoms`` random multichannel patches ``(K, C, L)`` drawn from every batch, through the energy gate."""
@@ -602,20 +670,41 @@ class WaveformSAE(nn.Module):
         )
 
     @torch.no_grad()
-    def _evaluate(self, dataloader: DataLoader) -> tuple[torch.Tensor, torch.Tensor]:
-        """Summed ``_step`` statistics on fixed crops of a loader (the same crops at every call)."""
+    def _evaluate(
+        self, dataloader: DataLoader
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
+        """Summed statistics on fixed crops of a loader (the same crops at every call) and, with
+        ``full_window_val``, on its whole windows, in one pass over the loader.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]
+            Crop totals and per-atom sums, the whole-window totals and per-atom sums
+            (``None`` when ``full_window_val`` is off), and the clip counts
+            ``[clipped samples, usable samples]`` of the loader's rows.
+        """
         generator = torch.Generator().manual_seed(self.random_state + 1)
         atoms = self._dictionary()
-        totals = torch.zeros(6, dtype=torch.float64, device=self.device)
+        full = self.train_spec.full_window_val
+        totals = torch.zeros(7, dtype=torch.float64, device=self.device)
         per_atom = torch.zeros(3, self.spec.n_atoms, dtype=torch.float64, device=self.device)
+        full_totals = torch.zeros_like(totals) if full else None
+        full_per_atom = torch.zeros_like(per_atom) if full else None
+        clip = torch.zeros(2, dtype=torch.float64, device=self.device)
         for x, _ in dataloader:
-            crops, valid, _, _ = self._crops(x, generator)
+            crops, valid, _, _, clipped = self._crops(x, generator)
+            clip += clipped
             for start in range(0, crops.shape[0], self.train_spec.crop_batch):
                 batch = slice(start, start + self.train_spec.crop_batch)
                 _, stats, atom_sums = self._step(crops[batch], valid[batch], atoms)
                 totals += stats
                 per_atom += atom_sums
-        return totals, per_atom
+            if full_totals is not None and full_per_atom is not None:
+                rows, usable = self._rows(x)
+                stats, atom_sums = self._window_stats(rows, usable, atoms)
+                full_totals += stats
+                full_per_atom += atom_sums
+        return totals, per_atom, full_totals, full_per_atom, clip
 
     @staticmethod
     def _reconstruction_summary(totals: torch.Tensor | None, prefix: str = "") -> dict[str, float]:
@@ -633,7 +722,7 @@ class WaveformSAE(nn.Module):
         return dict(zip(keys, (residual / max(signal, _EPS), cross / max(recon, _EPS), at_gain)))
 
     def _atom_table(self, totals: torch.Tensor, per_atom: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Per-atom usage on scored centers, each ``(K,)``.
+        """Per-atom usage on the scored samples behind ``totals`` and ``per_atom``, each ``(K,)``.
 
         ``norm``; ``energy_share`` (share of ``sum a^2 ||w||^2``, the energy of an
         atom's placements with overlaps ignored); ``mean_amplitude`` (mean positive
@@ -642,7 +731,7 @@ class WaveformSAE(nn.Module):
         """
         norms = torch.linalg.vector_norm(self._dictionary().detach(), dim=(1, 2)).double()
         energy = per_atom[0] * norms.pow(2)
-        slots = (totals[5] * (self.train_spec.crop_len // self.spec.pool_len) * self.spec.top_r).clamp_min(1.0)
+        slots = (totals[6] * self.spec.top_r).clamp_min(1.0)
         return {
             "norm": norms,
             "energy_share": energy / energy.sum().clamp_min(_EPS),
@@ -715,13 +804,16 @@ class WaveformSAE(nn.Module):
         off center are shifted (validation is measured before). ``history``
         records, per epoch: ``objective``; ``residual_frac``, ``gain`` and
         ``residual_frac_at_gain`` on the training crops and, with the ``val_``
-        prefix, on fixed validation crops (NaN without a validation loader);
+        prefix, on fixed validation crops, and with the ``val_full_`` prefix on the
+        whole validation windows (``full_window_val``; NaN without a validation
+        loader);
         ``selected_zero_frac`` (share of top-R slots that hold a zero);
         ``n_effective_atoms`` (participation ratio of the energy shares) and
         ``max_energy_share``; ``median_coherence``; ``atom_norm_min`` and
         ``atom_norm_max``; ``crops_dropped_frac`` and ``crop_energy_mean_over_median``;
-        ``n_recentered``; ``n_steps``. ``atom_stats`` keeps the per-atom table of the last epoch
-        (validation crops when available). A module loaded from a checkpoint
+        ``clipped_frac`` and ``val_clipped_frac`` (share of usable encoded samples at
+        the clip); ``n_recentered``; ``n_steps``. ``atom_stats`` keeps the per-atom table of the last epoch
+        (whole validation windows, else validation crops, else training crops). A module loaded from a checkpoint
         (``fitted``) returns at once and keeps its provenance.
 
         Parameters
@@ -753,15 +845,18 @@ class WaveformSAE(nn.Module):
         optimizer = torch.optim.Adam([self.atoms], lr=train_spec.lr)
         self.history = []
         last: tuple[torch.Tensor, torch.Tensor] | None = None
+        stats_split = "train"
         for epoch in range(train_spec.epochs):
-            totals = torch.zeros(6, dtype=torch.float64, device=self.device)
+            totals = torch.zeros(7, dtype=torch.float64, device=self.device)
             per_atom = torch.zeros(3, spec.n_atoms, dtype=torch.float64, device=self.device)
             loss_sum, n_steps, n_dropped = 0.0, 0, 0
+            clip = torch.zeros(2, dtype=torch.float64, device=self.device)
             energies = [torch.zeros(0, device=self.device)]
             for x, _ in tqdm(loader, desc=f"Waveform SAE epoch {epoch + 1}/{train_spec.epochs}"):
-                crops, valid, energy, dropped = self._crops(x, generator)
+                crops, valid, energy, dropped, clipped = self._crops(x, generator)
                 energies.append(energy)
                 n_dropped += dropped
+                clip += clipped
                 order = torch.randperm(crops.shape[0], generator=generator).to(self.device)
                 for start in range(0, crops.shape[0], train_spec.crop_batch):
                     index = order[start : start + train_spec.crop_batch]
@@ -775,8 +870,15 @@ class WaveformSAE(nn.Module):
                     per_atom += atom_sums
                     loss_sum += float(loss.detach())
                     n_steps += 1
-            val = self._evaluate(val_dataloader) if val_dataloader is not None else None
-            last = val or (totals, per_atom)
+            crop_val = full_val = None
+            val_clipped_frac = float("nan")
+            if val_dataloader is not None:
+                val = self._evaluate(val_dataloader)
+                crop_val = (val[0], val[1])
+                full_val = None if val[2] is None or val[3] is None else (val[2], val[3])
+                val_clipped_frac = float(val[4][0] / val[4][1].clamp_min(1.0))
+            last = full_val or crop_val or (totals, per_atom)
+            stats_split = "val_full" if full_val else ("val" if crop_val else "train")
             table = self._atom_table(totals, per_atom)
             share = table["energy_share"]
             coherence = self._median_coherence()
@@ -790,7 +892,8 @@ class WaveformSAE(nn.Module):
                 "epoch": epoch + 1,
                 "objective": loss_sum / max(n_steps, 1),
                 **self._reconstruction_summary(totals),
-                **self._reconstruction_summary(None if val is None else val[0], prefix="val_"),
+                **self._reconstruction_summary(None if crop_val is None else crop_val[0], prefix="val_"),
+                **self._reconstruction_summary(None if full_val is None else full_val[0], prefix="val_full_"),
                 "selected_zero_frac": float(1.0 - table["positive_frac"].mean()),
                 "n_effective_atoms": float(1.0 / share.pow(2).sum()) if float(share.sum()) > 0 else 0.0,
                 "max_energy_share": float(share.max()),
@@ -801,16 +904,20 @@ class WaveformSAE(nn.Module):
                 "crop_energy_mean_over_median": (
                     float(all_energy.mean() / all_energy.median().clamp_min(_EPS)) if n_nonflat else float("nan")
                 ),
+                "clipped_frac": float(clip[0] / clip[1].clamp_min(1.0)),
+                "val_clipped_frac": val_clipped_frac,
                 "n_recentered": n_recentered,
                 "n_steps": n_steps,
             }
             self.history.append(record)
             log.info(
                 f"Waveform SAE epoch {epoch + 1}/{train_spec.epochs}: residual {record['residual_frac']:.1%} of "
-                f"signal power (val {record['val_residual_frac']:.1%}), gain {record['gain']:.2f}, "
+                f"signal power (val crops {record['val_residual_frac']:.1%}, val windows "
+                f"{record['val_full_residual_frac']:.1%}), gain {record['gain']:.2f}, "
                 f"effective atoms {record['n_effective_atoms']:.1f}/{spec.n_atoms}, zero slots "
                 f"{record['selected_zero_frac']:.1%}, median coherence {record['median_coherence']:.2f}, "
-                f"crops dropped {record['crops_dropped_frac']:.1%}, re-centered {n_recentered}, steps {n_steps}"
+                f"crops dropped {record['crops_dropped_frac']:.1%}, clipped {record['clipped_frac']:.3%}, "
+                f"re-centered {n_recentered}, steps {n_steps}"
             )
         if last is not None:
             self.atom_stats = {
@@ -824,7 +931,7 @@ class WaveformSAE(nn.Module):
             "margin": self.margin,
             "n_channels": int(self.atoms.shape[1]),
             "channels": None if channels is None else [str(c) for c in channels],
-            "atom_stats_split": None if last is None else ("val" if val_dataloader is not None else "train"),
+            "atom_stats_split": None if last is None else stats_split,
         }
         self.provenance = provenance
         self.fitted = True

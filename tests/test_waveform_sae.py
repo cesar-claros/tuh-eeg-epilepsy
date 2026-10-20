@@ -10,8 +10,9 @@ gradient against equation (23), crop / full-window equality of the code and the
 reconstruction under the grid-aligned margin, the atom constraint, the shared row
 pipeline and the unusable-channel mask, the energy gate, grid alignment of the
 sampled crops, the masked loss, a small fit on planted multichannel waveforms, the
-checkpoint round trip with its refusals and the provenance guard, and the spec and
-unfitted-module guards.
+checkpoint round trip with its refusals and the provenance guard, the spec and
+unfitted-module guards, atom re-centering, and the whole-window statistics against
+``encode`` and ``decode``.
 """
 
 from __future__ import annotations
@@ -44,10 +45,11 @@ from src.utils import check_pretrained_provenance  # noqa: E402
 PROVENANCE = {"train_subjects": ["s1", "s2"], "data": {"signal_mode": "bipolar", "target_sfreq": 256}}
 
 
-def _model(crop_len: int | None = None, **spec_kwargs) -> WaveformSAE:
+def _model(crop_len: int | None = None, sampling: str = "random", **spec_kwargs) -> WaveformSAE:
     """A CPU model with a small geometry (K=3, L=8, P=4); ``crop_len`` defaults to two pooling windows."""
     spec = WaveformSpec(**{"n_atoms": 3, "atom_len": 8, "pool_len": 4, **spec_kwargs})
-    return WaveformSAE(spec=spec, train_spec=WaveformTrainSpec(crop_len=crop_len or 2 * spec.pool_len), device="cpu")
+    train_spec = WaveformTrainSpec(crop_len=crop_len or 2 * spec.pool_len, crop_sampling=sampling)
+    return WaveformSAE(spec=spec, train_spec=train_spec, device="cpu")
 
 
 def _randn(*shape: int, seed: int = 0, dtype: torch.dtype = torch.float64) -> torch.Tensor:
@@ -216,12 +218,30 @@ def test_crops_are_grid_aligned() -> None:
     model = _model()
     x = _randn(4, 3, 64, dtype=torch.float32)
     total = model.train_spec.crop_len + 2 * model.margin
-    crops, valid, _, _ = model._crops(x, torch.Generator().manual_seed(0))
+    crops, valid, _, _, clipped = model._crops(x, torch.Generator().manual_seed(0))
     assert crops.shape[0] > 0 and crops.shape[1:] == (3, total) and valid.shape == (crops.shape[0], 3)
     rows, _ = model._rows(x)
+    assert float(clipped[1]) == 4 * 3 * 64 and float(clipped[0]) == float((rows.abs() >= 20.0).sum())
     candidates = rows.unfold(-1, total, model.spec.pool_len).permute(0, 2, 1, 3).reshape(-1, 3, total)
     for crop in crops:
         assert bool((candidates == crop).flatten(1).all(1).any())
+
+
+def test_tiled_crops_cover_the_window_once() -> None:
+    model = _model(sampling="tiled")  # L=8, P=4, crop_len=8: margin 12, crop 32 samples
+    x = _randn(3, 3, 100, dtype=torch.float32)
+    rows, _ = model._rows(x)
+    n_tiles = (100 - 32) // 8 + 1  # 9 tiles per window, slack of 4 samples: two grid phases, 0 and 4
+    phases = set()
+    for seed in range(12):
+        crops, valid, _, _, _ = model._crops(x, torch.Generator().manual_seed(seed))
+        assert crops.shape == (3 * n_tiles, 3, 32) and valid.shape == (3 * n_tiles, 3)
+        centers = model._center(crops.view(3, n_tiles, 3, 32)).permute(0, 2, 1, 3).reshape(3, 3, n_tiles * 8)
+        matched = [o for o in (0, 4) if torch.equal(centers, rows[..., o + 12 : o + 12 + n_tiles * 8])]
+        assert len(matched) == 1  # the scored centers tile the row without gap or overlap, from one grid offset
+        phases.add(matched[0])
+    assert phases == {0, 4}  # both phases occur across seeds
+    _expect_value_error(lambda: _model(sampling="stride"), "an unknown sampling was not refused")
 
 
 def test_step_loss_masks_unusable_channels() -> None:
@@ -238,7 +258,28 @@ def test_step_loss_masks_unusable_channels() -> None:
     n_scored = (5 * 3 - 1) * model.train_spec.crop_len
     assert torch.allclose(loss, 0.5 * residual.pow(2).sum() / n_scored)
     assert torch.allclose(stats[0], residual.pow(2).sum()) and float(stats[5]) == 5.0
+    assert float(stats[6]) == 5 * (model.train_spec.crop_len // model.spec.pool_len)
     assert torch.allclose(per_atom[0], model._center(code).pow(2).sum(dim=(0, 2)))
+
+
+def test_full_window_statistics_match_encode_decode() -> None:
+    model = _model(n_atoms=3, atom_len=8, pool_len=4)
+    rows, atoms = _randn(5, 3, 64), _randn(3, 3, 8, seed=1)
+    valid = torch.ones(5, 3, dtype=torch.bool)
+    valid[2, 0] = False
+    rows[2, 0] = 0.0
+    model.atoms = nn.Parameter(atoms.float())
+    model.chunk_windows = 2  # three chunks, the last one partial
+    totals, per_atom = model._window_stats(rows, valid, model._dictionary().double())
+    code = model._select(model._responses(rows, model._dictionary().double()))
+    reconstruction = model._decode(code, model._dictionary().double())
+    reconstruction[2, 0] = 0.0
+    assert torch.allclose(totals[0], (rows - reconstruction).pow(2).sum())
+    assert torch.allclose(totals[1], rows.pow(2).sum()) and float(totals[5]) == 5.0
+    assert float(totals[6]) == 5 * (64 // 4) and float(totals[4]) == float((code > 0).sum())
+    assert torch.allclose(per_atom[2], (code > 0).sum(dim=(0, 2)).double())
+    table = model._atom_table(totals, per_atom)
+    assert torch.allclose(table["positive_frac"], (code > 0).sum(dim=(0, 2)).double() / (5 * 16))
 
 
 def test_recentering_moves_edge_energy_to_the_center() -> None:
@@ -301,7 +342,9 @@ def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
     assert 0.0 <= history[-1]["selected_zero_frac"] <= 1.0
     assert 0.0 < history[-1]["n_effective_atoms"] <= 2.0 + 1e-6
     assert model.fit_meta["n_channels"] == 3 and model.fit_meta["margin"] == 64
-    assert len(model.atom_stats["atom"]) == 2 and model.fit_meta["atom_stats_split"] == "val"
+    assert len(model.atom_stats["atom"]) == 2 and model.fit_meta["atom_stats_split"] == "val_full"
+    assert history[-1]["val_full_residual_frac"] < 0.5 * history[0]["val_full_residual_frac"]
+    assert 0.0 <= history[-1]["clipped_frac"] <= 1.0 and 0.0 <= history[-1]["val_clipped_frac"] <= 1.0
 
 
 def test_checkpoint_round_trip_and_refusals() -> None:
