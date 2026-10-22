@@ -30,6 +30,9 @@ exclude_recordings_file: null
 # montage (recordings with too many bad channels are dropped instead). drop_bad_segments: drop
 # windows overlapping a flagged high-amplitude/flat segment. Both require lazy_loading=true and
 # a prior `python src/precompute_badchannels.py` pass. Both null/false = no repair.
+# The eager loader ignores interpolate_bad_channels, drop_bad_segments, apply_aas and
+# drop_seizure_segments, so the datamodule raises a ValueError if any of them is set with
+# lazy_loading=false.
 interpolate_bad_channels: false
 drop_bad_segments: false
 # Average Artifact Subtraction of a periodic cardiac/pulse artifact (the harmonic comb that
@@ -59,11 +62,13 @@ bipolar: false
 # window. null = no notch. Set to [60, 120] to suppress 60 Hz mains line noise and
 # its first harmonic, e.g. data.notch_freqs=[60,120].
 notch_freqs: null
-# Band-pass [l_freq, h_freq] (Hz) applied to the sensor-space signal (raw / bipolar /
-# ica_clean) per window, before features. null = no band-pass (full band). Use to
+# Temporal filter [l_freq, h_freq] (Hz) applied to the sensor-space signal (raw /
+# bipolar / ica_clean) before features. [0.1, null] = high-pass only;
+# [null, 45] = low-pass only; null = no explicit temporal filter. Use a band-pass to
 # equalize bandwidth across recordings of different native sfreq (the high-frequency
 # content above ~100 Hz is a class confound; see plot_sfreq.py). The IC-labels pipeline
 # uses [1, 100]; BioFundation uses [0.1, 75]. e.g. data.filter_freq=[1,100].
+# Resampling retains its anti-aliasing independently of this setting.
 filter_freq: null
 ica_keep_labels: [brain, other] # ICLabel categories kept when signal_mode=ica_clean or brain_ic
 # (ica_clean excludes the confident artifacts: muscle, eye, heart, line noise, channel noise;

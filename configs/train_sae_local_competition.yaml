@@ -1,0 +1,23 @@
+# @package _global_
+
+# Local-competition baseline using the shared src/train_sae.py entry point.
+defaults:
+  - train_sae
+  - override feature: local_competition_sae
+  - _self_
+
+data:
+  signal_mode: bipolar     # TCP double-banana montage, as in the Waveform SAE screens
+  filter_freq: [0.1, null] # 0.1 Hz high-pass; no additional low-pass cutoff
+  notch_freqs: [60.0]     # line-noise notch at the native sampling rate
+  # Spherical-spline interpolation of the electrodes flagged in each -bads.json sidecar
+  # (src/precompute_badchannels.py), before the bipolar montage. Recordings flagged
+  # too_many_bad_channels lose all their windows. A missing sidecar leaves its recording
+  # unrepaired without an error. Only the lazy loader applies the repair, so lazy_loading
+  # must stay true; the datamodule refuses the flag with eager loading.
+  interpolate_bad_channels: true
+  lazy_loading: true
+
+feature:
+  spec:
+    pre_emphasis: none

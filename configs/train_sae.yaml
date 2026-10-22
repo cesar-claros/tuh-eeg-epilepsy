@@ -1,7 +1,7 @@
 # @package _global_
 
-# Standalone dictionary training (src/train_sae.py): fits feature=shapeconv_sae
-# on the training windows without extracting features or fitting a classifier.
+# Shared dictionary-training entry point. Override feature with waveform_sae or
+# local_competition_sae to select another model; the default remains shapeconv_sae.
 defaults:
   - _self_
   - data: tuh_eeg_epilepsy

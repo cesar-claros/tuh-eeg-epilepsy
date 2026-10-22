@@ -17,6 +17,13 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on an independent synthetic train draw (spike-and-wave of random polarity), monitored on a val draw, scored on a test draw; deterministic invariants (dimension, chunk invariance, seed reproducibility of two fits, checkpoint round trip, refusal without provenance) FAIL the run; the gate (`--strict`) is event-level precision and recall > 0.9 with maximum-cardinality matching within `--match-tol`; template `\|xcorr\|` and window AUROCs are diagnostics; stress and lever flags in the docstring | no (synthetic) |
 | - | `test_shapeconv_sae.py` | pass/fail unit invariants (pytest or plain python, 25 tests): projection, adjoint identity, analytic shrink response, NMS ties, checkpoint round trip, refusals and migrations, chunk invariance, provenance guards, context crops, residual pool, AR whitening, calibrated thresholds against a brute-force order statistic, unusable rows, split preflight, event matching | no |
 | - | `test_waveform_sae.py` | pass/fail unit invariants of the Waveform SAE (pytest or plain python, 20 tests): agreement with the prototype forward pass, selection example and tie rule, support bound, index conventions and adjoint identity for even and odd atom lengths, autograd against the closed-form gradient, crop / full-window equality, atom constraint, shared row pipeline and unusable channels, energy gate, grid-aligned crops, masked loss, a small fit on planted waveforms, checkpoint round trip and refusals, atom re-centering, whole-window statistics, tiled crops, diagnostics descriptors | no |
+| - | `test_sae_coverage.py` | metadata-only systematic coverage: disjoint scored centers, real context, final short chunks, arbitrary lengths and argument validation | no |
+| - | `test_local_competition_sae.py` | local competition against a brute-force reference, conservative ties, support bounds, gradients, tied/untied channel factors and biases, contextual chunks, masked tails, synthetic fit and checkpoint validation | no |
+| - | `test_train_sae.py` | shared entry-point dispatch and calibration capability checks with mocked training; Hydra configuration of the local-competition model | no |
+| - | `test_temporal_filter_config.py` | high-pass/low-pass nullable cutoffs, validation and forwarding through data configuration | no |
+| - | `test_temporal_filtering.py` | context for sequential FIR filters and synthetic whole-signal versus contextual-window filtering | no |
+| - | `test_datamodule_repair_flags.py` | the datamodule refuses `interpolate_bad_channels`, `drop_bad_segments`, `drop_seizure_segments` and `apply_aas` without lazy loading (the eager loader ignores them), names every refused flag, and passes each flag to the engine under lazy loading | no |
+| - | `test_screen_local_competition.py` | hyperparameter screen: best-lag atom similarity and matching against direct sums, edge energy and span, plateau epoch, density bound, in-memory window cache, composition of the shipped config and every arm, common-sample scoring against the training forward pass, a three-arm screen on synthetic CPU data with resume and refusals | no |
 
 ## Data flow
 
@@ -30,12 +37,26 @@ raw EDF corpus
                                 └─(6)─> classifier -> window + subject scores
 ```
 
-Stages 4–7 generate their own synthetic, correctly-shaped inputs, so they run
-anywhere (stage 7 replaces stage 4 when `feature=shapeconv_sae`). Stages 1–3 need the unpacked TUH EEG Epilepsy corpus under
+Stages 4–7 generate their own synthetic, correctly-shaped inputs and do not need
+the corpus (stage 7 replaces stage 4 when `feature=shapeconv_sae`). Run all tests
+on the HPC, following the project's execution policy. Stages 1–3 need the unpacked TUH EEG Epilepsy corpus under
 `data/<version>/` (`00_epilepsy/`, `01_no_epilepsy/`, `DOCS/`); if it is absent
 they say so and exit cleanly.
 
 ## Running
+
+Run the new local-competition tests from `code/` in the HPC container:
+
+```bash
+python -m pytest -q tests/test_sae_coverage.py tests/test_local_competition_sae.py tests/test_train_sae.py \
+  tests/test_temporal_filter_config.py tests/test_temporal_filtering.py tests/test_screen_local_competition.py \
+  tests/test_datamodule_repair_flags.py
+```
+
+These tests have been added but have not yet been executed on the HPC. They do
+not read EEG files. Test tooling is declared in the `dev` dependency group in
+`container/pyproject.toml`; the default container build installs runtime
+dependencies only.
 
 ```bash
 # data-free stages (run from code/):
@@ -69,12 +90,13 @@ Each script takes `--help`.
 
 ## Requirements
 
-The scripts exercise the real code, so they need the project runtime. Run
-`uv sync` in `code/` first. Note that several packages the code imports are **not
-yet declared in `pyproject.toml`** and may need adding before these run:
-`aeon`, `braindecode`, `mne`, `mne-icalabel`, `scikit-learn`, `joblib`, `pandas`.
-The scripts detect missing imports and print which packages are needed.
+The scripts exercise the real code, so they need the HPC project container.
+`container/pyproject.toml` is the runtime dependency source of truth; the template
+manifest in `code/` is stale. For a writable test environment that inherits the
+container's packages, create a virtual environment with
+`uv venv --system-site-packages <test-env>`, then install the declared tools with
+`uv pip install --python <test-env>/bin/python --group <container-dir>/pyproject.toml:dev`.
+Run pytest using `<test-env>/bin/python -m pytest` with the paths above.
 
 The `stageN_*.py` scripts are diagnostic (stage 7 also fails on broken
-invariants); `test_shapeconv_sae.py` and `test_waveform_sae.py` are pass/fail unit
-tests that pytest collects.
+invariants); the `test_*.py` files are pass/fail tests that pytest collects.

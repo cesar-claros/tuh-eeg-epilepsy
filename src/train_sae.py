@@ -1,7 +1,8 @@
 """Entry point that trains an SAE dictionary alone (no features, no classifier).
 
 Works for every feature extractor that exposes ``fit_unsupervised``:
-``feature=shapeconv_sae`` (the default) and ``feature=waveform_sae``. Fits the atoms
+``feature=shapeconv_sae`` (the default), ``feature=waveform_sae``, and
+``feature=local_competition_sae``. Fits the atoms
 without labels on the training windows, scores the validation windows for the loss
 curve, and writes ``sae_state.pt`` (plus ``sae_atoms.npy``, ``sae_training.csv`` and
 the ``windows_*.csv`` split files) to the run directory. A later
@@ -61,7 +62,8 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     Raises
     ------
     TypeError
-        If ``cfg.feature`` does not expose ``fit_unsupervised`` (e.g. HYDRA).
+        If ``cfg.feature`` does not expose ``fit_unsupervised`` (e.g. HYDRA),
+        or calibration is requested for a model without that capability.
     ValueError
         If ``feature.pretrained`` is set: this entry point trains a new dictionary.
     """
@@ -77,20 +79,28 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor = instantiate_feature(cfg.feature)
-    if not hasattr(feature_extractor, "fit_unsupervised"):
+    if not callable(getattr(feature_extractor, "fit_unsupervised", None)):
         raise TypeError(
-            f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae or feature=waveform_sae"
+            f"{cfg.feature._target_} has no fit_unsupervised; use feature=shapeconv_sae, "
+            "feature=waveform_sae, or feature=local_competition_sae"
         )
     if getattr(feature_extractor, "fitted", False):
         raise ValueError("train_sae.py trains a new dictionary; unset feature.pretrained")
 
+    calibration = threshold_calibration(cfg)
+    calibrate = getattr(feature_extractor, "calibrate_amp_min", None)
+    if calibration is not None and not callable(calibrate):
+        raise TypeError(f"{cfg.feature._target_} does not support threshold calibration; unset feature.calibrate_fa")
+
     feature_extractor.fit_unsupervised(
         datamodule.train_dataloader(), datamodule.val_dataloader(), provenance=split_provenance(datamodule, cfg.data)
     )
-    calibration = threshold_calibration(cfg)
     if calibration is not None:
-        feature_extractor.calibrate_amp_min(
-            datamodule.train_dataloader(), calibration["false_alarms_per_channel_minute"], calibration["sfreq"],
+        assert callable(calibrate)
+        calibrate(
+            datamodule.train_dataloader(),
+            calibration["false_alarms_per_channel_minute"],
+            calibration["sfreq"],
             keep_label=calibration["keep_label"],
             provenance=calibration_provenance(datamodule, calibration["keep_label"]),
         )

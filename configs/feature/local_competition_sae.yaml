@@ -1,0 +1,25 @@
+_target_: src.models.components.local_competition_sae.LocalCompetitionSAE
+# Local temporal competition at every sample; all K atoms retained.
+# Baseline: src/train_sae.py --config-name train_sae_local_competition
+# Select only the model with feature=local_competition_sae (data settings stay separate).
+# See documentation/local_competition_sae_implementation.md in the project vault.
+spec:
+  _target_: src.models.components.local_competition_sae.LocalCompetitionSpec
+  n_atoms: 64
+  atom_len: 80
+  competition_scale: 32 # P: radius P-1, at most top_r positives in any P consecutive samples
+  top_r: 1              # strict rolling-max path for R=1; bounded-memory rank counts for R>1
+  weight_tying: tied    # tied | untied; includes both waveform shapes and channel weights
+  pre_emphasis: none    # retain waveform morphology; diff is an optional comparison
+                       # per-parent/channel robust normalization and clipping still apply
+  center_shapes: false
+train_spec:
+  _target_: src.models.components.local_competition_sae.LocalCompetitionTrainSpec
+  epochs: 30
+  lr: 0.001
+  center_len: 1024      # scored samples per chunk; need not be a multiple of P
+  crop_batch: 64        # chunks per optimizer step, each with L+P-2 real context per side
+  shuffle_chunks: true # within each loaded batch; the coverage plan itself is deterministic
+random_state: 42
+pretrained: null       # local-competition checkpoint only; every spec field must match
+device: auto           # cpu | cuda | cuda:N | auto

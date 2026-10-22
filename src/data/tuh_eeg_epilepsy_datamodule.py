@@ -2,6 +2,7 @@
 """Contains the LightningDataModule for the TUH EEG Epilepsy dataset."""
 
 from __future__ import annotations
+from math import isfinite
 from typing import Any
 from loguru import logger
 from pathlib import Path
@@ -77,7 +78,7 @@ class TUHEEGDataModule(LightningDataModule):
         signal_mode: str = 'raw',
         bipolar: bool = False,
         notch_freqs: list[float] | None = None,
-        filter_freq: list[float] | None = None,
+        filter_freq: list[float | None] | None = None,
         ica_keep_labels: tuple = ('brain', 'other'),
         brain_ic_min_gof: float = 0.0,
         brain_ic_use_dipoles: bool = True,
@@ -139,11 +140,14 @@ class TUHEEGDataModule(LightningDataModule):
             ICLabel is in `ica_keep_labels` (back-projected to sensor space); or
             'brain_ic' to feed the region-binned IC sources directly (each kept IC
             is assigned to a scalp region by its dominant electrode and summed).
-        filter_freq : list[float] | None, default=None
-            Band-pass [l_freq, h_freq] (Hz) applied to the sensor-space signal
-            (raw / bipolar / ica_clean) per window before features. None = full band.
-            Use to equalize bandwidth across recordings of different native sfreq (the
-            >~100 Hz content is a class confound). The IC-labels pipeline uses [1, 100].
+        filter_freq : list[float | None] | None, default=None
+            Temporal filter [l_freq, h_freq] (Hz) applied to the sensor-space signal
+            (raw / bipolar / ica_clean) per window before features. Use [low, None]
+            for high-pass, [None, high] for low-pass, or [low, high] for band-pass.
+            Supplied cutoffs must be finite and positive; low < high for band-pass.
+            None, an empty list, or [None, None] disables this filter. This is
+            independent of notch_freqs. A low-pass can equalize bandwidth across
+            recordings of different native sfreq. The IC-labels pipeline uses [1, 100].
         ica_keep_labels : tuple, default=('brain', 'other')
             For 'ica_clean', the ICLabel categories to keep; all others (the
             confident artifacts) are excluded. For 'brain_ic', the categories
@@ -202,6 +206,21 @@ class TUHEEGDataModule(LightningDataModule):
             ``build_psd_exclusion.py`` from the PSD-anomaly rankings. None = no
             exclusion. Applied alongside the seizure / duration / label filters in both
             the eager and lazy loaders.
+        interpolate_bad_channels, drop_bad_segments, drop_seizure_segments, apply_aas : bool, default=False
+            Repair and exclusion steps read from the ``-bads.json`` sidecars of
+            ``precompute_badchannels.py`` (seizure spans from the ``.csv_bi`` files):
+            spherical-spline interpolation of flagged electrodes, dropping windows that
+            overlap bad segments or seizures, and subtracting a cardiac-band periodic
+            artifact. Only the lazy loader applies them; each requires ``lazy_loading=True``.
+        aas_fmax : float, default=2.5
+            Highest periodic-artifact fundamental (Hz) that ``apply_aas`` subtracts.
+
+        Raises
+        ------
+        ValueError
+            If ``filter_freq`` is malformed, or a repair or exclusion flag is set without
+            ``lazy_loading``: the eager loader ignores those flags, so the run would record
+            a repair that never happens.
 
         """
         super().__init__()
@@ -222,10 +241,21 @@ class TUHEEGDataModule(LightningDataModule):
         self.pin_memory = pin_memory
         self.dict_learning_window_len_s = dict_learning_window_len_s
         self.signal_mode = signal_mode
-        # Plain list of floats (Hydra passes a ListConfig; MNE wants array-like).
+        # Plain lists preserve one-sided filter endpoints supplied by Hydra.
         self.bipolar = bool(bipolar)
         self.notch_freqs = [float(f) for f in notch_freqs] if notch_freqs else None
-        self.filter_freq = [float(f) for f in filter_freq] if filter_freq else None
+        self.filter_freq: list[float | None] | None = None
+        if filter_freq:
+            if len(filter_freq) != 2:
+                raise ValueError("filter_freq must contain exactly [l_freq, h_freq].")
+            cutoffs = [float(f) if f is not None else None for f in filter_freq]
+            if any(f is not None and (not isfinite(f) or f <= 0) for f in cutoffs):
+                raise ValueError("filter_freq cutoffs must be finite and positive, or None.")
+            low, high = cutoffs
+            if low is not None and high is not None and low >= high:
+                raise ValueError("filter_freq requires l_freq < h_freq for a band-pass.")
+            if low is not None or high is not None:
+                self.filter_freq = cutoffs
         self.ica_keep_labels = ica_keep_labels
         self.brain_ic_min_gof = brain_ic_min_gof
         self.brain_ic_use_dipoles = brain_ic_use_dipoles
@@ -245,6 +275,19 @@ class TUHEEGDataModule(LightningDataModule):
         self.drop_seizure_segments = drop_seizure_segments
         self.apply_aas = apply_aas
         self.aas_fmax = aas_fmax
+        # Only the lazy builders read these flags; the eager loader would skip them silently
+        # while the provenance still records them as applied.
+        lazy_only = {
+            "interpolate_bad_channels": interpolate_bad_channels,
+            "drop_bad_segments": drop_bad_segments,
+            "drop_seizure_segments": drop_seizure_segments,
+            "apply_aas": apply_aas,
+        }
+        eager_ignored = [f"data.{name}" for name, value in lazy_only.items() if value]
+        if eager_ignored and not lazy_loading:
+            raise ValueError(
+                f"set data.lazy_loading=true to use {', '.join(eager_ignored)}; the eager loader ignores these flags."
+            )
 
         # data transformations
         # self.transforms = transforms.Compose(

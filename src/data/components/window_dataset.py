@@ -55,6 +55,7 @@ from loguru import logger
 from torch.utils.data import Dataset
 
 from src.data.components.aas import apply_aas
+from src.data.components.temporal_filtering import filter_context_seconds
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy
 
 
@@ -290,7 +291,7 @@ class WindowDataset(Dataset):
         target_sfreq: float,
         target_len: int,
         montages: dict,
-        filter_freq: Optional[List[float]],
+        filter_freq: Optional[List[float | None]],
         rename_channels: bool,
         set_montage: bool,
         pick_channels: Optional[List[str]],
@@ -350,16 +351,17 @@ class WindowDataset(Dataset):
             include = None
         else:
             include = list(self.montages[desc['montage']]['channels'])
-        # Filtering a sensor-space window per-window would leave edge transients at
-        # the window boundaries. Instead crop with a margin so the filter sees real
-        # neighbouring data (equivalent to filtering the recording before windowing),
-        # then trim the margin off below; without filtering, crop the exact window.
+        # Keep real context spanning the combined FIR support, then trim it.
+        # Recording edges still rely on MNE's reflection padding.
         sensor_filter = self.mode in ('raw', 'ica_clean', 'bipolar') and (
             self.filter_freq is not None or self.notch_freqs
         )
-        pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
         try:
             raw = TUHEEGEpilepsy._read_raw_edf(desc['path'], include=include, preload=False)
+            pad = filter_context_seconds(
+                raw.info['sfreq'], self.filter_freq, self.notch_freqs,
+                minimum_seconds=TUHEEGEpilepsy._FILTER_PAD_SEC,
+            ) if sensor_filter else 0.0
             rec_end = (raw.n_times - 1) / raw.info['sfreq']
             tmin = max(0.0, row['start'] - pad)
             tmax = min(rec_end, row['end'] + pad)
@@ -515,7 +517,7 @@ def _build_lazy_from_csv(
     window_len_s: float,
     target_sfreq: Optional[float],
     mode: str,
-    filter_freq: Optional[List[float]],
+    filter_freq: Optional[List[float | None]],
     target_name: str,
     pick_channels: Optional[List[str]],
     rename_channels: bool,
@@ -610,7 +612,7 @@ def build_lazy_datasets(
     splits: dict,
     stratify_by: str,
     mode: str,
-    filter_freq: Optional[List[float]],
+    filter_freq: Optional[List[float | None]],
     target_name: str,
     pick_channels: Optional[List[str]],
     rename_channels: bool,

@@ -45,8 +45,10 @@ warnings.filterwarnings(
 # Local imports
 try:
     from . import utils
+    from .temporal_filtering import filter_context_seconds
 except ImportError:
     import utils  # type: ignore
+    from temporal_filtering import filter_context_seconds  # type: ignore
 
 
 class TUHEEGEpilepsy:
@@ -90,10 +92,8 @@ class TUHEEGEpilepsy:
     _DIP_Y_FRONTAL = 0.030     # y above this -> frontal
     _DIP_Y_POSTERIOR = -0.020  # y below this -> posterior
 
-    # Seconds of real signal kept on each side of a window when a sensor-space
-    # filter (band-pass / notch) is applied, so the filter sees real neighbouring
-    # data (equivalent to filtering before windowing) and the margin, which carries
-    # the filter edge transient, is trimmed off. Generous for a line-noise notch.
+    # Minimum real context on each side of a filtered sensor-space window.
+    # Longer filters use their combined FIR support instead of this floor.
     _FILTER_PAD_SEC = 4.0
 
     # TCP (double-banana) bipolar montage, in canonical 10-20 names (i.e. AFTER
@@ -241,7 +241,7 @@ class TUHEEGEpilepsy:
         set_montage: bool,
         mode: str,
         pick_channels: Optional[List[str]],
-        filter_freq: Optional[List[float]] = None,
+        filter_freq: Optional[List[float | None]] = None,
     ) -> Optional[RawDataset]:
         
         if mode == 'ica':
@@ -301,7 +301,7 @@ class TUHEEGEpilepsy:
     def load_data(
         self,
         mode: str = 'raw',
-        filter_freq: Optional[List[float]] = None,
+        filter_freq: Optional[List[float | None]] = None,
         notch_freqs: Optional[List[float]] = None,
         target_name: Optional[Union[str, Tuple[str, ...]]] = 'epilepsy',
         pick_channels: Optional[List[str]] = None,
@@ -1581,7 +1581,7 @@ class TUHEEGEpilepsy:
         max_windows_per_subject: Optional[int],
         stratify_by: str,
         mode: str,
-        filter_freq: Optional[List[float]],
+        filter_freq: Optional[List[float | None]],
         target_name: Optional[Union[str, Tuple[str, ...]]],
         pick_channels: Optional[List[str]],
         rename_channels: bool,
@@ -1793,14 +1793,15 @@ class TUHEEGEpilepsy:
                 
                 raw = TUHEEGEpilepsy._read_raw_edf(file_path, include=ch_names, preload=False)
 
-                # When a sensor-space filter (band-pass / notch) is applied, crop
-                # with a margin so the filter sees real neighbouring data (equivalent
-                # to filtering the recording before windowing), then trim the margin
-                # off below; otherwise crop the exact window.
+                # Keep real context spanning the combined FIR support, then trim it.
+                # Recording edges still rely on MNE's reflection padding.
                 sensor_filter = mode in ('raw', 'ica_clean', 'bipolar') and (
                     filter_freq is not None or notch_freqs
                 )
-                pad = TUHEEGEpilepsy._FILTER_PAD_SEC if sensor_filter else 0.0
+                pad = filter_context_seconds(
+                    raw.info['sfreq'], filter_freq, notch_freqs,
+                    minimum_seconds=TUHEEGEpilepsy._FILTER_PAD_SEC,
+                ) if sensor_filter else 0.0
                 rec_end = (raw.n_times - 1) / raw.info['sfreq']
                 tmin = max(0.0, row_meta['start'] - pad)
                 tmax = min(rec_end, row_meta['end'] + pad)

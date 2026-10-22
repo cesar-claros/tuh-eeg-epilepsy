@@ -1,0 +1,66 @@
+# @package _global_
+
+# Hyperparameter screen of the local-competition SAE (src/screen_local_competition.py).
+# Composes the train_sae_local_competition baseline (TCP bipolar montage, 0.1 Hz high-pass,
+# 60 Hz notch, bad-channel interpolation with lazy loading, K=64, L=80, P=32, R=1, tied,
+# 30 epochs), reads the train and val windows once, fits every arm of the selected stages, then
+# scores every arm in output_dir on the same validation samples. The data settings come from
+# the preset, so the full round matches. An arm is a set of overrides of the feature node.
+# Design and reading rules: documentation/local_competition_sae_hyperparameter_screen.md
+# (project vault).
+#
+#   python src/screen_local_competition.py 'screen.stages=[A]' data.num_workers=8 seed=42 \
+#     data.seed=42 output_dir=logs/screen_local_competition/<name>
+#
+# Pass the same output_dir for every stage: fitted arms are kept and scored again.
+defaults:
+  - train_sae_local_competition
+  - _self_
+
+task_name: "screen_local_competition"
+
+screen:
+  stages: [A]
+  # Validation statistics use the samples [h, T - h) of every window. null = the largest
+  # context L + P - 2 among the arms in output_dir, so every arm is scored on the same samples.
+  eval_margin: null
+  eval_windows: 8          # windows encoded together in the common evaluation (GPU memory)
+  plateau_tol: 0.005       # plateau epoch: first epoch within 0.5 percent of the best validation residual
+  duplicate_threshold: 0.9 # best-lag channel-summed correlation at which two atoms count as duplicates
+  edge_share: 0.25         # edge-heavy atom: one outer tenth of its support holds more than this energy share
+  gallery_atoms: 16        # atoms per arm in <arm>/atoms_top.png, by validation code-energy share
+  arms:
+    # A: epoch budget and seed noise floor of the baseline.
+    A:
+      A_s42: {}
+      A_s43: {random_state: 43}
+      A_s44: {random_state: 44}
+    # B: temporal geometry, P x L at R = 1. The cell P = 32, L = 80 is A_s42.
+    B:
+      B_P16_L40: {spec: {competition_scale: 16, atom_len: 40}}
+      B_P16_L80: {spec: {competition_scale: 16}}
+      B_P16_L160: {spec: {competition_scale: 16, atom_len: 160}}
+      B_P32_L40: {spec: {atom_len: 40}}
+      B_P32_L160: {spec: {atom_len: 160}}
+      B_P64_L40: {spec: {competition_scale: 64, atom_len: 40}}
+      B_P64_L80: {spec: {competition_scale: 64}}
+      B_P64_L160: {spec: {competition_scale: 64, atom_len: 160}}
+      B_P128_L40: {spec: {competition_scale: 128, atom_len: 40}}
+      B_P128_L80: {spec: {competition_scale: 128}}
+      B_P128_L160: {spec: {competition_scale: 128, atom_len: 160}}
+      B_P256_L40: {spec: {competition_scale: 256, atom_len: 40}}
+      B_P256_L80: {spec: {competition_scale: 256}}
+      B_P256_L160: {spec: {competition_scale: 256, atom_len: 160}}
+    # C: one factor at a time around the baseline.
+    C:
+      C_R2_P64: {spec: {competition_scale: 64, top_r: 2}} # same bound R/P = 1/32 as the baseline
+      C_untied: {spec: {weight_tying: untied}}             # free encoder gain
+      C_K32: {spec: {n_atoms: 32}}
+      C_K128: {spec: {n_atoms: 128}}
+      C_lr3e-4: {train_spec: {lr: 0.0003}}
+      C_lr3e-3: {train_spec: {lr: 0.003}}
+      C_diff: {spec: {pre_emphasis: diff}}
+      C_centered: {spec: {center_shapes: true}}
+    # D: the finalists with two more seeds each, written after B and C, e.g.
+    #   D_P64_L160_s43: {spec: {competition_scale: 64, atom_len: 160}, random_state: 43}
+    D: {}
