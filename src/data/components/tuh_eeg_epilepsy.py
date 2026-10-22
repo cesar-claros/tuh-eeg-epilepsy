@@ -145,6 +145,7 @@ class TUHEEGEpilepsy:
         drop_seizure_segments: bool = False,
         apply_aas: bool = False,
         aas_fmax: float = 2.5,
+        skip_start_s: float = 0.0,
     ):
 
         self.data_dir = data_dir
@@ -186,6 +187,10 @@ class TUHEEGEpilepsy:
         # the cardiac band (<= aas_fmax Hz). Removes the comb without touching neural/epileptiform.
         self.apply_aas = bool(apply_aas)
         self.aas_fmax = float(aas_fmax)
+        # Seconds at the start of every recording that no planned window covers (start-up
+        # artifacts; a long high-pass also lacks real context there). Read by the window
+        # planners below and by the lazy builder of supplied window CSVs (window_dataset.py).
+        self.skip_start_s = float(skip_start_s)
         self.dataset_path = Path(self.data_dir) / self.version
         
         if not self.dataset_path.exists():
@@ -1410,13 +1415,14 @@ class TUHEEGEpilepsy:
             max_windows_per_subject: Optional[int] = None,
             unit: str = 'seconds',
         ) -> Optional[int]:
-        # Approx windows per file
+        # Approx windows per file; the first skip_start_s seconds of each recording hold none
         df = df.copy() # Avoid modifying original
+        usable = df['duration'] - self.skip_start_s - window_len_s
         if unit == 'seconds':
-            df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s) / stride) + 1).astype(int)        
+            df['n_windows'] = np.maximum(0, np.floor(usable / stride) + 1).astype(int)
         elif unit == 'samples':
             assert isinstance(stride, int), "When unit is 'samples', stride must be an integer number of samples."
-            df['n_windows'] = np.maximum(0, np.floor((df['duration'] - window_len_s)*df['sfreq'] / stride) + 1).astype(int)
+            df['n_windows'] = np.maximum(0, np.floor(usable * df['sfreq'] / stride) + 1).astype(int)
         # Windows per subject
         subject_window_counts = df.groupby('subject')['n_windows'].sum().sort_index()
         smallest_n_windows_count = subject_window_counts.nsmallest(10)
@@ -1526,9 +1532,9 @@ class TUHEEGEpilepsy:
                 # Calculate start times for this file
                 for idx in tqdm(indices, desc=f"Windows for subject {subject}", leave=False):
                     if unit == 'seconds':
-                        start_t = idx * stride
+                        start_t = self.skip_start_s + idx * stride
                     elif unit == 'samples':
-                        start_t = (idx * stride)/row['sfreq']
+                        start_t = self.skip_start_s + (idx * stride)/row['sfreq']
                     end_t = start_t + window_len_s
                     
                     subject_windows.append({

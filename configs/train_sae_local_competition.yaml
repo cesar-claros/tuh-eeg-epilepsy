@@ -17,6 +17,9 @@ data:
   # must stay true; the datamodule refuses the flag with eager loading.
   interpolate_bad_channels: true
   lazy_loading: true
+  # No window covers the first 30 s of a recording: start-up settling artifacts, and the
+  # high-pass above needs about 20 s of real context that the recording start lacks.
+  skip_start_s: 30.0
 
 feature:
   spec:

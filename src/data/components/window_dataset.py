@@ -510,6 +510,21 @@ def _plan_from_csv(engine: TUHEEGEpilepsy, csv_path: str) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _drop_skipped_starts(plan: pd.DataFrame, skip_start_s: float, split: str) -> pd.DataFrame:
+    """Drop the windows of a supplied plan that start inside the skipped head of their recording.
+
+    Generated plans already start at ``skip_start_s``; a ``windows_*.csv`` dumped with a
+    smaller skip can hold earlier windows, which would contradict the recorded setting.
+    """
+    kept = plan[plan['start'] >= skip_start_s]
+    if len(kept) < len(plan):
+        logger.info(
+            f"skip_start_s={skip_start_s:g}: {split} split dropped {len(plan) - len(kept)}/{len(plan)} "
+            "windows that start earlier."
+        )
+    return kept
+
+
 def _build_lazy_from_csv(
     engine: TUHEEGEpilepsy,
     window_csvs: dict,
@@ -544,6 +559,8 @@ def _build_lazy_from_csv(
             dropped = before - len(plans[sp])
             if dropped:
                 logger.info(f"exclude_paths: {sp} split dropped {dropped}/{before} windows (excluded recordings).")
+    if engine.skip_start_s > 0:
+        plans = {sp: _drop_skipped_starts(plan, engine.skip_start_s, sp) for sp, plan in plans.items()}
     if engine.interpolate_bad_channels or engine.drop_bad_segments or engine.drop_seizure_segments:
         plans = {sp: _filter_plan_by_bads(plan, engine.interpolate_bad_channels,
                                           engine.drop_bad_segments, engine.drop_seizure_segments)

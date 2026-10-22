@@ -23,6 +23,7 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | - | `test_temporal_filter_config.py` | high-pass/low-pass nullable cutoffs, validation and forwarding through data configuration | no |
 | - | `test_temporal_filtering.py` | context for sequential FIR filters and synthetic whole-signal versus contextual-window filtering | no |
 | - | `test_datamodule_repair_flags.py` | the datamodule refuses `interpolate_bad_channels`, `drop_bad_segments`, `drop_seizure_segments` and `apply_aas` without lazy loading (the eager loader ignores them), names every refused flag, and passes each flag to the engine under lazy loading | no |
+| - | `test_skip_start.py` | recording-start skip: window counts and starts on the grid `skip_start_s + k * stride`, windows inside their recording, earlier windows dropped from a supplied plan, refusal of negative or non-finite values, forwarding to the engine, and the provenance record | no |
 | - | `test_screen_local_competition.py` | hyperparameter screen: best-lag atom similarity and matching against direct sums, edge energy and span, plateau epoch, density bound, in-memory window cache, composition of the shipped config and every arm, common-sample scoring against the training forward pass, a three-arm screen on synthetic CPU data with resume and refusals | no |
 
 ## Data flow
@@ -50,7 +51,7 @@ Run the new local-competition tests from `code/` in the HPC container:
 ```bash
 python -m pytest -q tests/test_sae_coverage.py tests/test_local_competition_sae.py tests/test_train_sae.py \
   tests/test_temporal_filter_config.py tests/test_temporal_filtering.py tests/test_screen_local_competition.py \
-  tests/test_datamodule_repair_flags.py
+  tests/test_datamodule_repair_flags.py tests/test_skip_start.py
 ```
 
 These tests have been added but have not yet been executed on the HPC. They do

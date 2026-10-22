@@ -192,6 +192,7 @@ def test_shipped_configuration_composes_and_every_arm_builds() -> None:
     assert cfg.task_name == "screen_local_competition"
     assert cfg.data.signal_mode == "bipolar"
     assert cfg.data.interpolate_bad_channels and cfg.data.lazy_loading
+    assert cfg.data.skip_start_s == 30.0
     assert list(cfg.data.filter_freq) == [0.1, None] and list(cfg.data.notch_freqs) == [60.0]
     arms = screen.resolve_arms(cfg)
     assert {"A", "B", "C"} <= {arm.stage for arm in arms.values()}

@@ -98,6 +98,7 @@ class TUHEEGDataModule(LightningDataModule):
         drop_seizure_segments: bool = False,
         apply_aas: bool = False,
         aas_fmax: float = 2.5,
+        skip_start_s: float = 0.0,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -214,13 +215,20 @@ class TUHEEGDataModule(LightningDataModule):
             artifact. Only the lazy loader applies them; each requires ``lazy_loading=True``.
         aas_fmax : float, default=2.5
             Highest periodic-artifact fundamental (Hz) that ``apply_aas`` subtracts.
+        skip_start_s : float, default=0.0
+            Seconds at the start of every recording that no window covers. Generated
+            plans place windows at ``skip_start_s + k * stride``, so a recording shorter
+            than ``skip_start_s`` plus one window keeps no window; with supplied
+            ``windows_*.csv``, windows that start earlier are dropped. Use it against
+            start-up artifacts and the edge transient of a long high-pass filter, which
+            lacks real context at the recording start. Recorded in the provenance.
 
         Raises
         ------
         ValueError
-            If ``filter_freq`` is malformed, or a repair or exclusion flag is set without
-            ``lazy_loading``: the eager loader ignores those flags, so the run would record
-            a repair that never happens.
+            If ``filter_freq`` is malformed, ``skip_start_s`` is negative or not finite,
+            or a repair or exclusion flag is set without ``lazy_loading``: the eager loader
+            ignores those flags, so the run would record a repair that never happens.
 
         """
         super().__init__()
@@ -288,6 +296,9 @@ class TUHEEGDataModule(LightningDataModule):
             raise ValueError(
                 f"set data.lazy_loading=true to use {', '.join(eager_ignored)}; the eager loader ignores these flags."
             )
+        self.skip_start_s = float(skip_start_s)
+        if not isfinite(self.skip_start_s) or self.skip_start_s < 0:
+            raise ValueError("skip_start_s must be finite and nonnegative.")
 
         # data transformations
         # self.transforms = transforms.Compose(
@@ -385,6 +396,7 @@ class TUHEEGDataModule(LightningDataModule):
                 drop_seizure_segments=self.drop_seizure_segments,
                 apply_aas=self.apply_aas,
                 aas_fmax=self.aas_fmax,
+                skip_start_s=self.skip_start_s,
             )
 
             split_ratios = {'train': self.train_val_test_split[0],

@@ -143,9 +143,11 @@ def test_local_baseline_composes_highpass_and_notch_without_changing_shared_defa
     assert baseline.feature.spec.pre_emphasis == "none"
     assert baseline.data.signal_mode == "bipolar"
     assert baseline.data.interpolate_bad_channels and baseline.data.lazy_loading
+    assert baseline.data.skip_start_s == 30.0
     assert list(baseline.data.filter_freq) == [0.1, None]
     assert list(baseline.data.notch_freqs) == [60.0]
     assert shared.feature._target_.endswith("ShapeConvSAE")
     assert shared.data.signal_mode == "raw"
     assert not shared.data.interpolate_bad_channels and not shared.data.lazy_loading
+    assert shared.data.skip_start_s == 0.0
     assert shared.data.filter_freq is None and shared.data.notch_freqs is None
