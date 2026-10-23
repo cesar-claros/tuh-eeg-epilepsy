@@ -2,12 +2,12 @@
 
 Runs under pytest (``uv run pytest tests/test_waveform_sae.py``) or as a script
 (``uv run python tests/test_waveform_sae.py``), which executes every ``test_*``
-function and exits 1 on the first failure. Covered: agreement with the prototype
-forward pass for odd atom lengths, the worked selection example and the tie rule of
+function and exits 1 on the first failure. Covered: the old top-one prototype as the
+R=M special case, the worked selection example and both tie rules of
 the mathematics note, the support bound, the index conventions of equations (5) and
 (14) for an even atom length, the encoder/decoder adjoint identity, the autograd
 gradient against equation (23), crop / full-window equality of the code and the
-reconstruction under the grid-aligned margin, the atom constraint, the shared row
+reconstruction and gradients using current full-segment window decisions, the atom constraint, the shared row
 pipeline and the unusable-channel mask, the energy gate, grid alignment of the
 sampled crops, the masked loss, a small fit on planted multichannel waveforms, the
 checkpoint round trip with its refusals and the provenance guard, the spec and
@@ -39,6 +39,7 @@ from src.models.components.waveform_sae import (  # noqa: E402
     WaveformSAE,
     WaveformSpec,
     WaveformTrainSpec,
+    _CropBatch,
 )
 from src.utils import check_pretrained_provenance  # noqa: E402
 from src.waveform_diagnostics import atom_descriptors, quantile_from_hist  # noqa: E402
@@ -77,30 +78,35 @@ def _prototype_forward(x: torch.Tensor, w: torch.Tensor, top_r: int) -> tuple[to
     return y, code, x_hat
 
 
-def test_matches_prototype_for_odd_length() -> None:
-    for top_r in (1, 3):
-        model = _model(n_atoms=4, atom_len=7, pool_len=10, top_r=top_r)
-        x, w = _randn(2, 6, 10, 2), _randn(4, 2, 7, seed=1)
-        y, code, x_hat = _prototype_forward(x, w, top_r)
-        rows = x.reshape(2, 60, 2).permute(0, 2, 1)
-        assert torch.allclose(model._responses(rows, w), y)
-        assert torch.allclose(model._select(y), code)
-        assert torch.allclose(model._decode(code, w), x_hat.reshape(2, 60, 2).permute(0, 2, 1))
+def test_all_windows_matches_old_top_one_prototype() -> None:
+    model = _model(n_atoms=4, atom_len=7, pool_len=10, top_r=6)
+    x, w = _randn(2, 6, 10, 2), _randn(4, 2, 7, seed=1)
+    y, code, x_hat = _prototype_forward(x, w, top_r=1)
+    rows = x.reshape(2, 60, 2).permute(0, 2, 1)
+    assert torch.allclose(model._responses(rows, w), y)
+    assert torch.allclose(model._select(y), code)
+    assert torch.allclose(model._decode(code, w), x_hat.reshape(2, 60, 2).permute(0, 2, 1))
 
 
 def test_selection_worked_example() -> None:
-    y = torch.tensor([[[-3.0, 4.0, 1.0, 2.0]]])
-    assert _model(top_r=1)._select(y).flatten().tolist() == [0.0, 4.0, 0.0, 0.0]
-    assert _model(top_r=2)._select(y).flatten().tolist() == [0.0, 4.0, 0.0, 2.0]
-    assert _model(top_r=4)._select(y).flatten().tolist() == [0.0, 4.0, 1.0, 2.0]
+    y = torch.tensor([[[-3.0, 4.0, 1.0, 2.0, 1.0, 2.0, -1.0, 0.0, -2.0, 3.0, 7.0, 1.0]]])
+    expected = torch.zeros_like(y)
+    expected[0, 0, 10] = 7.0
+    assert torch.equal(_model(top_r=1)._select(y), expected)
+    expected[0, 0, 1] = 4.0
+    assert torch.equal(_model(top_r=2)._select(y), expected)
+    expected[0, 0, 5] = 2.0
+    assert torch.equal(_model(top_r=3)._select(y), expected)
 
 
 def test_selection_ties_keep_the_lowest_index() -> None:
     y = torch.tensor([[[2.0, 5.0, 5.0, 1.0, 5.0, 5.0, 5.0, 0.0, -1.0, -2.0, -3.0, -4.0]]])
-    one = [0.0, 5.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    two = [0.0, 5.0, 5.0, 0.0, 5.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    one = [0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    two = [0.0, 5.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     assert _model(top_r=1)._select(y).flatten().tolist() == one
     assert _model(top_r=2)._select(y).flatten().tolist() == two
+    assert _model(top_r=3)._select(y).flatten().tolist() == two
+    assert torch.equal(_model(top_r=2)._select(-torch.ones_like(y)), torch.zeros_like(y))
 
 
 def test_support_bound_and_kept_values() -> None:
@@ -109,10 +115,30 @@ def test_support_bound_and_kept_values() -> None:
     code = model._select(y)
     windows, rectified = code.unflatten(-1, (-1, 8)), F.relu(y)
     assert bool((code >= 0).all())
-    assert int((windows > 0).sum(-1).max()) <= 3
+    assert int((windows > 0).sum(-1).max()) <= 1
+    assert int((code > 0).sum(-1).max()) <= 3
     assert torch.equal(code[code > 0], rectified[code > 0])
-    best = rectified.unflatten(-1, (-1, 8)).topk(3, dim=-1).values.sum(-1)
-    assert torch.allclose(windows.sum(-1), best)
+    best = rectified.unflatten(-1, (-1, 8)).amax(-1).topk(3, dim=-1).values.sum(-1)
+    assert torch.allclose(code.sum(-1), best)
+
+
+def test_selection_is_independent_across_segments_and_atoms() -> None:
+    model = _model(top_r=2)
+    responses = _randn(3, 4, 24)
+    joint = model._select(responses)
+    for b in range(3):
+        for k in range(4):
+            assert torch.equal(joint[b:b + 1, k:k + 1], model._select(responses[b:b + 1, k:k + 1]))
+
+
+def test_selection_gradients_only_reach_retained_positive_maxima() -> None:
+    responses = torch.tensor(
+        [[[2.0, 5.0, 5.0, 1.0, 3.0, 1.0, 0.0, -1.0, -1.0, -2.0, 0.0, -3.0]]],
+        requires_grad=True,
+    )
+    code = _model(top_r=1)._select(responses)
+    code.sum().backward()
+    assert torch.equal(responses.grad, (code > 0).to(responses.dtype))
 
 
 def test_responses_and_decoder_match_equations_5_and_14() -> None:
@@ -174,11 +200,63 @@ def test_crop_code_matches_full_window_code() -> None:
         rows, atoms = _randn(2, 3, total + 4 * pool_len), _randn(3, 3, atom_len, seed=1)
         full_code = model._select(model._responses(rows, atoms))
         full_recon = model._decode(full_code, atoms)
+        model.chunk_windows = 1
         for start in range(0, rows.shape[-1] - total + 1, pool_len):
-            code = model._select(model._responses(rows[..., start : start + total], atoms))
+            mask = model._crop_window_mask(rows, torch.arange(2), torch.full((2,), start), atoms)
+            code = model._select(model._responses(rows[..., start : start + total], atoms), mask)
             center = slice(start + margin, start + margin + crop_len)
             assert torch.allclose(model._center(code), full_code[..., center], atol=1e-12)
             assert torch.allclose(model._center(model._decode(code, atoms)), full_recon[..., center], atol=1e-12)
+
+
+def test_distant_competitor_suppresses_a_crop_candidate() -> None:
+    model = _model(n_atoms=1, atom_len=1, pool_len=4, crop_len=4)
+    rows = torch.zeros(1, 1, 32, dtype=torch.float64)
+    rows[0, 0, 5], rows[0, 0, 25] = 2.0, 10.0
+    atoms = torch.ones(1, 1, 1, dtype=torch.float64)
+    window = start = torch.tensor([0])
+    inputs = model._crop_inputs(rows, window, start)
+    local = model._select(model._responses(inputs, atoms))
+    mask = model._crop_window_mask(rows, window, start, atoms)
+    consistent = model._select(model._responses(inputs, atoms), mask)
+    assert float(model._center(local).sum()) == 2.0
+    assert float(model._center(consistent).sum()) == 0.0
+    assert not bool(mask.any())
+
+
+def test_crop_masks_recomputed_after_atom_changes() -> None:
+    model = _model(n_atoms=1, atom_len=1, pool_len=4, crop_len=4)
+    rows = torch.zeros(1, 2, 32, dtype=torch.float64)
+    rows[0, 0, 5], rows[0, 1, 25] = 2.0, 10.0
+    window = start = torch.tensor([0])
+    atoms = torch.tensor([[[1.0], [0.0]]], dtype=torch.float64)
+    before = model._crop_window_mask(rows, window, start, atoms)
+    atoms[0, 0, 0], atoms[0, 1, 0] = 0.0, 1.0
+    after = model._crop_window_mask(rows, window, start, atoms)
+    assert bool(before[0, 0, 1]) and not bool(after.any())
+
+
+def test_crop_loss_and_gradients_match_full_segment_scoring() -> None:
+    for sampling in ("random", "tiled"):
+        model = _model(top_r=3, sampling=sampling)
+        model.chunk_windows = 1
+        x = _randn(3, 3, 100)
+        x[1, 2] = 0.0
+        batch = model._crops(x, torch.Generator().manual_seed(2))
+        index = torch.arange(batch.window.numel() - 1, -1, -1)[:17]
+        atoms = _randn(3, 3, 8, seed=1).requires_grad_()
+        loss, _, _ = model._step(batch, index, atoms)
+        (gradient,) = torch.autograd.grad(loss, atoms)
+        full_code = model._select(model._responses(batch.rows, atoms))
+        full_recon = model._decode(full_code, atoms) * batch.valid.unsqueeze(-1)
+        window, start = batch.window[index], batch.start[index]
+        target = model._center(model._crop_inputs(batch.rows, window, start))
+        reconstruction = model._center(model._crop_inputs(full_recon, window, start))
+        denominator = batch.valid[window].sum() * model.train_spec.crop_len
+        expected_loss = 0.5 * (target - reconstruction).pow(2).sum() / denominator
+        (expected_gradient,) = torch.autograd.grad(expected_loss, atoms)
+        assert torch.allclose(loss, expected_loss, atol=1e-10)
+        assert torch.allclose(gradient, expected_gradient, atol=1e-10)
 
 
 def test_atom_constraint() -> None:
@@ -219,10 +297,15 @@ def test_crops_are_grid_aligned() -> None:
     model = _model()
     x = _randn(4, 3, 64, dtype=torch.float32)
     total = model.train_spec.crop_len + 2 * model.margin
-    crops, valid, _, _, clipped = model._crops(x, torch.Generator().manual_seed(0))
-    assert crops.shape[0] > 0 and crops.shape[1:] == (3, total) and valid.shape == (crops.shape[0], 3)
+    batch = model._crops(x, torch.Generator().manual_seed(0))
+    crops = model._crop_inputs(batch.rows, batch.window, batch.start)
+    assert crops.shape[0] > 0 and crops.shape[1:] == (3, total)
+    assert batch.valid[batch.window].shape == (crops.shape[0], 3)
+    assert bool((batch.start % model.spec.pool_len == 0).all())
     rows, _ = model._rows(x)
-    assert float(clipped[1]) == 4 * 3 * 64 and float(clipped[0]) == float((rows.abs() >= 20.0).sum())
+    assert torch.equal(rows, batch.rows)
+    assert float(batch.clipped[1]) == 4 * 3 * 64
+    assert float(batch.clipped[0]) == float((rows.abs() >= 20.0).sum())
     candidates = rows.unfold(-1, total, model.spec.pool_len).permute(0, 2, 1, 3).reshape(-1, 3, total)
     for crop in crops:
         assert bool((candidates == crop).flatten(1).all(1).any())
@@ -235,8 +318,10 @@ def test_tiled_crops_cover_the_window_once() -> None:
     n_tiles = (100 - 32) // 8 + 1  # 9 tiles per window, slack of 4 samples: two grid phases, 0 and 4
     phases = set()
     for seed in range(12):
-        crops, valid, _, _, _ = model._crops(x, torch.Generator().manual_seed(seed))
-        assert crops.shape == (3 * n_tiles, 3, 32) and valid.shape == (3 * n_tiles, 3)
+        batch = model._crops(x, torch.Generator().manual_seed(seed))
+        crops = model._crop_inputs(batch.rows, batch.window, batch.start)
+        assert crops.shape == (3 * n_tiles, 3, 32)
+        assert batch.valid[batch.window].shape == (3 * n_tiles, 3)
         centers = model._center(crops.view(3, n_tiles, 3, 32)).permute(0, 2, 1, 3).reshape(3, 3, n_tiles * 8)
         matched = [o for o in (0, 4) if torch.equal(centers, rows[..., o + 12 : o + 12 + n_tiles * 8])]
         assert len(matched) == 1  # the scored centers tile the row without gap or overlap, from one grid offset
@@ -252,7 +337,9 @@ def test_step_loss_masks_unusable_channels() -> None:
     valid = torch.ones(5, 3, dtype=torch.bool)
     valid[0, 1] = False
     crops[0, 1] = 0.0
-    loss, stats, per_atom = model._step(crops, valid, atoms)
+    batch = _CropBatch(crops, valid, torch.arange(5), torch.zeros(5, dtype=torch.long),
+                       torch.empty(0), 0, torch.zeros(2))
+    loss, stats, per_atom = model._step(batch, torch.arange(5), atoms)
     code = model._select(model._responses(crops, atoms))
     residual = model._center(crops - model._decode(code, atoms))
     residual[0, 1] = 0.0
@@ -261,6 +348,20 @@ def test_step_loss_masks_unusable_channels() -> None:
     assert torch.allclose(stats[0], residual.pow(2).sum()) and float(stats[5]) == 5.0
     assert float(stats[6]) == 5 * (model.train_spec.crop_len // model.spec.pool_len)
     assert torch.allclose(per_atom[0], model._center(code).pow(2).sum(dim=(0, 2)))
+
+
+def test_empty_crop_plan_keeps_source_context_and_validation_works() -> None:
+    model = _model(n_atoms=1, atom_len=1, pool_len=4, crop_len=4)
+    model.atoms = nn.Parameter(torch.ones(1, 1, 1))
+    x = torch.zeros(2, 1, 32)
+    batch = model._crops(x, torch.Generator().manual_seed(0))
+    assert batch.window.numel() == batch.start.numel() == 0
+    assert batch.rows.shape == (2, 1, 32) and not bool(batch.valid.any())
+    loader = DataLoader(TensorDataset(x, torch.zeros(2)), batch_size=2)
+    totals, _, full, full_atom, _ = model._evaluate(loader)
+    assert float(totals.sum()) == 0.0
+    assert full is not None and full_atom is not None
+    assert float(full[4]) == 0.0 and float(full_atom[3].sum()) == 2.0
 
 
 def test_full_window_statistics_match_encode_decode() -> None:
@@ -280,7 +381,23 @@ def test_full_window_statistics_match_encode_decode() -> None:
     assert float(totals[6]) == 5 * (64 // 4) and float(totals[4]) == float((code > 0).sum())
     assert torch.allclose(per_atom[2], (code > 0).sum(dim=(0, 2)).double())
     table = model._atom_table(totals, per_atom)
-    assert torch.allclose(table["positive_frac"], (code > 0).sum(dim=(0, 2)).double() / (5 * 16))
+    assert torch.equal(per_atom[3], torch.full((3,), 5.0, dtype=torch.float64))
+    assert torch.allclose(table["positive_frac"], (code > 0).sum(dim=(0, 2)).double() / 5)
+    assert torch.allclose(table["active_window_frac"], (code > 0).sum(dim=(0, 2)).double() / (5 * 16))
+
+
+def test_usage_counts_only_selected_slots() -> None:
+    model = _model(n_atoms=1, top_r=2)
+    model.atoms = nn.Parameter(torch.ones(1, 1, 8))
+    responses = torch.tensor([[[1.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0,
+                                -1.0, -2.0, -3.0, -4.0]]])
+    selected = model._select_windows(F.relu(responses).unflatten(-1, (-1, 4)).amax(-1))
+    code = model._select(responses, selected)
+    totals, per_atom = model._statistics(torch.zeros_like(code), torch.zeros_like(code), code, selected)
+    table = model._atom_table(totals, per_atom)
+    assert float(per_atom[2, 0]) == 1.0 and float(per_atom[3, 0]) == 2.0
+    assert float(table["positive_frac"][0]) == 0.5
+    assert torch.allclose(table["active_window_frac"], torch.tensor([1 / 3], dtype=torch.float64))
 
 
 def test_recentering_moves_edge_energy_to_the_center() -> None:
@@ -320,7 +437,7 @@ def _planted(seed: int, n_windows: int = 24) -> torch.Tensor:
 
 
 def _fitted(epochs: int) -> tuple[WaveformSAE, torch.Tensor]:
-    spec = WaveformSpec(n_atoms=2, atom_len=16, pool_len=32, pre_emphasis="none")
+    spec = WaveformSpec(n_atoms=2, atom_len=16, pool_len=32, top_r=8, pre_emphasis="none")
     train_spec = WaveformTrainSpec(
         epochs=epochs, lr=1e-2, crop_len=64, crops_per_window=8, crop_batch=32, init="random"
     )
@@ -343,6 +460,7 @@ def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
     assert 0.0 <= history[-1]["selected_zero_frac"] <= 1.0
     assert 0.0 < history[-1]["n_effective_atoms"] <= 2.0 + 1e-6
     assert model.fit_meta["n_channels"] == 3 and model.fit_meta["margin"] == 64
+    assert model.fit_meta["selection_scope"] == "full_encoded_segment"
     assert len(model.atom_stats["atom"]) == 2 and model.fit_meta["atom_stats_split"] == "val_full"
     assert history[-1]["val_full_residual_frac"] < 0.5 * history[0]["val_full_residual_frac"]
     assert 0.0 <= history[-1]["clipped_frac"] <= 1.0 and 0.0 <= history[-1]["val_clipped_frac"] <= 1.0
@@ -378,11 +496,14 @@ def test_checkpoint_round_trip_and_refusals() -> None:
             "test-subject overlap was not refused",
         )
         checkpoint = torch.load(path, weights_only=True)
+        assert checkpoint["format"] == 2
+        torch.save({**checkpoint, "format": 1}, out / "legacy.pt")
         torch.save({**checkpoint, "provenance": {}}, out / "bare.pt")
         torch.save({k: v for k, v in checkpoint.items() if k != "model"}, out / "untagged.pt")
         for spec, bad in (
             (model.spec, out / "bare.pt"),
             (model.spec, out / "untagged.pt"),
+            (model.spec, out / "legacy.pt"),
             (replace(model.spec, pool_len=16), path),
         ):
             _expect_value_error(
@@ -392,9 +513,14 @@ def test_checkpoint_round_trip_and_refusals() -> None:
 
 
 def test_spec_and_unfitted_guards() -> None:
-    for kwargs in ({"top_r": 5}, {"pre_emphasis": "diff_ar"}, {"atom_norm": "max"}):
+    for kwargs in ({"top_r": 0}, {"top_r": 1.5}, {"top_r": True},
+                   {"pre_emphasis": "diff_ar"}, {"atom_norm": "max"}):
         _expect_value_error(lambda kwargs=kwargs: _model(**kwargs), f"{kwargs} was not refused")
     _expect_value_error(lambda: _model(crop_len=6), "a crop_len off the pooling grid was not refused")
+    assert _model(top_r=5)._select(_randn(1, 3, 24)).shape == (1, 3, 24)
+    _expect_value_error(lambda: _model(top_r=5)._select(_randn(1, 3, 16)), "R > M was not refused")
+    _expect_value_error(lambda: _model(top_r=5)._rows(_randn(1, 3, 19)), "R > trimmed M was not refused")
+    _expect_value_error(lambda: _model()._select(_randn(1, 3, 15)), "a partial pooling window was not refused")
     model = _model()
     with tempfile.TemporaryDirectory() as tmp:
         for call in (lambda: model.encode(torch.zeros(1, 3, 16)), lambda: model.save_artifacts(Path(tmp))):
