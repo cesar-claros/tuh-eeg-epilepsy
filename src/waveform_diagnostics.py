@@ -23,15 +23,16 @@ subjects are not in the diagnosed held-out split, encodes every window of ``spli
   label, the total and strong rates by label, the atoms without a strong activation, the
   selected atoms.
 
-Under top-R selection every atom fires in nearly every pooling window, so the plain rate
-is close to ``60 * sfreq / pool_len`` for every atom and carries no information; the
-strong rate (coefficients above ``strong_factor`` times the atom's mean coefficient on the
-fit's validation windows) is the rate to read. Both are activation rates on a development
-split, not event rates. Run on the HPC from ``code/``::
+Under format-4 top-R selection, each atom has at most ``top_r`` activations per full
+encoded segment, with at most one per pooling window. When the budget saturates on
+equal-length segments, the plain rate is ``60 * sfreq * top_r / encoded_length``.
+The strong rate uses coefficients above ``strong_factor`` times the atom's mean
+coefficient on the fit's validation windows. Both are activation rates on a development
+split, not event rates. Full-atom shapes and norms ignore window truncation; snippet
+shading marks the placement restricted to its pooling window. Run on the HPC from ``code/``::
 
     python src/waveform_diagnostics.py feature.pretrained=logs/waveform_sae/<root>/P32_free/sae_state.pt \\
-        feature.spec.atom_norm=free data.lazy_loading=true data.signal_mode=bipolar \\
-        'data.filter_freq=[1,45]' data.interpolate_bad_channels=true data.windows_train_csv=... \\
+        feature.spec.atom_norm=free data.windows_train_csv=... \\
         data.windows_val_csv=... data.windows_test_csv=... split=val 'snippet_atoms=[49,32,42]' \\
         output_dir=logs/waveform_diag/P32_free
 """
@@ -118,7 +119,7 @@ def _robust_std(segment: np.ndarray) -> np.ndarray:
 
 def _snippet_figure(
     path: Path, shapes: np.ndarray, dominant: list[int], snippets: dict[int, list], per_atom: int,
-    sfreq: float, channel_names: list[str], units: str, padding: tuple[int, int],
+    sfreq: float, channel_names: list[str], units: str, padding: tuple[int, int], pool_len: int,
 ) -> None:
     """One row per atom: the signal-domain shape (all channels), then its largest strong activation per subject.
 
@@ -126,7 +127,7 @@ def _snippet_figure(
     not montage adjacency. The spacing between channels is four times the median
     robust standard deviation of the segment, stated in the panel title, and the
     axis limits are fixed to that spacing; the atom's dominant channel is drawn in
-    blue, and the shaded span is the atom placement.
+    blue, and the shaded span is the atom placement clipped to its pooling window.
     """
     import matplotlib
 
@@ -154,7 +155,10 @@ def _snippet_figure(
             ax = axes[row, col]
             ax.plot(t_seg, (segment - offsets).T, color="0.6", linewidth=0.5)
             ax.plot(t_seg, segment[dominant[atom]] - offsets[dominant[atom]], color="#1f6fb2", linewidth=0.9)
-            ax.axvspan((snippet["sample"] - padding[0]) / sfreq, (snippet["sample"] + padding[1]) / sfreq,
+            pool_start = snippet["sample"] // pool_len * pool_len
+            placement_start = max(snippet["sample"] - padding[0], pool_start)
+            placement_end = min(snippet["sample"] + padding[1] + 1, pool_start + pool_len)
+            ax.axvspan(placement_start / sfreq, placement_end / sfreq,
                        color="#1f6fb2", alpha=0.08, lw=0)
             ax.set_ylim(-(segment.shape[0]) * spacing, spacing)
             ax.set_yticks(-offsets[:, 0])
@@ -349,7 +353,7 @@ def diagnose(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         names = channel_names if len(channel_names) == atoms.shape[1] else [str(c) for c in range(atoms.shape[1])]
         _snippet_figure(
             output_dir / "waveform_snippets.png", sae.atoms_signal_domain, dominant, snippets, per_atom_snippets,
-            sfreq, names, str(cfg.signal_units), padding,
+            sfreq, names, str(cfg.signal_units), padding, sae.spec.pool_len,
         )
     summary = {
         "split": cfg.split,

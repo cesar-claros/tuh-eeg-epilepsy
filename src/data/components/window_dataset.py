@@ -551,8 +551,8 @@ def _build_lazy_from_csv(
     """
     plans = {sp: _plan_from_csv(engine, path) for sp, path in window_csvs.items()}
     if engine.exclude_paths:
-        # Honor data.exclude_recordings_file even when reusing a fixed window set: drop
-        # every window whose recording is in the exclusion list (per split).
+        # Honor explicit-path and native-rate exclusions when reusing a fixed window set:
+        # drop every window whose recording is excluded, retaining the original split.
         for sp, plan in plans.items():
             before = len(plan)
             plans[sp] = plan[~plan['path'].map(lambda p: str(Path(p))).isin(engine.exclude_paths)]

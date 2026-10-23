@@ -129,25 +129,44 @@ def test_hydra_instantiates_local_competition_with_arbitrary_center_length() -> 
     assert not feature.fitted
 
 
-def test_local_baseline_composes_highpass_and_notch_without_changing_shared_defaults() -> None:
-    """The baseline preset selects the local model, the bipolar montage and lazy bad-channel interpolation.
+@pytest.mark.parametrize(
+    ("config_name", "feature_class", "skip_start_s"),
+    [
+        ("train_sae_local_competition", "LocalCompetitionSAE", 30.0),
+        ("train_sae_waveform", "WaveformSAE", 0.0),
+        ("waveform_diagnostics", "WaveformSAE", 0.0),
+    ],
+)
+def test_sae_baselines_compose_highpass_and_notch_without_changing_shared_defaults(
+    config_name: str, feature_class: str, skip_start_s: float
+) -> None:
+    """Training and diagnostic presets preserve waveforms with matching temporal filters.
 
     The upper cutoff stays null, and the shared defaults stay unchanged.
     """
     config_dir = Path(__file__).resolve().parents[1] / "configs"
     with initialize_config_dir(config_dir=str(config_dir), version_base="1.3"):
-        baseline = compose(config_name="train_sae_local_competition")
+        baseline = compose(config_name=config_name)
         shared = compose(config_name="train_sae")
 
-    assert baseline.feature._target_.endswith("LocalCompetitionSAE")
+    assert baseline.feature._target_.endswith(feature_class)
     assert baseline.feature.spec.pre_emphasis == "none"
     assert baseline.data.signal_mode == "bipolar"
     assert baseline.data.interpolate_bad_channels and baseline.data.lazy_loading
-    assert baseline.data.skip_start_s == 30.0
+    assert baseline.data.skip_start_s == skip_start_s
     assert list(baseline.data.filter_freq) == [0.1, None]
     assert list(baseline.data.notch_freqs) == [60.0]
+    if feature_class == "WaveformSAE":
+        assert list(baseline.data.exclude_native_sfreqs) == [400.0, 512.0, 1000.0]
+        assert baseline.feature.train_spec.crop_sampling == "full"
+        assert baseline.feature.train_spec.max_crop_energy_ratio is None
+        assert baseline.feature.train_spec.segment_batch == 2
+        assert baseline.feature.spec.top_r == 1
+    else:
+        assert baseline.data.exclude_native_sfreqs is None
     assert shared.feature._target_.endswith("ShapeConvSAE")
     assert shared.data.signal_mode == "raw"
     assert not shared.data.interpolate_bad_channels and not shared.data.lazy_loading
     assert shared.data.skip_start_s == 0.0
     assert shared.data.filter_freq is None and shared.data.notch_freqs is None
+    assert shared.data.exclude_native_sfreqs is None

@@ -157,6 +157,7 @@ _PROVENANCE_MATCH_KEYS = (
 _PROVENANCE_DATA_KEYS = _PROVENANCE_MATCH_KEYS + (
     "version", "window_len_min", "seed", "train_val_test_split", "require_keep_labels",
     "exclude_recordings_file", "drop_seizure_segments", "include_seizures", "skip_start_s",
+    "exclude_native_sfreqs",
 )
 
 

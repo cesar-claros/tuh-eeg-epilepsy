@@ -1,60 +1,61 @@
 _target_: src.models.components.waveform_sae.WaveformSAE
 # Waveform SAE: multichannel learned waveforms (K, C, L), channel-summed correlation, ReLU,
-# top-R positions per atom and pooling window, tied conv_transpose1d decoder, reconstruction
+# one maximum per window, top-R windows per atom and segment, tied conv_transpose1d decoder, reconstruction
 # loss only (documentation/waveform_sae_implementation.md; mathematics in
 # documentation/Minimal Waveform Autoencoder Mathematics.md). The sparsity comes from the
-# selection: there is no threshold and no L1 penalty. The number of channels is read from the
-# data. Dictionary training only (src/train_sae.py feature=waveform_sae); classifier features
+# selection: there is no threshold and no L1 penalty. The encoder convolves across the full
+# segment; only the decoder is restricted to pooling windows and discards waveform tails.
+# The number of channels is read from the
+# data. Baseline: src/train_sae.py --config-name train_sae_waveform.
+# Selecting only feature=waveform_sae leaves data settings separate. Classifier features
 # are not implemented yet. Writes sae_state.pt, sae_atoms.npy, sae_atoms_signal.npy,
 # sae_training.csv, sae_atom_stats.csv and sae_channels.txt to the run dir.
 spec:
   _target_: src.models.components.waveform_sae.WaveformSpec
   n_atoms: 64
-  atom_len: 80      # samples; 312 ms at data.target_sfreq=256. Even lengths are supported.
-  pool_len: 32      # pooling window P in samples (125 ms). P < atom_len: dense tiling, each atom
-                    # overlaps its own placements (filter-bank regime). P >> atom_len, e.g. 256:
-                    # at most top_r activations per atom per second (event regime). The window
-                    # length must be a multiple of P or its tail is trimmed (30720 = 960 * 32).
-  top_r: 1          # positions kept per atom and pooling window (1 <= top_r <= pool_len)
-  pre_emphasis: diff # diff: encode the first difference of each row (same as the ShapeConv SAE);
-                    # none: the scaled row. sae_atoms.npy is in the encoded domain,
-                    # sae_atoms_signal.npy the integrated synthesis shape.
+  atom_len: 80      # stored samples; 312 ms at data.target_sfreq=256. Even lengths are supported.
+                    # L>P means every placement is truncated. With L=80,P=32 only taps 8..70
+                    # can directly contribute to synthesis; all taps can contribute to encoding.
+  pool_len: 32      # pooling window P in samples (125 ms); one maximum supplies each candidate.
+                    # Segment tails are trimmed to a multiple of P (30720 = 960 * 32).
+  top_r: 1          # windows kept per atom and full encoded segment (1 <= top_r <= T / P).
+                    # R=1 means at most ONE activation per atom per segment, including long rows.
+                    # R=T/P retains all window maxima. This is checkpoint format 4.
+  pre_emphasis: none # encode the filtered waveform without differencing; robust scaling and clipping remain.
+                    # diff is an optional comparison. sae_atoms.npy and sae_atoms_signal.npy
+                    # both contain the atom itself under none; diff integrates the signal-domain export.
   atom_norm: unit   # unit: unit Frobenius norm over (C, L), re-imposed after every step.
                     # free: unit norm at initialization only; the loss sets the scale.
   center_atoms: false # subtract the temporal mean of every channel component before the norm
 train_spec:
   _target_: src.models.components.waveform_sae.WaveformTrainSpec
-  epochs: 30        # passes over the train dataloader; updates = epochs * windows *
-                    # crops_per_window / crop_batch. With lazy_loading each pass re-reads the EDFs.
+  epochs: 30        # passes over the train dataloader; each usable segment is scored once per pass.
+                    # With lazy_loading each pass re-reads the EDFs.
                     # 0 keeps the initialization (frozen-initialization control).
   lr: 0.001         # Adam; atom entries are about 1 / sqrt(C * L), so lower than the ShapeConv SAE
-  crop_len: 1024    # scored samples per training crop; a multiple of spec.pool_len. Each crop
-                    # also carries a margin of ceil((L + P - 2) / P) * P samples on each side.
-  crop_sampling: random # random: crops_per_window crops at random grid positions, with replacement,
-                    # crops may overlap (the ShapeConv SAE scheme). tiled: every window is cut into the
-                    # consecutive crops that fit with their margins (29 per 2-minute window), scored
-                    # centers disjoint, every sample of the tiled span scored once per epoch; the
-                    # tiling phase is a random grid offset per loaded batch.
-  crops_per_window: 16 # random sampling only: crops per window per pass (in expectation)
-  crop_batch: 64    # crops per optimizer step
-  max_crop_energy_ratio: 10.0 # drop training crops (and initialization patches) whose scored
-                    # energy exceeds this multiple of the batch median; null keeps all non-flat crops
-  init: patches     # patches: random multichannel data patches; random: Gaussian atoms
+  crop_sampling: full # score complete input segments; input length must be a multiple of pool_len.
+                    # R=1 is per atom per whole segment, independent of segment_batch.
+  segment_batch: 2  # complete segments per optimizer step; lower to reduce gradient memory.
+  max_crop_energy_ratio: null # required in full mode; no energy-ratio gate, including initialization.
+  # Legacy controls, used only after explicitly selecting crop_sampling=random or tiled:
+  crop_len: 1024
+  crops_per_window: 16
+  crop_batch: 64
+  init: patches     # patches: full-segment encoder receptive fields; random: Gaussian atoms
   recenter_atoms: true # after every epoch but the last, shift each atom so its energy centroid is
                     # at the center of its support (zero fill; Adam moments follow). Synthetic
                     # recovery 2026-10-06: a waveform that lands over an atom edge at the start
                     # stays cut off (no gradient outside the support); the fit then stops at 2-3x
                     # the residual of the planted solution even at twice the waveform length.
-  full_window_val: true # also measure the validation residual, gain and per-atom table on whole
-                    # windows (every sample) in the same pass over the val loader: val_full_* columns,
-                    # sae_atom_stats.csv from whole windows. GPU only, no extra reading; chunked.
+  full_window_val: true # legacy crop modes: also measure complete validation segments.
+                    # Full mode always validates full segments; val_* and val_full_* are aliases.
 random_state: 42
 # Path to a sae_state.pt written by src/train_sae.py feature=waveform_sae. When set, the
 # dictionary is loaded and fit_unsupervised is skipped; every spec field must equal the
-# checkpoint's.
+# checkpoint's. Formats 1, 2 and 3 use different selection or boundaries and are rejected.
 pretrained: null
 # Device: cpu | cuda | cuda:N | auto.
 device: auto
-# Whole windows encoded per pass in the full-window validation (8 two-minute windows at 256 Hz
-# with 64 atoms: about 0.4 GiB). Lower it on a small GPU.
+# Whole source segments per pass for crop selection and full-window validation.
+# Lower this to reduce full-segment response memory; it does not change the competition domain.
 chunk_windows: 8

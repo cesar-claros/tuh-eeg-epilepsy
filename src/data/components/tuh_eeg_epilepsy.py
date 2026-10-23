@@ -169,7 +169,7 @@ class TUHEEGEpilepsy:
         # the window set identical across signal modes.
         self.require_keep_labels = require_keep_labels
         # Recording EDF paths to drop from the window pool before windowing (e.g. the
-        # PSD anomalies picked by build_psd_exclusion.py). Stored as a normalized
+        # PSD anomalies or native-rate exclusions from the datamodule). Stored as a normalized
         # path-string set for matching against descriptions['path'].
         self.exclude_paths = {str(Path(p)) for p in exclude_paths} if exclude_paths else None
         # Bad-channel / bad-segment repair driven by the -bads.json sidecars from
@@ -1360,8 +1360,8 @@ class TUHEEGEpilepsy:
     def _filter_excluded_paths(df: pd.DataFrame, exclude_paths) -> pd.DataFrame:
         """Drop recordings whose EDF path is in ``exclude_paths`` (normalized str set).
 
-        Used to remove flagged recordings (e.g. PSD anomalies from
-        build_psd_exclusion.py) from the pool before windowing. Matching is on the
+        Used to remove excluded recordings (e.g. PSD anomalies or native-rate
+        exclusions) from the pool before windowing. Matching is on the
         normalized path string, the same identity the exclusion file and the anomaly
         CSVs use.
         """
@@ -1370,8 +1370,8 @@ class TUHEEGEpilepsy:
         keep = ~df['path'].map(lambda p: str(Path(p))).isin(exclude_paths)
         n_drop = int((~keep).sum())
         logger.info(
-            f"exclude_paths: dropped {n_drop}/{len(df)} recording(s) listed in the "
-            f"exclusion file ({len(exclude_paths)} paths requested)."
+            f"exclude_paths: dropped {n_drop}/{len(df)} recording(s) "
+            f"({len(exclude_paths)} excluded paths requested)."
         )
         if not keep.any():
             raise ValueError("All recordings were excluded by exclude_paths.")

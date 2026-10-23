@@ -99,6 +99,7 @@ class TUHEEGDataModule(LightningDataModule):
         apply_aas: bool = False,
         aas_fmax: float = 2.5,
         skip_start_s: float = 0.0,
+        exclude_native_sfreqs: list[float] | None = None,
     ) -> None:
         """Initialize a `TUHEEGDataModule`.
 
@@ -222,12 +223,19 @@ class TUHEEGDataModule(LightningDataModule):
             ``windows_*.csv``, windows that start earlier are dropped. Use it against
             start-up artifacts and the edge transient of a long high-pass filter, which
             lacks real context at the recording start. Recorded in the provenance.
+        exclude_native_sfreqs : list[float] | None, default=None
+            Native EDF sampling rates (Hz) to exclude, regardless of class. Applied
+            before window planning and resampling in both eager and lazy loading;
+            supplied window CSVs lose these recordings' windows without re-splitting.
+            Other recordings of the same patient remain eligible. None or [] disables
+            this exclusion. Values must be finite and positive.
 
         Raises
         ------
         ValueError
-            If ``filter_freq`` is malformed, ``skip_start_s`` is negative or not finite,
-            or a repair or exclusion flag is set without ``lazy_loading``: the eager loader
+            If ``filter_freq`` or ``exclude_native_sfreqs`` is malformed,
+            ``skip_start_s`` is negative or not finite,
+            or a lazy-only repair or segment-exclusion flag is set without ``lazy_loading``: the eager loader
             ignores those flags, so the run would record a repair that never happens.
 
         """
@@ -278,6 +286,9 @@ class TUHEEGDataModule(LightningDataModule):
         self.windows_test_csv = windows_test_csv
         self.require_keep_labels = require_keep_labels
         self.exclude_recordings_file = exclude_recordings_file
+        self.exclude_native_sfreqs = sorted({float(f) for f in exclude_native_sfreqs}) if exclude_native_sfreqs else []
+        if any(not isfinite(f) or f <= 0 for f in self.exclude_native_sfreqs):
+            raise ValueError("exclude_native_sfreqs must contain finite, positive sampling rates.")
         self.interpolate_bad_channels = interpolate_bad_channels
         self.drop_bad_segments = drop_bad_segments
         self.drop_seizure_segments = drop_seizure_segments
@@ -331,8 +342,8 @@ class TUHEEGDataModule(LightningDataModule):
         """Read data.exclude_recordings_file into a list of EDF paths to drop.
 
         The file (from build_psd_exclusion.py) lists one path per line; blank lines and
-        '#' comments are ignored. Returns None when no file is configured so the engine
-        applies no exclusion.
+        '#' comments are ignored. Returns None when no file is configured; native-rate
+        exclusions are added separately.
         """
         if not self.exclude_recordings_file:
             return None
@@ -343,6 +354,24 @@ class TUHEEGDataModule(LightningDataModule):
         paths = [ln for ln in paths if ln and not ln.startswith("#")]
         logger.info(f"Loaded {len(paths)} recording path(s) to exclude from {path}.")
         return paths or None
+
+    def _apply_native_sfreq_exclusions(self, engine: TUHEEGEpilepsy) -> None:
+        """Merge native-rate exclusions with explicit paths, retaining metadata for CSV matching."""
+        if not self.exclude_native_sfreqs:
+            return
+        descriptions = engine.descriptions
+        if "sfreq" not in descriptions:
+            raise ValueError("exclude_native_sfreqs requires native sfreq in recording metadata.")
+        rates = pd.to_numeric(descriptions["sfreq"], errors="coerce")
+        if rates.isna().any() or not rates.map(isfinite).all() or (rates <= 0).any():
+            raise ValueError("exclude_native_sfreqs requires finite, positive native sfreq for every recording.")
+        excluded = rates.isin(self.exclude_native_sfreqs)
+        paths = {str(Path(path)) for path in descriptions.loc[excluded, "path"]}
+        engine.exclude_paths = (engine.exclude_paths or set()) | paths
+        logger.info(
+            f"exclude_native_sfreqs={self.exclude_native_sfreqs}: marked {int(excluded.sum())}/{len(descriptions)} "
+            "recordings for exclusion before window selection; other eligibility filters still apply."
+        )
 
     def prepare_data(self) -> None:
         """Make sure dataset has been placed in the data folder and create dataframes.
@@ -398,6 +427,7 @@ class TUHEEGDataModule(LightningDataModule):
                 aas_fmax=self.aas_fmax,
                 skip_start_s=self.skip_start_s,
             )
+            self._apply_native_sfreq_exclusions(tuh)
 
             split_ratios = {'train': self.train_val_test_split[0],
                             'val': self.train_val_test_split[1],

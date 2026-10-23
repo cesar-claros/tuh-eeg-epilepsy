@@ -1,0 +1,20 @@
+# @package _global_
+
+# Waveform baseline using the shared src/train_sae.py entry point.
+defaults:
+  - train_sae
+  - override feature: waveform_sae
+  - _self_
+
+data:
+  exclude_native_sfreqs: [400.0, 512.0, 1000.0] # recording-level acquisition-rate restriction
+  signal_mode: bipolar
+  filter_freq: [0.1, null] # high-pass only; resampling retains its anti-aliasing
+  notch_freqs: [60.0]     # native-rate line-noise notch
+  interpolate_bad_channels: true
+  lazy_loading: true
+
+feature:
+  spec:
+    # Filtered samples with per-segment/channel median/MAD scaling and clipping.
+    pre_emphasis: none

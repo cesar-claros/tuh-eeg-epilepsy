@@ -16,12 +16,14 @@ of the EEG-TUH pipeline. Each script is self-contained, prints clear `INPUT` and
 | 6 | `stage6_classifier_scoring.py` | `make_pipeline(scaler, clf)` fit → decision scores, window- and subject-level accuracy | no (synthetic) |
 | 7 | `stage7_shapeconv_sae.py` | `ShapeConvSAE.fit_unsupervised` on an independent synthetic train draw (spike-and-wave of random polarity), monitored on a val draw, scored on a test draw; deterministic invariants (dimension, chunk invariance, seed reproducibility of two fits, checkpoint round trip, refusal without provenance) FAIL the run; the gate (`--strict`) is event-level precision and recall > 0.9 with maximum-cardinality matching within `--match-tol`; template `\|xcorr\|` and window AUROCs are diagnostics; stress and lever flags in the docstring | no (synthetic) |
 | - | `test_shapeconv_sae.py` | pass/fail unit invariants (pytest or plain python, 25 tests): projection, adjoint identity, analytic shrink response, NMS ties, checkpoint round trip, refusals and migrations, chunk invariance, provenance guards, context crops, residual pool, AR whitening, calibrated thresholds against a brute-force order statistic, unusable rows, split preflight, event matching | no |
-| - | `test_waveform_sae.py` | pass/fail unit invariants of the Waveform SAE (pytest or plain python, 20 tests): agreement with the prototype forward pass, selection example and tie rule, support bound, index conventions and adjoint identity for even and odd atom lengths, autograd against the closed-form gradient, crop / full-window equality, atom constraint, shared row pipeline and unusable channels, energy gate, grid-aligned crops, masked loss, a small fit on planted waveforms, checkpoint round trip and refusals, atom re-centering, whole-window statistics, tiled crops, diagnostics descriptors | no |
+| - | `test_waveform_sae.py` | one maximum per window and top-R windows per segment; full-segment encoder and window-restricted decoder, tie rules and gradients, independent atom/batch selection, contextual crop/full-segment response, code, reconstruction, loss and gradient agreement, segment edges, distant competitors, refreshed masks, random/tiled sampling, full-segment patch initialization, usage statistics, synthetic fitting and refusal of checkpoint formats 1, 2 and 3 | no |
+| - | `test_waveform_full_segments.py` | default full-segment training without an energy gate; direct R=1 loss/gradient reference, both segment ends, complete per-epoch coverage, partial batches, unusable-channel masking, validation aliases and refusal of silent tail trimming | no |
 | - | `test_sae_coverage.py` | metadata-only systematic coverage: disjoint scored centers, real context, final short chunks, arbitrary lengths and argument validation | no |
 | - | `test_local_competition_sae.py` | local competition against a brute-force reference, conservative ties, support bounds, gradients, tied/untied channel factors and biases, contextual chunks, masked tails, synthetic fit and checkpoint validation | no |
-| - | `test_train_sae.py` | shared entry-point dispatch and calibration capability checks with mocked training; Hydra configuration of the local-competition model | no |
+| - | `test_train_sae.py` | shared entry-point dispatch and calibration capability checks with mocked training; Waveform/local-competition training and diagnostic filter presets | no |
 | - | `test_temporal_filter_config.py` | high-pass/low-pass nullable cutoffs, validation and forwarding through data configuration | no |
 | - | `test_temporal_filtering.py` | context for sequential FIR filters and synthetic whole-signal versus contextual-window filtering | no |
+| - | `test_native_sfreq_exclusion.py` | native-rate exclusions independent of label and resampling target, explicit-path union, metadata validation, eager/lazy forwarding, fixed CSVs with old path prefixes, split preservation and provenance | no |
 | - | `test_datamodule_repair_flags.py` | the datamodule refuses `interpolate_bad_channels`, `drop_bad_segments`, `drop_seizure_segments` and `apply_aas` without lazy loading (the eager loader ignores them), names every refused flag, and passes each flag to the engine under lazy loading | no |
 | - | `test_skip_start.py` | recording-start skip: window counts and starts on the grid `skip_start_s + k * stride`, windows inside their recording, earlier windows dropped from a supplied plan, refusal of negative or non-finite values, forwarding to the engine, and the provenance record | no |
 | - | `test_screen_local_competition.py` | hyperparameter screen: best-lag atom similarity and matching against direct sums, edge energy and span, plateau epoch, density bound, in-memory window cache, composition of the shipped config and every arm, common-sample scoring against the training forward pass, a three-arm screen on synthetic CPU data with resume and refusals | no |
@@ -45,6 +47,13 @@ on the HPC, following the project's execution policy. Stages 1–3 need the unpa
 they say so and exit cleanly.
 
 ## Running
+
+Run the waveform full-segment training, preprocessing, selection and legacy crop regressions in the HPC container:
+
+```bash
+python -m pytest -q tests/test_waveform_sae.py tests/test_waveform_full_segments.py tests/test_train_sae.py \
+  tests/test_temporal_filter_config.py tests/test_temporal_filtering.py tests/test_native_sfreq_exclusion.py
+```
 
 Run the new local-competition tests from `code/` in the HPC container:
 

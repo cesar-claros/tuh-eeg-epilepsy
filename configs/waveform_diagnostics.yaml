@@ -6,13 +6,8 @@
 # intervals between strong activations, the spatial and spectral descriptors of the atom,
 # per-subject strong rates, and a snippet figure of selected atoms.
 defaults:
+  - train_sae_waveform
   - _self_
-  - data: tuh_eeg_epilepsy
-  - feature: waveform_sae
-  - paths: default
-  - extras: default
-  - hydra: default
-  - optional local: default
 
 task_name: "waveform_diagnostics"
 

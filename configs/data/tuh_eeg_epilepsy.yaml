@@ -25,6 +25,10 @@ require_keep_labels: null
 # build_psd_exclusion.py. null = no exclusion. e.g.
 # data.exclude_recordings_file=diagnostics/psd/exclude_recordings.txt
 exclude_recordings_file: null
+# Drop recordings by native EDF sampling rate, before resampling, regardless of label.
+# Applies to generated windows and supplied CSVs; other recordings of a patient remain.
+# null or [] disables this exclusion. E.g. data.exclude_native_sfreqs=[400,512,1000].
+exclude_native_sfreqs: null
 # Bad-channel / bad-segment repair from the -bads.json sidecars (precompute_badchannels.py).
 # interpolate_bad_channels: spherical-spline interpolate flagged channels before the bipolar
 # montage (recordings with too many bad channels are dropped instead). drop_bad_segments: drop
