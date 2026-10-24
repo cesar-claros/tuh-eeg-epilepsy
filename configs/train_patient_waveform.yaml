@@ -1,0 +1,30 @@
+# @package _global_
+
+# Patient-first reconstruction, frozen-head warm-up, then joint patient BCE.
+defaults:
+  - train_sae_waveform
+  - _self_
+
+task_name: train_patient_waveform
+
+feature:
+  spec:
+    atom_len: 256
+    pool_len: 512 # compare 1024 with the same complete manifests and paired seed
+    top_r: 1
+    atom_norm: unit
+
+supervised:
+  _target_: src.models.components.patient_waveform.SupervisedSpec
+  warmup_epochs: 50
+  joint_epochs: 30
+  warmup_lr: 0.01
+  dictionary_lr: 0.0001
+  head_lr: 0.001
+  gamma: 0.001
+  epsilon: 0.000001 # scale floor epsilon/M, fitted on full training patient means
+  hidden_dims: [] # linear baseline; [32] adds one ReLU hidden layer after patient pooling
+  lambda_center: null # estimate on this run; set a shared center explicitly for a multi-seed sweep
+  lambda_multiplier: 0.1 # compare [0.03, 0.1, 0.3, 1, 3] relative to the frozen center
+  calibration_batches: 32
+  ramp_epochs: 5

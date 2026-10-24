@@ -657,9 +657,9 @@ def test_spec_and_unfitted_guards() -> None:
             raise AssertionError("a module without a dictionary was used")
     try:
         model(torch.zeros(1, 3, 16))
-    except NotImplementedError:
+    except RuntimeError:
         return
-    raise AssertionError("forward returned features that are not defined")
+    raise AssertionError("forward used an unfitted dictionary")
 
 
 def test_diagnostics_descriptors_and_histogram_quantiles() -> None:

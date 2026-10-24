@@ -11,8 +11,8 @@
 #* This driver no longer reproduces the format-1 screen or its activation-rate settings.
 #* K=64, L=80, 256 Hz, TCP bipolar, 0.1 Hz high-pass + 60 Hz notch, no differencing,
 #* data.interpolate_bad_channels=true; exclude native 400/512/1000 Hz recordings in both classes.
-#* Existing manifests are filtered on load without re-splitting patients.
-#* Full-segment training, no energy-ratio gate. SEGMENT_BATCH controls complete segments per update.
+#* Supply complete eligible manifests from the uncapped audit; patient splits are preserved.
+#* Patient-first full-segment training, no energy-ratio gate. SEGMENT_BATCH is the GPU chunk size.
 #* No classifier, no test windows loaded. One output root per invocation (never reused).
 #* Per arm: <name>.log, sae_state.pt, sae_atoms*.npy, sae_training.csv, sae_atom_stats.csv,
 #* sae_channels.txt, windows_*.csv, .hydra/. The root holds sha.txt, dirty.diff, settings.txt,
@@ -26,12 +26,14 @@
 set -euo pipefail
 
 DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data}"   # <-- EDIT
-M="${M:-logs/manifests/wsae_seed42_interp}"                                                   # <-- EDIT: dir with windows_{train,val,test}.csv
+M="${M:?Set M to the complete eligible audit directory containing the three split CSVs}"
 ROOT="${ROOT:-logs/waveform_sae/$(date +%Y%m%d_%H%M%S)}"
 ARMS="${ARMS:-P32_unit P32_free P256_unit}"
 EPOCHS="${EPOCHS:-20}"
 TOP_R="${TOP_R:-1}"
 SEGMENT_BATCH="${SEGMENT_BATCH:-2}"
+PATIENTS_PER_BATCH="${PATIENTS_PER_BATCH:-8}"
+SEGMENTS_PER_PATIENT="${SEGMENTS_PER_PATIENT:-4}"
 SEED="${SEED:-42}"            # dictionary seed (feature.random_state); the split is fixed by the manifests
 NUM_WORKERS="${NUM_WORKERS:-4}"   # the probe node offered 5 CPUs; 7 workers oversubscribe it
 DEVICE="${DEVICE:-cuda}"
@@ -50,6 +52,7 @@ arm_flags() {  # empty output = unknown arm
 
 # ---- preflight ---------------------------------------------------------------------
 [ -d "$DATA_DIR" ] || { echo "ERROR: DATA_DIR not found: $DATA_DIR"; exit 1; }
+[ "$TOP_R" = 1 ] || { echo "ERROR: patient training keeps TOP_R=1 per atom per segment"; exit 1; }
 for split in train val test; do
   [ -f "$M/windows_$split.csv" ] || { echo "ERROR: M must hold windows_{train,val,test}.csv (got '$M')"; exit 1; }
 done
@@ -65,7 +68,7 @@ mkdir -p "$ROOT"
 git rev-parse HEAD > "$ROOT/sha.txt"
 git diff > "$ROOT/dirty.diff"            # empty file = clean working tree
 cp "$M"/windows_{train,val,test}.csv "$ROOT"/
-echo "ARMS=$ARMS EPOCHS=$EPOCHS TOP_R=$TOP_R SEGMENT_BATCH=$SEGMENT_BATCH SEED=$SEED NUM_WORKERS=$NUM_WORKERS DEVICE=$DEVICE M=$M" > "$ROOT/settings.txt"
+echo "ARMS=$ARMS EPOCHS=$EPOCHS TOP_R=$TOP_R SEGMENT_BATCH=$SEGMENT_BATCH PATIENTS_PER_BATCH=$PATIENTS_PER_BATCH SEGMENTS_PER_PATIENT=$SEGMENTS_PER_PATIENT SEED=$SEED NUM_WORKERS=$NUM_WORKERS DEVICE=$DEVICE M=$M" > "$ROOT/settings.txt"
 failures="$ROOT/failures.txt"
 : > "$failures"
 
@@ -74,6 +77,8 @@ common=(
   "feature.train_spec.epochs=$EPOCHS" "feature.random_state=$SEED" "feature.device=$DEVICE"
   "feature.spec.top_r=$TOP_R"
   "feature.train_spec.segment_batch=$SEGMENT_BATCH"
+  "feature.train_spec.patients_per_batch=$PATIENTS_PER_BATCH"
+  "feature.train_spec.segments_per_patient=$SEGMENTS_PER_PATIENT"
   "data.data_dir=$DATA_DIR" data.lazy_loading=true data.signal_mode=bipolar data.target_sfreq=256
   data.interpolate_bad_channels=true "data.num_workers=$NUM_WORKERS"
   "data.windows_train_csv=$M/windows_train.csv" "data.windows_val_csv=$M/windows_val.csv"

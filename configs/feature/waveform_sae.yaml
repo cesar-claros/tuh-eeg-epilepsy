@@ -8,7 +8,8 @@ _target_: src.models.components.waveform_sae.WaveformSAE
 # The number of channels is read from the
 # data. Baseline: src/train_sae.py --config-name train_sae_waveform.
 # Selecting only feature=waveform_sae leaves data settings separate. Classifier features
-# are not implemented yet. Writes sae_state.pt, sae_atoms.npy, sae_atoms_signal.npy,
+# are retained amplitude sums divided by M; pool per patient before the classifier.
+# Writes sae_state.pt, sae_atoms.npy, sae_atoms_signal.npy,
 # sae_training.csv, sae_atom_stats.csv and sae_channels.txt to the run dir.
 spec:
   _target_: src.models.components.waveform_sae.WaveformSpec
@@ -29,20 +30,23 @@ spec:
   center_atoms: false # subtract the temporal mean of every channel component before the norm
 train_spec:
   _target_: src.models.components.waveform_sae.WaveformTrainSpec
-  epochs: 30        # passes over the train dataloader; each usable segment is scored once per pass.
-                    # With lazy_loading each pass re-reads the EDFs.
+  epochs: 30        # passes over patients; redraw a subset from each complete manifest bag per pass.
                     # 0 keeps the initialization (frozen-initialization control).
   lr: 0.001         # Adam; atom entries are about 1 / sqrt(C * L), so lower than the ShapeConv SAE
   crop_sampling: full # score complete input segments; input length must be a multiple of pool_len.
                     # R=1 is per atom per whole segment, independent of segment_batch.
-  segment_batch: 2  # complete segments per optimizer step; lower to reduce gradient memory.
+  sampling_unit: patient # segment retains the old uniform-segment loop for controlled comparisons.
+  patients_per_batch: 8  # distinct patients per optimizer step; final partial batch is kept.
+  segments_per_patient: 4 # min(4, J_i) distinct complete segments, redrawn each patient pass.
+  segment_batch: 2  # GPU chunks per backward pass; accumulate all patient contributions before one update.
   max_crop_energy_ratio: null # required in full mode; no energy-ratio gate, including initialization.
-  # Legacy controls, used only after explicitly selecting crop_sampling=random or tiled:
+  # Legacy controls: also select sampling_unit=segment when using random or tiled crops.
   crop_len: 1024
   crops_per_window: 16
   crop_batch: 64
   init: patches     # patches: full-segment encoder receptive fields; random: Gaussian atoms
-  recenter_atoms: true # after every epoch but the last, shift each atom so its energy centroid is
+  recenter_atoms: false # optional pretraining-only change of atom location; disabled for the patient protocol.
+                    # after every epoch but the last, shift each atom so its energy centroid is
                     # at the center of its support (zero fill; Adam moments follow). Synthetic
                     # recovery 2026-10-06: a waveform that lands over an atom edge at the start
                     # stays cut off (no gradient outside the support); the fit then stops at 2-3x

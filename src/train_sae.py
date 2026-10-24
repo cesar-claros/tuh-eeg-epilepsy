@@ -1,4 +1,7 @@
-"""Entry point that trains an SAE dictionary alone (no features, no classifier).
+"""Train an SAE dictionary, optionally followed by pooled-patient waveform supervision.
+
+``--config-name train_patient_waveform`` adds head warm-up and joint fine-tuning;
+the other presets remain reconstruction-only.
 
 Works for every feature extractor that exposes ``fit_unsupervised``:
 ``feature=shapeconv_sae`` (the default), ``feature=waveform_sae``, and
@@ -14,6 +17,7 @@ because its training subjects would land in the test set.
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,13 +71,30 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     ValueError
         If ``feature.pretrained`` is set: this entry point trains a new dictionary.
     """
-    if cfg.get("seed"):
+    if cfg.get("seed") is not None:
         lightning.seed_everything(cfg.seed, workers=True)
+
+    if cfg.get("require_window_manifests", False):
+        for split in ("train", "val", "test"):
+            if not cfg.data.get(f"windows_{split}_csv"):
+                raise ValueError(
+                    "provide all complete windows_{train,val,test}_csv from the uncapped eligibility audit"
+                )
+        if not cfg.data.lazy_loading:
+            raise ValueError("complete manifest training requires data.lazy_loading=true")
 
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")  # noqa: G004
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()
     check_split_disjoint(datamodule)
+    if cfg.get("require_window_manifests", False):
+        for split in ("train", "val", "test"):
+            with Path(cfg.data[f"windows_{split}_csv"]).open(newline="") as handle:
+                original_count = sum(1 for _ in csv.DictReader(handle))
+            if len(getattr(datamodule, f"{split}_df")) != original_count:
+                raise ValueError(
+                    f"{split} manifest changed during eligibility filtering; regenerate the complete audit"
+                )
     output_dir = Path(cfg.paths.output_dir)
     dump_window_metadata(output_dir, datamodule)
 
@@ -86,6 +107,16 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         )
     if getattr(feature_extractor, "fitted", False):
         raise ValueError("train_sae.py trains a new dictionary; unset feature.pretrained")
+
+    supervised = cfg.get("supervised")
+    if supervised is not None:
+        from src.models.components.patient_waveform import fit_patient_supervised, validate_supervised
+        from src.models.components.waveform_sae import WaveformSAE
+
+        if not isinstance(feature_extractor, WaveformSAE):
+            raise TypeError("pooled patient supervision is implemented for waveform_sae only")
+        supervised_spec = hydra.utils.instantiate(supervised, _convert_="all")
+        validate_supervised(feature_extractor, supervised_spec)
 
     calibration = threshold_calibration(cfg)
     calibrate = getattr(feature_extractor, "calibrate_amp_min", None)
@@ -104,7 +135,18 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             keep_label=calibration["keep_label"],
             provenance=calibration_provenance(datamodule, calibration["keep_label"]),
         )
-    feature_extractor.save_artifacts(output_dir)
+    if supervised is not None:
+        pretraining_dir = output_dir / "pretraining"
+        pretraining_dir.mkdir(parents=True, exist_ok=True)
+        feature_extractor.save_artifacts(pretraining_dir)
+        head, supervised_metrics = fit_patient_supervised(
+            feature_extractor,
+            (datamodule.train_dataloader(), datamodule.val_dataloader()),
+            supervised_spec,
+            output_dir,
+        )
+    else:
+        feature_extractor.save_artifacts(output_dir)
     log.info(  # noqa: G004
         f"Reuse with: feature={HydraConfig.get().runtime.choices['feature']} "
         f"feature.pretrained={output_dir / CHECKPOINT_NAME} data.seed={cfg.data.seed}"
@@ -113,6 +155,9 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     history = feature_extractor.history
     metric_dict: dict[str, Any] = dict(history[-1]) if history else {}
     object_dict = {"cfg": cfg, "datamodule": datamodule, "feature_extractor": feature_extractor}
+    if supervised is not None:
+        metric_dict.update(supervised_metrics)
+        object_dict["patient_head"] = head
     return metric_dict, object_dict
 
 

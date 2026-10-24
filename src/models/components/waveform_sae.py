@@ -18,8 +18,8 @@ coefficient, shared by all channel components of its atom.
 This is a second arm next to ``shapeconv_sae.py`` (single-channel atoms, signed code,
 learnable thresholds with an L1 penalty). The default preserves the input waveform
 without first differencing; per-window/channel robust scaling and clipping use the
-shared row helpers. ``forward`` (classifier features) is not implemented: counts saturate at
-``top_r`` per segment when enough windows have positive candidates. Training scores
+shared row helpers. ``forward`` returns retained amplitude sums divided by the
+number of pooling windows; these are not event counts. Training scores
 complete input segments by default, without an energy gate. Legacy crop modes
 recompute full-segment selection with the current atoms before every update.
 """
@@ -111,8 +111,8 @@ class WaveformTrainSpec:
     Parameters
     ----------
     epochs : int
-        Passes over the training segments. Full mode scores each usable segment
-        once per pass, in batches of at most ``segment_batch``. Zero keeps the
+        Passes over patients (patient sampling) or segments (segment sampling).
+        Patient mode redraws segment subsets on every visit. Zero keeps the
         initialization (a frozen-initialization control).
     lr : float
         Adam learning rate. Atom entries have a typical size of ``1 / sqrt(C * L)``
@@ -137,8 +137,17 @@ class WaveformTrainSpec:
     crop_batch : int
         Legacy crop modes only: crops per optimizer step.
     segment_batch : int
-        Full mode: complete segments per optimizer step. Lower this to reduce
-        gradient memory without changing the temporal coverage or top-R domain.
+        Full mode: segments per GPU gradient chunk. Under segment sampling each
+        chunk is an optimizer step; patient sampling accumulates all chunks first.
+    sampling_unit : str
+        ``patient``: use complete lazy manifests, redraw segments per patient and
+        average within patients, then patients. The waveform configuration selects
+        this mode. ``segment`` preserves the legacy Python API/control behavior.
+    patients_per_batch : int
+        Distinct patients per optimizer step under patient sampling.
+    segments_per_patient : int
+        Maximum segments drawn without replacement per patient per epoch. This is
+        a draw size, not a manifest cap; all segments remain available next epoch.
     max_crop_energy_ratio : float | None
         Legacy crop modes only; must be ``None`` in full mode. A crop (and an initialization patch) whose
         scored energy exceeds this multiple of the median energy of its batch is
@@ -178,6 +187,9 @@ class WaveformTrainSpec:
     recenter_atoms: bool = True
     full_window_val: bool = True
     segment_batch: int = 2
+    sampling_unit: str = "segment"
+    patients_per_batch: int = 8
+    segments_per_patient: int = 4
 
 
 @dataclass(frozen=True)
@@ -215,7 +227,7 @@ class WaveformSAE(nn.Module):
     """Multichannel waveform dictionary with temporal top-R selection and a tied decoder.
 
     Exposes the hooks the pipeline calls on a learned extractor: ``fit_unsupervised``
-    (labels are never read), ``save_artifacts``, ``validate_artifact`` and the
+    (labels never enter reconstruction loss), ``save_artifacts``, ``validate_artifact`` and the
     ``fitted`` / ``history`` / ``provenance`` / ``fit_meta`` attributes, so
     ``src/train_sae.py feature=waveform_sae`` trains a dictionary. The number of
     channels is read from the data at fit time (or from the checkpoint), and the
@@ -275,6 +287,14 @@ class WaveformSAE(nn.Module):
     def _check_specs(self) -> None:
         """Refuse unknown option values and geometries the encoder cannot realize."""
         spec, train_spec = self.spec, self.train_spec
+        if train_spec.sampling_unit not in ("segment", "patient"):
+            raise ValueError("sampling_unit must be segment or patient")
+        for name in ("patients_per_batch", "segments_per_patient"):
+            value = getattr(train_spec, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if train_spec.sampling_unit == "patient" and (train_spec.crop_sampling != "full" or spec.top_r != 1):
+            raise ValueError("patient sampling requires complete segments and top_r=1")
         for name, value, allowed in (
             ("spec.pre_emphasis", spec.pre_emphasis, _PRE_EMPHASIS),
             ("spec.atom_norm", spec.atom_norm, _ATOM_NORMS),
@@ -589,19 +609,15 @@ class WaveformSAE(nn.Module):
         return self._decode(code.to(self.device), self._dictionary())
 
     def forward(self, X: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
-        """Classifier features are not defined for this model yet.
+        """Differentiable segment features ``(B, K)``: retained amplitude sum divided by ``M``.
 
-        Raises
-        ------
-        NotImplementedError
-            Always. Counts can saturate at ``top_r`` per atom and segment,
-            so the feature blocks are an open decision; see
-            ``documentation/waveform_sae_implementation.md``. Use ``encode``.
+        ``y`` is ignored. Complete segments are required; zero usable channels give
+        zero features. Patient training excludes those segments from both means.
+        This amplitude feature is not an occurrence count under top-R selection.
         """
-        raise NotImplementedError(
-            "WaveformSAE has no classifier features yet (activation counts can saturate under top-R "
-            "selection); train dictionaries with src/train_sae.py and inspect them through encode()"
-        )
+        rows, _ = self._full_rows(X)
+        code = self._select(self._responses(rows, self._dictionary()))
+        return code.sum(-1) / (rows.shape[-1] // self.spec.pool_len)
 
     # ------------------------------------------------------------------ training
 
@@ -994,6 +1010,11 @@ class WaveformSAE(nn.Module):
     ) -> None:
         """Learn atoms by reconstruction of complete input segments by default.
 
+        With ``sampling_unit='patient'``, delegate to the patient-first loop using
+        dataset.plan. That loop averages per-segment usable-sample losses within
+        patients, then patients, and restores minimum patient validation loss.
+        The remaining description applies to the segment-sampling control.
+
         A seeded copy of the loader reshuffles segments each pass. Full mode
         scores each segment with usable channels once, in groups of at most
         ``segment_batch``, without an energy gate. Both encoding and top-R
@@ -1042,6 +1063,11 @@ class WaveformSAE(nn.Module):
         provenance = dict(provenance or {})
         if not provenance.get("train_subjects"):
             raise ValueError("fit_unsupervised needs provenance['train_subjects'] (the subjects behind the loader)")
+        if self.train_spec.sampling_unit == "patient":
+            from src.models.components.patient_waveform import fit_patient_reconstruction
+
+            fit_patient_reconstruction(self, dataloader, val_dataloader, provenance)
+            return
         spec, train_spec = self.spec, self.train_spec
         full_segments = train_spec.crop_sampling == "full"
         generator = torch.Generator().manual_seed(self.random_state)

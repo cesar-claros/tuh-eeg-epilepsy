@@ -6,6 +6,10 @@ defaults:
   - override feature: waveform_sae
   - _self_
 
+# Supply the complete manifests produced by count_pool.py --fresh_splits.
+# Fail rather than silently falling back to the balanced window planner.
+require_window_manifests: true
+
 data:
   exclude_native_sfreqs: [400.0, 512.0, 1000.0] # recording-level acquisition-rate restriction
   signal_mode: bipolar
