@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -164,9 +165,18 @@ class PatientSummary:
 
 
 @torch.no_grad()
-def summarize_patients(model: WaveformSAE, loader: DataLoader) -> PatientSummary:
-    """Stream every retained segment and average only usable segments, then patients equally."""
+def summarize_patients(
+    model: WaveformSAE, loader: DataLoader, description: str = "Patient full-pool evaluation"
+) -> PatientSummary:
+    """Stream the complete pool with progress and wall timings; retain the same reductions.
+
+    Loader wait measures time awaiting prefetched batches, not total worker CPU
+    time. Compute includes transfer, normalization, forward passes and reduction;
+    CUDA is synchronized before the final elapsed-time report.
+    """
+    started = time.perf_counter()
     count = len(loader.dataset.subjects)
+    log.info("{}: {} segments, {} patients, {} batches", description, len(loader.dataset), count, len(loader))
     sums = torch.zeros(count, model.spec.n_atoms + 2, dtype=torch.float64, device=model.device)
     numbers = torch.zeros(count, dtype=torch.long, device=model.device)
     statistics = (
@@ -174,17 +184,37 @@ def summarize_patients(model: WaveformSAE, loader: DataLoader) -> PatientSummary
         torch.zeros(4, model.spec.n_atoms, dtype=torch.float64, device=model.device),
     )
     skipped = 0
-    for x, _, patient, _ in loader:
-        loss, features, zero, usable = segment_values(model, x, statistics)
-        index = patient.to(model.device)[usable]
-        values = torch.cat([features, loss[:, None], zero[:, None]], dim=1)[usable]
-        sums.index_add_(0, index, values.double())
-        numbers.index_add_(0, index, torch.ones_like(index))
-        skipped += int((~usable).sum())
+    loader_wait, compute = 0.0, 0.0
+    with tqdm(total=len(loader.dataset), desc=description, unit="segment") as progress:
+        ready = time.perf_counter()
+        for x, _, patient, _ in loader:
+            loaded = time.perf_counter()
+            loader_wait += loaded - ready
+            loss, features, zero, usable = segment_values(model, x, statistics)
+            index = patient.to(model.device)[usable]
+            values = torch.cat([features, loss[:, None], zero[:, None]], dim=1)[usable]
+            sums.index_add_(0, index, values.double())
+            numbers.index_add_(0, index, torch.ones_like(index))
+            skipped += int((~usable).sum())
+            compute += time.perf_counter() - loaded
+            progress.update(len(x))
+            ready = time.perf_counter()
     if bool((numbers == 0).any()):
         empty = loader.dataset.subjects[(numbers == 0).cpu().numpy()].tolist()
         raise ValueError(f"patients have no usable segments: {empty}; audit signal validity")
     means = (sums / numbers[:, None]).float()
+    if model.device.type == "cuda":
+        torch.cuda.synchronize(model.device)
+    elapsed = time.perf_counter() - started
+    log.info(
+        "{} finished: {:.1f}s total, {:.1f}s loader wait, {:.1f}s compute, {:.2f} segments/s, {} skipped",
+        description,
+        elapsed,
+        loader_wait,
+        compute,
+        len(loader.dataset) / max(elapsed, 1e-9),
+        skipped,
+    )
     return PatientSummary(means[:, :-2], means[:, -2], means[:, -1], numbers, skipped, *statistics)
 
 
@@ -251,6 +281,7 @@ def fit_patient_reconstruction(
     model.history = []
     saved_draws: list[list[list[int]]] = []
     for epoch in range(spec.epochs):
+        epoch_started = time.perf_counter()
         train.batch_sampler.epoch = epoch
         total, patients, seen, skipped, steps = 0.0, 0, 0, 0, 0
         epoch_draws = []
@@ -268,7 +299,15 @@ def fit_patient_reconstruction(
             steps += 1
             epoch_draws.append(indices.tolist())
         moved = model._recenter(optimizer) if spec.recenter_atoms and epoch + 1 < spec.epochs else 0
-        summary = summarize_patients(model, val) if val is not None else None
+        if model.device.type == "cuda":
+            torch.cuda.synchronize(model.device)
+        training_seconds = time.perf_counter() - epoch_started
+        validation_started = time.perf_counter()
+        summary = (
+            summarize_patients(model, val, f"Reconstruction validation {epoch + 1}/{spec.epochs}")
+            if val is not None
+            else None
+        )
         val_loss = float(summary.reconstruction.mean()) if summary is not None else math.nan
         if val_loss < best:
             best, best_atoms, best_epoch = val_loss, model.atoms.detach().clone(), epoch + 1
@@ -292,6 +331,13 @@ def fit_patient_reconstruction(
         model.history.append(record)
         saved_draws.append(epoch_draws)
         log.info(f"Waveform SAE epoch {epoch + 1}: patient reconstruction {total / patients:.6g}, val {val_loss:.6g}")
+        log.info(
+            "Reconstruction epoch {} timings: {:.1f}s training, {:.1f}s validation/selection, {:.1f}s total",
+            epoch + 1,
+            training_seconds,
+            time.perf_counter() - validation_started,
+            time.perf_counter() - epoch_started,
+        )
     if best_atoms is not None:
         with torch.no_grad():
             model.atoms.copy_(best_atoms)
@@ -641,6 +687,7 @@ def _preparation_identity(model: WaveformSAE, loaders: tuple[DataLoader, DataLoa
             {
                 "plan": hashlib.sha256(plan.encode()).hexdigest(),
                 "settings": {key: getattr(source, key, None) for key in attributes},
+                "signal_cache_identity": getattr(getattr(source, "signal_cache", None), "identity", None),
             }
         )
     identity = {
@@ -681,7 +728,8 @@ def prepare_patient_supervised(
     if int(loaders[0].dataset[0][0].shape[-1]) != length:
         raise ValueError("loaded segment length disagrees with target_len")
     n_pool = length // model.spec.pool_len
-    train_summary, val_summary = summarize_patients(model, train_full), summarize_patients(model, val)
+    train_summary = summarize_patients(model, train_full, "Preparation train pool")
+    val_summary = summarize_patients(model, val, "Preparation validation pool")
     r0 = float(train_summary.reconstruction.mean())
     v0, zero = float(val_summary.reconstruction.mean()), float(val_summary.zero.mean())
     if not math.isfinite(r0 + v0 + zero) or r0 <= 0 or zero <= v0:
@@ -795,6 +843,7 @@ def fit_patient_supervised(
     history, saved_draws = [], []
     threshold = v0 + 0.1 * (zero - v0)
     for epoch in range(spec.joint_epochs):
+        epoch_started = time.perf_counter()
         train.batch_sampler.epoch = epoch
         weight = target_weight * min((epoch + 1) / spec.ramp_epochs, 1.0)
         total_r, total_c, patients = 0.0, 0.0, 0
@@ -810,7 +859,11 @@ def fit_patient_supervised(
             total_c += c * n
             patients += n
             epoch_draws.append(batch[3].tolist())
-        summary = summarize_patients(model, val)
+        if model.device.type == "cuda":
+            torch.cuda.synchronize(model.device)
+        training_seconds = time.perf_counter() - epoch_started
+        validation_started = time.perf_counter()
+        summary = summarize_patients(model, val, f"Joint validation {epoch + 1}/{spec.joint_epochs}")
         with torch.no_grad():
             scores = head(summary.features)
             bce = float(F.binary_cross_entropy_with_logits(scores, val.dataset.labels.to(model.device)))
@@ -835,10 +888,17 @@ def fit_patient_supervised(
             best_score, selected_epoch = auroc, epoch + 1
             best_atoms, best_head = model.atoms.detach().clone(), _head_state(head)
         log.info(f"Patient joint epoch {epoch + 1}: val AUROC {auroc:.4f}, reconstruction {reconstruction:.6g}")
+        log.info(
+            "Joint epoch {} timings: {:.1f}s training, {:.1f}s validation/selection, {:.1f}s total",
+            epoch + 1,
+            training_seconds,
+            time.perf_counter() - validation_started,
+            time.perf_counter() - epoch_started,
+        )
     with torch.no_grad():
         model.atoms.copy_(best_atoms)
     head.load_state_dict(best_head)
-    selected_summary = summarize_patients(model, val)
+    selected_summary = summarize_patients(model, val, "Selected-state validation pool")
     _store_atom_statistics(model, selected_summary)
     model.fit_meta["supervised"] = {
         "spec": asdict(spec),
@@ -871,7 +931,7 @@ def fit_patient_supervised(
     )
     pl.DataFrame(history).write_csv(output_dir / "patient_joint_training.csv")
     for name, loader in (("train", train_full), ("val", val)):
-        summary = selected_summary if name == "val" else summarize_patients(model, loader)
+        summary = selected_summary if name == "val" else summarize_patients(model, loader, "Selected-state train pool")
         with torch.no_grad():
             scores = head(summary.features).cpu().numpy()
         pl.DataFrame(

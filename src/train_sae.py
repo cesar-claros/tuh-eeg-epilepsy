@@ -97,6 +97,9 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
                 )
     output_dir = Path(cfg.paths.output_dir)
     dump_window_metadata(output_dir, datamodule)
+    if cfg.get("signal_cache_dir"):
+        for split in ("train", "val"):
+            getattr(datamodule, f"data_{split}").enable_signal_cache(cfg.signal_cache_dir)
 
     log.info(f"Instantiating feature extractor <{cfg.feature._target_}>")  # noqa: G004
     feature_extractor = instantiate_feature(cfg.feature)

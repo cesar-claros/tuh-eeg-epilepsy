@@ -80,6 +80,7 @@ python -m pytest -q \
   tests/test_waveform_full_segments.py \
   tests/test_waveform_sae.py \
   tests/test_count_pool_segments.py \
+  tests/test_signal_cache.py \
   2>&1 | tee "$RUN/tests.log"
 
 HYDRA_FULL_ERROR=1 python -u src/train_sae.py \

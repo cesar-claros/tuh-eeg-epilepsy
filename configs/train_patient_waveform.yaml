@@ -6,6 +6,7 @@ defaults:
   - _self_
 
 task_name: train_patient_waveform
+signal_cache_dir: ${paths.log_dir}/waveform_patient/signal_cache # set null to disable
 
 feature:
   spec:

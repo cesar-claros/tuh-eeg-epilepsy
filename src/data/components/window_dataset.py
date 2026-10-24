@@ -55,6 +55,7 @@ from loguru import logger
 from torch.utils.data import Dataset
 
 from src.data.components.aas import apply_aas
+from src.data.components.signal_cache import WindowSignalCache
 from src.data.components.temporal_filtering import filter_context_seconds
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy
 
@@ -330,13 +331,18 @@ class WindowDataset(Dataset):
         self.ic_bag_max_k = ic_bag_max_k
         self.ic_bag_sign_normalize = ic_bag_sign_normalize
         self.ic_bag_rank_by = ic_bag_rank_by
+        self.signal_cache: WindowSignalCache | None = None
+
+    def enable_signal_cache(self, directory: str | Path) -> None:
+        """Attach a lossless on-demand sensor cache; leave plan, labels and preprocessing unchanged."""
+        self.signal_cache = WindowSignalCache(self, directory)
 
     def __len__(self) -> int:
         return len(self.plan)
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor, torch.Tensor]:
         row = self.plan.iloc[i]
-        data = self._process(row)
+        data = self._process(row) if self.signal_cache is None else self.signal_cache.get(self, i)
         if data is None:
             data = np.zeros((len(self.target_channels), self.target_len), dtype=np.float32)
         # squeeze so a single-target label is a per-sample scalar, matching the
@@ -480,7 +486,7 @@ def _plan_from_csv(engine: TUHEEGEpilepsy, csv_path: str) -> pd.DataFrame:
         return '/'.join(Path(str(p)).parts[-4:])
     desc_by_tail = {_tail(row['path']): row for _, row in engine.descriptions.iterrows()}
     has_idx = 'window_idx_within_subject' in plan_csv.columns
-    records = []
+    records: list[dict[str, object]] = []
     missing = 0
     for _, r in plan_csv.iterrows():
         desc = desc_by_path.get(str(r['path']))

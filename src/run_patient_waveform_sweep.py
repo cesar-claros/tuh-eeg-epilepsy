@@ -164,6 +164,8 @@ def run_campaign(args: argparse.Namespace) -> None:
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     cfg = make_config(manifests, data_dir, args.num_workers)
+    cache_root = args.signal_cache_dir.expanduser().resolve() if args.signal_cache_dir else None
+    cfg.signal_cache_dir = str(cache_root) if cache_root is not None else None
     sources = sorted([*ROOT.glob("src/**/*.py"), *ROOT.glob("configs/**/*.yaml"), ROOT / "run_patient_wsae_sweep.sh"])
     identity = {
         "protocol": 2,
@@ -172,6 +174,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         "data": OmegaConf.to_container(cfg.data, resolve=True),
         "feature": OmegaConf.to_container(cfg.feature, resolve=True),
         "supervised": OmegaConf.to_container(cfg.supervised, resolve=True),
+        "signal_cache_dir": str(cache_root) if cache_root is not None else None,
         "manifests": {
             name: digest(manifests / name)
             for name in ("windows_train.csv", "windows_val.csv", "windows_test.csv", "audit_provenance.json")
@@ -216,6 +219,16 @@ def run_campaign(args: argparse.Namespace) -> None:
         if len(frame) != count or frame.subject.nunique() != expected:
             raise ValueError(f"{split} manifest rows or patient counts changed during loading; regenerate audit")
     dump_window_metadata(output, datamodule)
+    if cache_root is not None:
+        cache_identity = {}
+        for split in ("train", "val"):
+            dataset = getattr(datamodule, f"data_{split}")
+            dataset.enable_signal_cache(cache_root)
+            cache_identity[split] = dataset.signal_cache.identity
+        cache_record = output / "signal_cache.json"
+        if cache_record.exists() and json.loads(cache_record.read_text()) != cache_identity:
+            raise ValueError("preprocessing or signal cache sources changed; use a new RUN_DIR")
+        save_json(cache_record, cache_identity)
     provenance = split_provenance(datamodule, cfg.data)
     loaders = datamodule.train_dataloader(), datamodule.val_dataloader()
     spec: SupervisedSpec = hydra.utils.instantiate(cfg.supervised, _convert_="all")
@@ -361,6 +374,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--stage", choices=("all", "prepare", "sweep"), default="all")
+    parser.add_argument("--signal-cache-dir", type=Path, help="persistent sensor cache shared by all seeds/arms")
     args = parser.parse_args()
     if args.num_workers < 0:
         parser.error("--num-workers must be nonnegative")

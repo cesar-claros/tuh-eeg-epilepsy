@@ -5,11 +5,12 @@
 # STAGE=prepare stops after the three pretrained/calibrated references.
 # STAGE=sweep requires those references; the default STAGE=all does both.
 # Every arm reuses patient_preparation.pt; setup scans, warm-up and probes run once per seed.
+# SIGNAL_CACHE_DIR shares preprocessed train/val segments across campaigns; prefer fast HPC storage.
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   echo "Usage: bash $0 /path/to/fresh_uncapped_audit"
-  echo "Environment: M, DATA_DIR, RUN_DIR, NUM_WORKERS=4, STAGE=all|prepare|sweep"
+  echo "Environment: M, DATA_DIR, RUN_DIR, SIGNAL_CACHE_DIR, NUM_WORKERS=4, STAGE=all|prepare|sweep"
   echo "Fixed protocol: seeds 0,1,2; 30/50/30 epochs; 32 probes; five relative weights."
   exit 0
 fi
@@ -40,12 +41,14 @@ elif [[ "$STAGE" == sweep ]]; then
   exit 2
 fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+SIGNAL_CACHE_DIR="${SIGNAL_CACHE_DIR:-$PWD/logs/waveform_patient/signal_cache}"
 if [[ -z ${RUN_DIR:-} ]]; then
   mkdir -p logs/waveform_patient
   RUN_DIR=$(mktemp -d "$PWD/logs/waveform_patient/P512_linear_sweep_XXXXXXXX")
 fi
 echo "Campaign: $RUN_DIR"
 echo "Seeds: 0 1 2; multipliers: 0.03 0.1 0.3 1 3; stage: $STAGE"
+echo "Preprocessed signals: $SIGNAL_CACHE_DIR"
 
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
@@ -57,10 +60,12 @@ python -m pytest -q \
   tests/test_waveform_sae.py tests/test_count_pool_segments.py \
   tests/test_patient_waveform_sweep.py tests/test_waveform_determinism.py \
   tests/test_shapeconv_sae.py \
+  tests/test_signal_cache.py \
   2>&1 | tee "$INVOCATION/tests.log"
 
 python -u src/run_patient_waveform_sweep.py \
   --manifests "$M" --data-dir "$DATA_DIR" --output "$RUN_DIR" \
+  --signal-cache-dir "$SIGNAL_CACHE_DIR" \
   --num-workers "$NUM_WORKERS" --stage "$STAGE" \
   2>&1 | tee "$INVOCATION/console.log"
 
