@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
@@ -25,6 +27,7 @@ from src.models.components.patient_waveform import (  # noqa: E402
     joint_backward,
 )
 from src.models.components.waveform_sae import WaveformSAE, WaveformSpec, WaveformTrainSpec  # noqa: E402
+from src.run_patient_waveform_cache_smoke import ValidationAudit, count_preprocessing  # noqa: E402
 
 
 def _source(folder: Path, prefix: str = "s") -> WindowDataset:
@@ -311,3 +314,100 @@ def test_unsupported_signal_mode_is_refused(tmp_path: Path) -> None:
     source.mode = "ica_clean"
     with pytest.raises(ValueError, match="sensor preprocessing"):
         source.enable_signal_cache(tmp_path / "cache")
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_cache_smoke_counts_worker_misses_without_changing_training(tmp_path: Path, workers: int) -> None:
+    """Diagnostic hooks preserve draws, objectives and selected atoms across worker counts."""
+    from src.models.components import patient_waveform
+
+    outcomes = []
+    with patch.object(WindowDataset, "_process", _processed):
+        for instrumented in (False, True):
+            sources = _source(tmp_path, "s"), _source(tmp_path, "v")
+            for source in sources:
+                source.enable_signal_cache(tmp_path / str(instrumented))
+            model = WaveformSAE(
+                WaveformSpec(n_atoms=2, atom_len=5, pool_len=4),
+                WaveformTrainSpec(
+                    epochs=2,
+                    sampling_unit="patient",
+                    patients_per_batch=2,
+                    segments_per_patient=2,
+                    segment_batch=2,
+                    init="patches",
+                    recenter_atoms=False,
+                ),
+                device="cpu",
+                random_state=7,
+            )
+            loaders = tuple(DataLoader(source, num_workers=workers) for source in sources)
+            provenance = {"train_subjects": ["sa", "sb", "sc"]}
+            if instrumented:
+                cache = sources[1].signal_cache
+                assert cache is not None
+                with count_preprocessing(cache.identity, workers) as counter:
+                    observer = ValidationAudit(sources[1], counter, tmp_path)
+                    with patch.object(patient_waveform, "summarize_patients", observer.summarize):
+                        model.fit_unsupervised(*loaders, provenance=provenance)
+                    observer.finish()
+                assert [row["preprocessing_calls"] for row in observer.records] == [7, 0]
+                assert [row["cache_entries_before"] for row in observer.records] == [0, 7]
+                assert all(row["cache_entries_after"] == 7 and row["verified"] for row in observer.records)
+                assert all(row["validation_seconds"] > 0 for row in observer.records)
+                assert (tmp_path / "cache_smoke_summary.json").is_file()
+                assert (tmp_path / "validation_cache_comparison.csv").is_file()
+            else:
+                model.fit_unsupervised(*loaders, provenance=provenance)
+            outcomes.append(model)
+    first, second = outcomes
+    torch.testing.assert_close(first.atoms, second.atoms, rtol=0, atol=0)
+    assert first.history == second.history
+    assert first.fit_meta["selected_epoch"] == second.fit_meta["selected_epoch"]
+    assert first.fit_meta["pretraining_draws"] == second.fit_meta["pretraining_draws"]
+
+
+@pytest.mark.parametrize("failure", ["prepopulated", "failed_load", "warm_rebuild"])
+def test_cache_smoke_refuses_incomplete_or_rebuilt_cache(tmp_path: Path, failure: str) -> None:
+    """A faster second pass alone cannot certify complete cache reuse."""
+    from src.models.components.patient_waveform import PatientSummary
+
+    source = _source(tmp_path)
+    source.enable_signal_cache(tmp_path / "cache")
+    assert source.signal_cache is not None
+    loader = DataLoader(source)
+
+    def process(dataset: WindowDataset, row: pd.Series) -> np.ndarray | None:
+        return None if failure == "failed_load" and row["start"] == 0 else _processed(dataset, row)
+
+    def evaluate(model: WaveformSAE, batches: DataLoader, description: str) -> PatientSummary:
+        for _ in batches:
+            pass
+        return cast(PatientSummary, SimpleNamespace(counts=torch.tensor([len(source)]), skipped=0))
+
+    with (
+        patch.object(WindowDataset, "_process", process),
+        count_preprocessing(source.signal_cache.identity, 0) as counter,
+    ):
+        observer = ValidationAudit(source, counter, tmp_path)
+        observer.evaluate = evaluate
+        epoch = 1
+        if failure == "prepopulated":
+            source[0]
+        elif failure == "warm_rebuild":
+            observer.summarize(cast(WaveformSAE, None), loader, "Reconstruction validation 1/2")
+            (source.signal_cache.directory / "00000000.npz").write_bytes(b"corrupt archive")
+            epoch = 2
+        with pytest.raises(RuntimeError, match="cache audit failed"):
+            observer.summarize(cast(WaveformSAE, None), loader, f"Reconstruction validation {epoch}/2")
+        assert observer.records[-1]["verified"] is False
+        with pytest.raises(RuntimeError, match="two verified"):
+            observer.finish()
+        assert not (tmp_path / "cache_smoke_summary.json").exists()
+
+
+def test_cache_smoke_refuses_uninstrumented_worker_context() -> None:
+    """Do not report zero preprocessing merely because spawn workers missed the hook."""
+    with patch("src.run_patient_waveform_cache_smoke.mp.get_start_method", return_value="spawn"):
+        with pytest.raises(RuntimeError, match="NUM_WORKERS=0"), count_preprocessing("unused", 2):
+            pass
