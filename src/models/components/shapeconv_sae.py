@@ -73,7 +73,7 @@ _LOWPASS_HALF = 16  # half-length of the atom band-limit FIR (33 taps)
 CHECKPOINT_NAME = "sae_state.pt"
 CHECKPOINT_FORMAT = 5
 # Spec fields absent from older checkpoints and the values that reproduce their behaviour.
-_SPEC_MIGRATIONS = {
+_SPEC_MIGRATIONS: dict[int, dict[str, Any]] = {
     2: {"pre_emphasis": "none", "ar_order": 8, "nms_half_width": None, "amp_min_relative": False, "ar_fit": "pooled"},
     3: {"ar_order": 8, "nms_half_width": None, "amp_min_relative": False, "ar_fit": "pooled"},
     4: {"ar_fit": "pooled"},
@@ -669,15 +669,29 @@ class ShapeConvSAE(nn.Module):
         return self._project(atoms)
 
     @staticmethod
+    def _row_median(x: torch.Tensor) -> torch.Tensor:
+        """Last-axis lower median, retaining the axis and propagating NaNs.
+
+        CUDA median with a dimension returns indices even when only values are
+        used, and strict determinism rejects that kernel. Stable sorting keeps
+        the same median value (including for even lengths) without that kernel.
+        """
+        if x.is_cuda and torch.are_deterministic_algorithms_enabled():
+            middle = (x.shape[-1] - 1) // 2
+            median = x.sort(dim=-1, stable=True).values[..., middle : middle + 1]
+            return median.masked_fill(x.isnan().any(dim=-1, keepdim=True), float("nan"))
+        return x.median(dim=-1, keepdim=True).values
+
+    @staticmethod
     def _robust_scale(x: torch.Tensor) -> torch.Tensor:
         """Center every row on its median, scale by 1.4826 * MAD, clip at +-20.
 
         A floor of 1 percent of the plain std keeps a mostly-flat row from
         exploding; an all-constant row maps to zeros.
         """
-        median = x.median(dim=-1, keepdim=True).values
+        median = ShapeConvSAE._row_median(x)
         centered = x - median
-        mad = centered.abs().median(dim=-1, keepdim=True).values * _MAD_TO_STD
+        mad = ShapeConvSAE._row_median(centered.abs()) * _MAD_TO_STD
         scale = torch.maximum(mad, 0.01 * centered.std(dim=-1, keepdim=True))
         return (centered / scale.clamp_min(_EPS)).clamp(-_CLIP, _CLIP)
 

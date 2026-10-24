@@ -55,7 +55,8 @@ INVOCATION=$(mktemp -d "$RUN_DIR/invocation_XXXXXXXX")
 python -m pytest -q \
   tests/test_patient_waveform.py tests/test_waveform_full_segments.py \
   tests/test_waveform_sae.py tests/test_count_pool_segments.py \
-  tests/test_patient_waveform_sweep.py \
+  tests/test_patient_waveform_sweep.py tests/test_waveform_determinism.py \
+  tests/test_shapeconv_sae.py \
   2>&1 | tee "$INVOCATION/tests.log"
 
 python -u src/run_patient_waveform_sweep.py \
