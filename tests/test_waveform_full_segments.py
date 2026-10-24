@@ -187,3 +187,39 @@ def test_full_training_and_validation_refuse_all_unusable_data() -> None:
         model.fit_unsupervised(loader, provenance={"train_subjects": ["synthetic"]})
     with pytest.raises(ValueError, match="no usable segments"):
         model._evaluate(loader)
+
+
+def test_full_fit_matches_independent_adam_update() -> None:
+    """Check actual parameter updates against a direct R=1 objective, independently of eventual convergence."""
+    spec = WaveformSpec(n_atoms=2, atom_len=5, pool_len=4, top_r=1)
+    schedule = WaveformTrainSpec(epochs=1, lr=1e-3, segment_batch=2, init="random", recenter_atoms=False)
+    model = WaveformSAE(spec, schedule, random_state=23, device="cpu")
+    signals = torch.randn(2, 2, 32, generator=torch.Generator().manual_seed(41))
+    loader = DataLoader(TensorDataset(signals, torch.zeros(2)), batch_size=2)
+
+    # Match the declared random initialization and its two unit normalizations;
+    # the reference below does not call _segment_step, _select or _decode.
+    initial = torch.randn(2, 2, 5, generator=torch.Generator().manual_seed(23))
+    initial = initial / torch.linalg.vector_norm(initial, dim=(1, 2), keepdim=True)
+    reference = nn.Parameter(initial / torch.linalg.vector_norm(initial, dim=(1, 2), keepdim=True))
+    before = reference.detach().clone()
+    optimizer = torch.optim.Adam([reference], lr=schedule.lr)
+    rows, valid = model._full_rows(signals)
+    assert bool(valid.all())
+    atoms = reference / torch.linalg.vector_norm(reference, dim=(1, 2), keepdim=True)
+    responses = F.conv1d(F.pad(rows, (2, 2)), atoms).relu()
+    amplitudes, positions = responses.max(-1, keepdim=True)
+    code = torch.zeros_like(responses).scatter(-1, positions, amplitudes)
+    reconstruction = torch.cat([F.conv_transpose1d(block, atoms)[..., 2:6] for block in code.split(4, dim=-1)], dim=-1)
+    loss = 0.5 * (rows - reconstruction).square().mean()
+    loss.backward()
+    assert reference.grad is not None and float(reference.grad.norm()) > 0
+    optimizer.step()
+    expected = reference.detach() / torch.linalg.vector_norm(reference.detach(), dim=(1, 2), keepdim=True)
+    assert not torch.allclose(before, expected)
+
+    model.fit_unsupervised(loader, provenance={"train_subjects": ["synthetic"]})
+
+    assert model.history[0]["n_steps"] == 1
+    assert model.history[0]["objective"] == pytest.approx(float(loss.detach()), rel=1e-6)
+    torch.testing.assert_close(model.atoms.detach(), expected, atol=2e-6, rtol=2e-5)
