@@ -4,6 +4,7 @@
 # RUN_DIR=/path/to/existing/campaign resumes completed stages after interruption.
 # STAGE=prepare stops after the three pretrained/calibrated references.
 # STAGE=sweep requires those references; the default STAGE=all does both.
+# Every arm reuses patient_preparation.pt; setup scans, warm-up and probes run once per seed.
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then

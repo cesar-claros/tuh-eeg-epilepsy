@@ -23,6 +23,7 @@ from src.models.components.patient_waveform import (  # noqa: E402
     PatientBatches,
     PatientDataset,
     PatientHead,
+    PatientPreparation,
     SupervisedSpec,
     _calibrate,
     fit_patient_supervised,
@@ -30,6 +31,7 @@ from src.models.components.patient_waveform import (  # noqa: E402
     load_patient_model,
     patient_loader,
     patient_means,
+    prepare_patient_supervised,
     reconstruction_backward,
     segment_values,
     summarize_patients,
@@ -219,7 +221,8 @@ def test_pretraining_patient_epochs_and_checkpoint(tmp_path: Path) -> None:
         _model().fit_unsupervised(DataLoader(source), DataLoader(source), {"train_subjects": ["sa", "sb", "sc"]})
 
 
-def test_supervised_stages_and_reload(tmp_path: Path) -> None:
+def _supervised_start() -> tuple[WaveformSAE, tuple[DataLoader, DataLoader]]:
+    """A fitted dictionary with guaranteed positive validation reconstruction gain."""
     source, validation = PlannedSignals(), PlannedSignals("v", seed=21)
     model = _model()
     # A single central delta reconstructs a selected positive sample, so the
@@ -231,14 +234,19 @@ def test_supervised_stages_and_reload(tmp_path: Path) -> None:
     model.fitted = True
     model.provenance = {"train_subjects": ["sa", "sb", "sc"]}
     model.fit_meta = {"train_spec": vars(model.train_spec)}
+    return model, (DataLoader(source), DataLoader(validation))
+
+
+def test_supervised_stages_and_reload(tmp_path: Path) -> None:
+    model, loaders = _supervised_start()
     spec = SupervisedSpec(warmup_epochs=2, joint_epochs=2, calibration_batches=2, ramp_epochs=1)
     original = model.atoms.detach().clone()
     with patch("src.models.components.patient_waveform._calibrate", return_value=(1.0, [{"ratio": 1.0}], [[0]])):
-        head, metrics = fit_patient_supervised(model, (DataLoader(source), DataLoader(validation)), spec, tmp_path)
+        head, metrics = fit_patient_supervised(model, loaders, spec, tmp_path)
     assert metrics["val_patient_auroc"] >= metrics["frozen_val_patient_auroc"]
     loaded, loaded_head = load_patient_model(tmp_path / "patient_model.pt")
     torch.testing.assert_close(loaded.atoms, model.atoms)
-    q = model(source.tensors[0]).detach()
+    q = model(loaders[0].dataset.tensors[0]).detach()
     torch.testing.assert_close(loaded_head(q), head(q))
     assert loaded.fit_meta["supervised"]["r0"] > 0
     if metrics["selected_joint_epoch"] == 0:
@@ -281,3 +289,123 @@ def test_gradient_calibration_changes_no_parameters() -> None:
     torch.testing.assert_close(atoms, model.atoms)
     for key in state:
         torch.testing.assert_close(state[key], head.state_dict()[key])
+
+
+@pytest.mark.parametrize("hidden_dims", [(), (3,)])
+@pytest.mark.parametrize("alpha", [0.1, 0.3])
+def test_reused_preparation_preserves_joint_gradients_and_draws(
+    tmp_path: Path, hidden_dims: tuple[int, ...], alpha: float
+) -> None:
+    """Cached and fresh setup give the same initial gradients, training curve and selected state."""
+    initial, loaders = _supervised_start()
+    spec = SupervisedSpec(
+        warmup_epochs=2, joint_epochs=2, calibration_batches=2, ramp_epochs=1, hidden_dims=hidden_dims
+    )
+    reference = tmp_path / "reference"
+    prepare_patient_supervised(initial, loaders, spec, reference)
+    prepared = PatientPreparation.load(reference / "patient_preparation.pt")
+    snapshot = deepcopy(prepared)
+    # A pooled cross-seed center may differ from this seed's calibrated center.
+    arm = replace(spec, lambda_center=1.3 * prepared.lambda_center, lambda_multiplier=alpha)
+    captured: list[list[torch.Tensor]] = []
+
+    def capture(
+        model: WaveformSAE, head: PatientHead, batch: tuple[torch.Tensor, ...], scales: tuple[float, float, float]
+    ) -> tuple[float, float]:
+        result = joint_backward(model, head, batch, scales)
+        if scales[0] > 0:  # Exclude the classification-only calibration probes.
+            assert model.atoms.grad is not None
+            captured.append(
+                [
+                    batch[3].clone(),
+                    model.atoms.detach().clone(),
+                    model.atoms.grad.clone(),
+                    *[p.detach().clone() for p in head.parameters()],
+                    *[p.grad.clone() for p in head.parameters() if p.grad is not None],
+                ]
+            )
+        return result
+
+    fresh, reused = deepcopy(initial), deepcopy(initial)
+    with patch("src.models.components.patient_waveform.joint_backward", side_effect=capture):
+        fresh_head, fresh_metrics = fit_patient_supervised(fresh, loaders, arm, tmp_path / "fresh")
+    fresh_steps, captured = captured, []
+    with (
+        patch("src.models.components.patient_waveform._warmup", side_effect=AssertionError("repeated warm-up")),
+        patch("src.models.components.patient_waveform._calibrate", side_effect=AssertionError("repeated calibration")),
+        patch("src.models.components.patient_waveform.summarize_patients", wraps=summarize_patients) as summaries,
+        patch("src.models.components.patient_waveform.joint_backward", side_effect=capture),
+    ):
+        reused_head, reused_metrics = fit_patient_supervised(reused, loaders, arm, tmp_path / "reused", prepared)
+    # Only per-epoch validation, selected-state validation and final training scores remain.
+    assert summaries.call_count == spec.joint_epochs + 2
+    assert len(captured) == len(fresh_steps) == 2 * spec.joint_epochs
+    for fresh_step, cached_step in zip(fresh_steps, captured):
+        for actual, expected in zip(cached_step, fresh_step):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert fresh_metrics == reused_metrics
+    torch.testing.assert_close(fresh.atoms, reused.atoms, rtol=0, atol=0)
+    for key, value in fresh_head.state_dict().items():
+        torch.testing.assert_close(value, reused_head.state_dict()[key], rtol=0, atol=0)
+    for name in ("patient_warmup.csv", "patient_gradient_calibration.csv", "patient_joint_training.csv"):
+        assert (tmp_path / "fresh" / name).read_bytes() == (tmp_path / "reused" / name).read_bytes()
+    fresh_state = torch.load(tmp_path / "fresh/patient_model.pt", weights_only=True)
+    reused_state = torch.load(tmp_path / "reused/patient_model.pt", weights_only=True)
+    assert fresh_state["joint_draws"] == reused_state["joint_draws"]
+    assert reused_state["probe_draws"] == prepared.probe_draws
+    assert reused_state["preparation_identity"] == prepared.identity
+    assert arm.lambda_center is not None
+    assert reused_metrics["lambda"] == arm.lambda_center * alpha
+    # Optimizer steps cannot mutate the seed reference or alias its head buffers.
+    torch.testing.assert_close(prepared.atoms, snapshot.atoms, rtol=0, atol=0)
+    for key, value in prepared.head.items():
+        torch.testing.assert_close(value, snapshot.head[key], rtol=0, atol=0)
+        assert reused_head.state_dict()[key].data_ptr() != value.data_ptr()
+
+
+@pytest.mark.parametrize(
+    "changed", ["atoms", "seed", "plan", "labels", "channels", "preprocessing", "sampling", "gamma"]
+)
+def test_reused_preparation_refuses_mismatches_without_signal_reads(tmp_path: Path, changed: str) -> None:
+    """Prevent stale statistics or heads from being paired with a different experiment."""
+    model, loaders = _supervised_start()
+    spec = SupervisedSpec(warmup_epochs=2, joint_epochs=1, calibration_batches=2, ramp_epochs=1)
+    prepared = prepare_patient_supervised(model, loaders, spec, tmp_path / "reference")
+    if changed == "atoms":
+        with torch.no_grad():
+            model.atoms.mul_(0.9)
+    elif changed == "seed":
+        model.random_state += 1
+    elif changed == "plan":
+        loaders[0].dataset.plan = loaders[0].dataset.plan.iloc[::-1].reset_index(drop=True)
+    elif changed == "labels":
+        loaders[0].dataset.plan.loc[6, "epilepsy"] = 0
+    elif changed == "channels":
+        loaders[0].dataset.target_channels = ["b", "a"]
+    elif changed == "preprocessing":
+        loaders[0].dataset.filter_freq = [1.0, 40.0]
+    elif changed == "sampling":
+        model.train_spec = replace(model.train_spec, segments_per_patient=1)
+    elif changed == "gamma":
+        spec = replace(spec, gamma=2 * spec.gamma)
+    with (
+        patch.object(PlannedSignals, "__getitem__", side_effect=AssertionError("unexpected signal read")),
+        pytest.raises(ValueError, match="preparation"),
+    ):
+        fit_patient_supervised(model, loaders, spec, tmp_path / "arm", prepared)
+
+
+def test_preparation_format_and_reference_guards(tmp_path: Path) -> None:
+    """An incompatible checkpoint or invalid frozen scale must not start training."""
+    path = tmp_path / "old_reference.pt"
+    torch.save({"format": 99}, path)
+    with pytest.raises(ValueError, match="unsupported patient preparation"):
+        PatientPreparation.load(path)
+    model, loaders = _supervised_start()
+    spec = SupervisedSpec(warmup_epochs=2, joint_epochs=1, calibration_batches=2, ramp_epochs=1)
+    prepared = prepare_patient_supervised(model, loaders, spec, tmp_path / "reference")
+    with pytest.raises(ValueError, match="baselines"):
+        fit_patient_supervised(model, loaders, spec, tmp_path / "bad_r0", replace(prepared, r0=float("nan")))
+    prepared.head["scale"].zero_()
+    with pytest.raises(ValueError, match="feature scales"):
+        fit_patient_supervised(model, loaders, spec, tmp_path / "bad_scale", prepared)

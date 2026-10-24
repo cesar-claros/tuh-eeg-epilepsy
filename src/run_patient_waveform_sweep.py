@@ -1,10 +1,10 @@
 """HPC orchestration of the P=512 linear patient sweep; reuse existing training functions.
 
 Pretrain once per seed, pool 32 gradient ratios from each of three references,
-then run five joint arms per seed with that fixed center. The existing joint API
-repeats full-pool summaries, head warm-up and calibration at each arm's start.
+then run five joint arms per seed with that fixed center. Every arm restores the
+same saved normalization, warmed-up head and calibration without setup scans.
 Strict deterministic execution and reference checks protect the paired starts.
-No training algorithm is replaced here. Test signals are never evaluated.
+The training objective and sampling are unchanged. Test signals are never evaluated.
 """
 
 from __future__ import annotations
@@ -34,22 +34,14 @@ import torch
 from hydra import compose, initialize_config_dir
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from sklearn.metrics import roc_auc_score
-from torch.utils.data import DataLoader
 
 ROOT = rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
 from src.models.components.patient_waveform import (  # noqa: E402
-    PatientHead,
+    PatientPreparation,
     SupervisedSpec,
-    _calibrate,
-    _check_splits,
-    _head_state,
-    _warmup,
     fit_patient_supervised,
-    patient_loader,
-    summarize_patients,
-    validate_supervised,
+    prepare_patient_supervised,
 )
 from src.models.components.waveform_sae import WaveformSAE  # noqa: E402
 from src.utils import check_split_disjoint, dump_window_metadata, split_provenance  # noqa: E402
@@ -161,48 +153,6 @@ def check_audit(manifests: Path) -> dict[str, Any]:
     return audit
 
 
-def prepare(
-    model: WaveformSAE, loaders: tuple[DataLoader, DataLoader], spec: SupervisedSpec, output: Path
-) -> dict[str, float]:
-    """Use the runner's preparation operations without taking any joint optimizer steps."""
-    validate_supervised(model, spec)
-    train = patient_loader(loaders[0], model, True)
-    train_full, val = patient_loader(loaders[0], model, False), patient_loader(loaders[1], model, False)
-    _check_splits(train, val, model.provenance)
-    if any(len(loader.dataset.labels.unique()) != 2 for loader in (train, val)):
-        raise ValueError("both classes are required in each train/validation patient pool")
-    if any(loader.dataset.target_len != 30720 for loader in loaders):
-        raise ValueError("expected complete 120-second segments at 256 Hz")
-    train_summary, val_summary = summarize_patients(model, train_full), summarize_patients(model, val)
-    r0 = float(train_summary.reconstruction.mean())
-    v0, zero = float(val_summary.reconstruction.mean()), float(val_summary.zero.mean())
-    if not math.isfinite(r0 + v0 + zero) or r0 <= 0 or zero <= v0:
-        raise ValueError("need positive r0 and positive pretrained validation reconstruction gain")
-    torch.manual_seed(model.random_state)
-    head = PatientHead(train_summary.features, spec.epsilon / 60, ())
-    warmup = _warmup(head, (train_summary, val_summary), (train, val), spec, model.random_state + 300000)
-    pl.DataFrame(warmup).write_csv(output / "patient_warmup.csv")
-    center, calibration, draws = _calibrate(model, head, train, spec, r0)
-    pl.DataFrame(calibration).write_csv(output / "patient_gradient_calibration.csv")
-    with torch.no_grad():
-        scores = head(val_summary.features).cpu().numpy()
-    frozen_auroc = float(roc_auc_score(val.dataset.labels.numpy(), scores))
-    pl.DataFrame({"subject": val.dataset.subjects, "label": val.dataset.labels.numpy(), "logit": scores}).write_csv(
-        output / "frozen_patient_scores_val.csv"
-    )
-    torch.save(
-        {"head": _head_state(head), "r0": r0, "probe_draws": draws, "frozen_val_patient_auroc": frozen_auroc},
-        output / "warmup_reference.pt",
-    )
-    return {
-        "r0": r0,
-        "val_reconstruction": v0,
-        "val_zero": zero,
-        "seed_lambda_center": center,
-        "frozen_val_patient_auroc": frozen_auroc,
-    }
-
-
 def run_campaign(args: argparse.Namespace) -> None:
     """Execute or resume complete stages; reject changed inputs instead of mixing experiments."""
     manifests, data_dir, output = args.manifests.resolve(), args.data_dir.resolve(), args.output.resolve()
@@ -216,7 +166,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     cfg = make_config(manifests, data_dir, args.num_workers)
     sources = sorted([*ROOT.glob("src/**/*.py"), *ROOT.glob("configs/**/*.yaml"), ROOT / "run_patient_wsae_sweep.sh"])
     identity = {
-        "protocol": 1,
+        "protocol": 2,
         "seeds": SEEDS,
         "multipliers": MULTIPLIERS,
         "data": OmegaConf.to_container(cfg.data, resolve=True),
@@ -289,7 +239,14 @@ def run_campaign(args: argparse.Namespace) -> None:
             started = time.perf_counter()
             model.fit_unsupervised(*loaders, provenance=provenance)
             model.save_artifacts(attempt)
-            metrics = prepare(model, loaders, spec, attempt)
+            preparation = prepare_patient_supervised(model, loaders, spec, attempt)
+            metrics = {
+                "r0": preparation.r0,
+                "val_reconstruction": preparation.val_reconstruction,
+                "val_zero": preparation.val_zero,
+                "seed_lambda_center": preparation.lambda_center,
+                "frozen_val_patient_auroc": preparation.frozen_val_patient_auroc,
+            }
             metrics.update(
                 seconds=time.perf_counter() - started, peak_allocated_bytes=torch.cuda.max_memory_allocated()
             )
@@ -300,12 +257,12 @@ def run_campaign(args: argparse.Namespace) -> None:
                     "sae_state.pt",
                     "patient_gradient_calibration.csv",
                     "patient_warmup.csv",
-                    "warmup_reference.pt",
+                    "patient_preparation.pt",
                     "frozen_patient_scores_val.csv",
                 ),
                 metrics,
             )
-            del model
+            del model, preparation
             gc.collect()
             torch.cuda.empty_cache()
             record = completed(folder)
@@ -326,6 +283,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         return
     summaries = []
     for seed, reference in zip(SEEDS, prepared):
+        preparation = PatientPreparation.load(reference / "patient_preparation.pt")
         for alpha in MULTIPLIERS:
             folder = output / f"seed_{seed}" / f"alpha_{alpha:g}"
             folder.mkdir(parents=True, exist_ok=True)
@@ -341,22 +299,21 @@ def run_campaign(args: argparse.Namespace) -> None:
                 arm_spec = replace(spec, lambda_center=center, lambda_multiplier=alpha)
                 torch.cuda.reset_peak_memory_stats()
                 started = time.perf_counter()
-                head, arm_metrics = fit_patient_supervised(model, loaders, arm_spec, attempt)
-                # The frozen buffers and repeated probes must match the common reference.
-                baseline = torch.load(reference / "warmup_reference.pt", map_location="cpu", weights_only=True)
+                head, arm_metrics = fit_patient_supervised(model, loaders, arm_spec, attempt, prepared=preparation)
+                # The saved setup is copied into each arm, never recalibrated or trained in place.
                 for name in ("mean", "scale"):
-                    torch.testing.assert_close(getattr(head, name).cpu(), baseline["head"][name], rtol=0, atol=0)
+                    torch.testing.assert_close(getattr(head, name).cpu(), preparation.head[name], rtol=0, atol=0)
                 if (
-                    arm_metrics["r0"] != baseline["r0"]
-                    or arm_metrics["frozen_val_patient_auroc"] != baseline["frozen_val_patient_auroc"]
+                    arm_metrics["r0"] != preparation.r0
+                    or arm_metrics["frozen_val_patient_auroc"] != preparation.frozen_val_patient_auroc
                 ):
-                    raise ValueError("arm's frozen starting reference differs from calibration; inspect determinism")
+                    raise ValueError("arm's frozen starting reference differs from the saved preparation")
                 if (reference / "patient_gradient_calibration.csv").read_bytes() != (
                     attempt / "patient_gradient_calibration.csv"
                 ).read_bytes():
-                    raise ValueError("repeated gradient probes differ from the reference; inspect determinism")
+                    raise ValueError("copied gradient calibration report differs from the reference")
                 checkpoint = torch.load(attempt / "patient_model.pt", map_location="cpu", weights_only=True)
-                if checkpoint["probe_draws"] != baseline["probe_draws"]:
+                if checkpoint["probe_draws"] != preparation.probe_draws:
                     raise ValueError("probe draws differ across paired arms")
                 previous = completed(output / f"seed_{seed}" / f"alpha_{MULTIPLIERS[0]:g}")
                 if previous is not None:
@@ -384,7 +341,7 @@ def run_campaign(args: argparse.Namespace) -> None:
                     ),
                     arm_metrics,
                 )
-                del model, head, checkpoint, baseline
+                del model, head, checkpoint
                 gc.collect()
                 torch.cuda.empty_cache()
                 record = completed(folder)

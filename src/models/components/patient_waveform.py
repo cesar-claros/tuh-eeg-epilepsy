@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
@@ -530,21 +532,57 @@ def _calibrate(
     return center, records, draws
 
 
-def fit_patient_supervised(
-    model: WaveformSAE,
-    loaders: tuple[DataLoader, DataLoader],
-    spec: SupervisedSpec,
-    output_dir: Path,
-) -> tuple[PatientHead, dict[str, float]]:
-    """Warm up and jointly fit one pooled BCE per patient; save a self-contained selected model.
+@dataclass(frozen=True)
+class PatientPreparation:
+    """CPU snapshot shared by lambda arms; restore copies, never train these tensors.
 
-    Pretraining must already be fitted. Full training bags fit frozen mu, s and
-    r0; full validation bags select checkpoints. No test signals are read. Joint
-    states must retain 90% of pretrained validation reconstruction gain. The
-    frozen head is retained unless an eligible joint epoch improves patient AUROC.
+    Includes dictionary identity, frozen normalization/head state, reconstruction
+    references, warm-up history, and calibration results. ``save``/``load`` use a
+    versioned weights-only-compatible payload, independent of Python class pickles.
     """
+
+    identity: str
+    atoms: torch.Tensor
+    head: dict[str, torch.Tensor]
+    segment_length: int
+    r0: float
+    val_reconstruction: float
+    val_zero: float
+    frozen_val_patient_auroc: float
+    lambda_center: float
+    warmup: list[dict[str, float]]
+    calibration: list[dict[str, float]]
+    probe_draws: list[list[int]]
+    val_subjects: list[str]
+    val_labels: torch.Tensor
+    val_logits: torch.Tensor
+
+    def save(self, path: str | Path) -> None:
+        """Save a reusable preparation to ``path`` without retaining any optimizer state."""
+        torch.save({"format": 1, "preparation": asdict(self)}, path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> PatientPreparation:
+        """Load a CPU preparation; raise ValueError for unsupported checkpoint formats."""
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+        if saved.get("format") != 1 or "preparation" not in saved:
+            raise ValueError("unsupported patient preparation checkpoint; prepare this seed again")
+        return cls(**saved["preparation"])
+
+    def write_reports(self, output_dir: Path) -> None:
+        """Copy the saved setup diagnostics to an arm directory without running setup."""
+        pl.DataFrame(self.warmup).write_csv(output_dir / "patient_warmup.csv")
+        pl.DataFrame(self.calibration).write_csv(output_dir / "patient_gradient_calibration.csv")
+        pl.DataFrame(
+            {"subject": self.val_subjects, "label": self.val_labels.numpy(), "logit": self.val_logits.numpy()}
+        ).write_csv(output_dir / "frozen_patient_scores_val.csv")
+
+
+def _supervised_loaders(
+    model: WaveformSAE, loaders: tuple[DataLoader, DataLoader], spec: SupervisedSpec
+) -> tuple[DataLoader, DataLoader, DataLoader, int]:
+    """Validate metadata and build patient loaders without reading a signal segment."""
     validate_supervised(model, spec)
-    output_dir.mkdir(parents=True, exist_ok=True)
     if not model.fitted:
         raise ValueError("pretrain the dictionary before fitting the patient classifier")
     train = patient_loader(loaders[0], model, True)
@@ -552,29 +590,200 @@ def fit_patient_supervised(
     _check_splits(train, val, model.provenance)
     if any(len(loader.dataset.labels.unique()) != 2 for loader in (train, val)):
         raise ValueError("both classes must occur in training and validation patients")
-    # Every segment has the same T in this dataset; refusing variable lengths also
-    # protects the epsilon/M convention used by training and inference.
-    length = int(loaders[0].dataset[0][0].shape[-1])
-    if any(getattr(loader.dataset, "target_len", None) != length for loader in loaders):
+    length = getattr(loaders[0].dataset, "target_len", None)
+    if (
+        not isinstance(length, int)
+        or length <= 0
+        or length % model.spec.pool_len
+        or getattr(loaders[1].dataset, "target_len", None) != length
+    ):
         raise ValueError("patient classification needs fixed equal target_len for training and validation segments")
+    return train, train_full, val, length
+
+
+def _preparation_identity(model: WaveformSAE, loaders: tuple[DataLoader, DataLoader], spec: SupervisedSpec) -> str:
+    """Bind setup to dictionary settings, seed, preprocessing and ordered labeled plans.
+
+    Lambda is the only allowed setting change. Metadata hashes cannot detect an
+    EDF modified in place; the corpus and preprocessing sidecars must stay fixed.
+    """
+    settings = asdict(spec)
+    for key in ("lambda_center", "lambda_multiplier"):
+        settings.pop(key)
+    datasets = []
+    for loader in loaders:
+        source = loader.dataset
+        plan = source.plan.to_json(orient="split", index=False, double_precision=15, default_handler=str)
+        attributes = (
+            "target_channels",
+            "target_len",
+            "target_sfreq",
+            "mode",
+            "bipolar",
+            "filter_freq",
+            "notch_freqs",
+            "interpolate_bad_channels",
+            "apply_aas",
+            "aas_fmax",
+            "rename_channels",
+            "set_montage",
+            "pick_channels",
+            "ica_keep_labels",
+            "brain_ic_min_gof",
+            "brain_ic_use_dipoles",
+            "ic_bag_max_k",
+            "ic_bag_sign_normalize",
+            "ic_bag_rank_by",
+            "target_cols",
+            "montages",
+        )
+        datasets.append(
+            {
+                "plan": hashlib.sha256(plan.encode()).hexdigest(),
+                "settings": {key: getattr(source, key, None) for key in attributes},
+            }
+        )
+    identity = {
+        "model": asdict(model.spec),
+        "dtype": str(model.atoms.dtype),
+        "sampling": asdict(model.train_spec),
+        "seed": model.random_state,
+        "provenance": model.provenance,
+        "supervised": settings,
+        "datasets": datasets,
+    }
+    # Match the existing manifest/campaign JSON convention without adding a runtime dependency.
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def prepare_patient_supervised(
+    model: WaveformSAE,
+    loaders: tuple[DataLoader, DataLoader],
+    spec: SupervisedSpec,
+    output_dir: Path,
+) -> PatientPreparation:
+    """Fit frozen normalization/head and calibrate once for a pretrained seed.
+
+    Args:
+        model: Fitted tied dictionary; its atoms remain unchanged.
+        loaders: Complete training and validation segment pools.
+        spec: Warm-up/calibration settings and the intended joint schedule.
+        output_dir: Destination for patient_preparation.pt and setup reports.
+
+    Returns:
+        CPU snapshot reusable across lambda centers/multipliers.
+
+    Raises:
+        ValueError: Incompatible metadata or degenerate reconstruction/gradient references.
+    """
+    train, train_full, val, length = _supervised_loaders(model, loaders, spec)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if int(loaders[0].dataset[0][0].shape[-1]) != length:
+        raise ValueError("loaded segment length disagrees with target_len")
     n_pool = length // model.spec.pool_len
     train_summary, val_summary = summarize_patients(model, train_full), summarize_patients(model, val)
     r0 = float(train_summary.reconstruction.mean())
     v0, zero = float(val_summary.reconstruction.mean()), float(val_summary.zero.mean())
-    if not math.isfinite(r0) or r0 <= 0 or zero <= v0:
+    if not math.isfinite(r0 + v0 + zero) or r0 <= 0 or zero <= v0:
         raise ValueError("need positive r0 and positive pretrained validation reconstruction gain")
     torch.manual_seed(model.random_state)
     head = PatientHead(train_summary.features, spec.epsilon / n_pool, tuple(spec.hidden_dims))
     warmup = _warmup(head, (train_summary, val_summary), (train, val), spec, model.random_state + 300000)
-    pl.DataFrame(warmup).write_csv(output_dir / "patient_warmup.csv")
-    labels = val.dataset.labels.numpy()
     with torch.no_grad():
-        frozen_scores = head(val_summary.features).cpu().numpy()
-    best_score = float(roc_auc_score(labels, frozen_scores))
-    frozen_score = best_score
-    best_atoms, best_head, selected_epoch = model.atoms.detach().clone(), _head_state(head), 0
+        frozen_scores = head(val_summary.features).cpu().clone()
+    frozen_score = float(roc_auc_score(val.dataset.labels.numpy(), frozen_scores.numpy()))
     center, calibration, probe_draws = _calibrate(model, head, train, spec, r0)
-    pl.DataFrame(calibration).write_csv(output_dir / "patient_gradient_calibration.csv")
+    prepared = PatientPreparation(
+        identity=_preparation_identity(model, loaders, spec),
+        atoms=model.atoms.detach().cpu().clone(),
+        head=_head_state(head),
+        segment_length=length,
+        r0=r0,
+        val_reconstruction=v0,
+        val_zero=zero,
+        frozen_val_patient_auroc=frozen_score,
+        lambda_center=center,
+        warmup=warmup,
+        calibration=calibration,
+        probe_draws=probe_draws,
+        val_subjects=val.dataset.subjects.tolist(),
+        val_labels=val.dataset.labels.cpu().clone(),
+        val_logits=frozen_scores,
+    )
+    prepared.save(output_dir / "patient_preparation.pt")
+    prepared.write_reports(output_dir)
+    return prepared
+
+
+def _restore_patient_head(
+    prepared: PatientPreparation, model: WaveformSAE, loaders: tuple[DataLoader, DataLoader], spec: SupervisedSpec
+) -> PatientHead:
+    """Refuse mismatched setup before reading signals, and restore independent head tensors."""
+    if prepared.identity != _preparation_identity(model, loaders, spec):
+        raise ValueError(
+            "patient preparation identity differs: settings, seed, provenance or labeled manifests changed"
+        )
+    if not torch.equal(model.atoms.detach().cpu(), prepared.atoms):
+        raise ValueError("patient preparation dictionary differs; reload this seed's D0 before each arm")
+    scalars = (
+        prepared.r0,
+        prepared.val_reconstruction,
+        prepared.val_zero,
+        prepared.frozen_val_patient_auroc,
+        prepared.lambda_center,
+    )
+    if (
+        not all(math.isfinite(value) for value in scalars)
+        or prepared.r0 <= 0
+        or prepared.lambda_center <= 0
+        or prepared.val_zero <= prepared.val_reconstruction
+        or not 0 <= prepared.frozen_val_patient_auroc <= 1
+    ):
+        raise ValueError("invalid patient preparation baselines")
+    if prepared.segment_length != loaders[0].dataset.target_len:
+        raise ValueError("patient preparation segment length differs")
+    if any(not bool(torch.isfinite(value).all()) for value in prepared.head.values()) or not bool(
+        (prepared.head["scale"] > 0).all()
+    ):
+        raise ValueError("invalid patient preparation head or feature scales")
+    # Construction does not fit statistics. Loading copies buffers/parameters;
+    # the preparation is unchanged even when an arm updates its own classifier.
+    with torch.random.fork_rng(devices=[]):
+        head = PatientHead(torch.zeros(2, model.spec.n_atoms, device=model.device), 1.0, tuple(spec.hidden_dims))
+    head.load_state_dict(prepared.head)
+    return head
+
+
+def fit_patient_supervised(
+    model: WaveformSAE,
+    loaders: tuple[DataLoader, DataLoader],
+    spec: SupervisedSpec,
+    output_dir: Path,
+    prepared: PatientPreparation | None = None,
+) -> tuple[PatientHead, dict[str, float]]:
+    """Jointly fit one pooled BCE per patient, optionally reusing a seed's frozen preparation.
+
+    ``prepared=None`` performs the usual full preparation first. Supplying a
+    preparation skips its full-pool scans, warm-up and probes. It must match the
+    current D0, metadata and all settings except lambda center/multiplier, or a
+    ValueError is raised before joint updates. Each call restores an independent
+    head and creates a fresh Adam optimizer. Sampling, loss, validation and
+    checkpoint selection are identical in both paths. Test signals are not read.
+    """
+    train, train_full, val, length = _supervised_loaders(model, loaders, spec)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reused_preparation = prepared is not None
+    if prepared is None:
+        prepared = prepare_patient_supervised(model, loaders, spec, output_dir)
+    head = _restore_patient_head(prepared, model, loaders, spec)
+    if reused_preparation:
+        prepared.write_reports(output_dir)
+    r0, v0, zero = prepared.r0, prepared.val_reconstruction, prepared.val_zero
+    frozen_score = best_score = prepared.frozen_val_patient_auroc
+    labels = val.dataset.labels.numpy()
+    best_atoms, best_head, selected_epoch = model.atoms.detach().clone(), _head_state(head), 0
+    center = prepared.lambda_center if spec.lambda_center is None else spec.lambda_center
+    probe_draws = prepared.probe_draws
     target_weight = center * spec.lambda_multiplier
     train.batch_sampler.seed = model.random_state
     optimizer = torch.optim.Adam(
@@ -640,6 +849,7 @@ def fit_patient_supervised(
         "selection_rule": "max eligible val patient AUROC including frozen control",
         "segment_length": length,
         "feature": "retained_amplitude_sum_over_M",
+        "preparation_identity": prepared.identity,
     }
     model.save_artifacts(output_dir)
     torch.save(
@@ -653,6 +863,7 @@ def fit_patient_supervised(
             "lambda": target_weight,
             "selected_epoch": selected_epoch,
             "segment_length": length,
+            "preparation_identity": prepared.identity,
             "probe_draws": probe_draws,
             "joint_draws": saved_draws,
         },
