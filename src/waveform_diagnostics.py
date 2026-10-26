@@ -23,9 +23,10 @@ subjects are not in the diagnosed held-out split, encodes every window of ``spli
   label, the total and strong rates by label, the atoms without a strong activation, the
   selected atoms.
 
-Under format-4 top-R selection, each atom has at most ``top_r`` activations per full
-encoded segment, with at most one per pooling window. When the budget saturates on
-equal-length segments, the plain rate is ``60 * sfreq * top_r / encoded_length``.
+Under format-5 selection, at most ``top_r`` atoms are active in each pooling window, and
+each atom at most once per window. An atom's plain rate counts the windows it wins and is
+at most ``60 * sfreq / pool_len`` per minute; the plain rates summed over atoms are at most
+``60 * sfreq * top_r / pool_len``, a bound reached when every window fills its budget.
 The strong rate uses coefficients above ``strong_factor`` times the atom's mean
 coefficient on the fit's validation windows. Both are activation rates on a development
 split, not event rates. Full-atom shapes and norms ignore window truncation; snippet

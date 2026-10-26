@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #*----------------------------------------------------------------------------*
-#* Waveform SAE, format-4 comparison (documentation/waveform_sae_implementation.md, section 6):
+#* Waveform SAE, format-5 comparison (documentation/waveform_sae_implementation.md, section 6):
 #* three dictionary fits on the SAME interpolated manifests, run one after the other.
 #*   P32_unit   pool_len=32,  atom_norm=unit
 #*   P32_free   pool_len=32,  atom_norm=free   (the loss may shrink atoms: the gain check)
 #*   P256_unit  pool_len=256, atom_norm=unit
-#* Set TOP_R to the window budget per atom per COMPLETE encoded segment. Its default of 1
-#* keeps at most one activation per atom per segment. P controls local competition and decoder
-#* boundaries. The encoder crosses those boundaries; reconstructed tails are discarded (including L>P).
+#* Set TOP_R to the number of atoms kept per POOLING WINDOW (the atoms compete within each
+#* window). Its default of 1 keeps at most one atom per window. P sets the competition window and
+#* the decoder boundaries. The encoder crosses those boundaries; reconstructed tails are discarded (including L>P).
 #* This driver no longer reproduces the format-1 screen or its activation-rate settings.
 #* K=64, L=80, 256 Hz, TCP bipolar, 0.1 Hz high-pass + 60 Hz notch, no differencing,
 #* data.interpolate_bad_channels=true; exclude native 400/512/1000 Hz recordings in both classes.
@@ -15,7 +15,7 @@
 #* Patient-first full-segment training, no energy-ratio gate. SEGMENT_BATCH is the GPU chunk size.
 #* No classifier, no test windows loaded. One output root per invocation (never reused).
 #* Per arm: <name>.log, sae_state.pt, sae_atoms*.npy, sae_training.csv, sae_atom_stats.csv,
-#* sae_channels.txt, windows_*.csv, .hydra/. The root holds sha.txt, dirty.diff, settings.txt,
+#* sae_won_windows.csv, sae_channels.txt, windows_*.csv, .hydra/. The root holds sha.txt, dirty.diff, settings.txt,
 #* failures.txt (empty = all arms ran) and done.txt.
 #*
 #* Run inside the HPC container, from the code/ repo root (GPU node); EDIT DATA_DIR and M or
@@ -52,7 +52,7 @@ arm_flags() {  # empty output = unknown arm
 
 # ---- preflight ---------------------------------------------------------------------
 [ -d "$DATA_DIR" ] || { echo "ERROR: DATA_DIR not found: $DATA_DIR"; exit 1; }
-[ "$TOP_R" = 1 ] || { echo "ERROR: patient training keeps TOP_R=1 per atom per segment"; exit 1; }
+[ "$TOP_R" = 1 ] || { echo "ERROR: patient training keeps TOP_R=1 atom per pooling window"; exit 1; }
 for split in train val test; do
   [ -f "$M/windows_$split.csv" ] || { echo "ERROR: M must hold windows_{train,val,test}.csv (got '$M')"; exit 1; }
 done

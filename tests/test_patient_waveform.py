@@ -202,7 +202,9 @@ def test_scaled_floor_and_forward_amplitude_features() -> None:
     _, feature, _, _ = segment_values(model, x)
     torch.testing.assert_close(model(x), feature)
     code, _ = model.encode(x)
-    assert bool(((code > 0).sum(-1) <= 1).all())
+    active = (code > 0).unflatten(-1, (-1, model.spec.pool_len))
+    assert bool((active.sum(-1) <= 1).all())  # one coefficient per atom and window
+    assert bool((active.sum((1, 3)) <= model.spec.top_r).all())  # R atoms per window
 
 
 def test_pretraining_patient_epochs_and_checkpoint(tmp_path: Path) -> None:
@@ -213,10 +215,17 @@ def test_pretraining_patient_epochs_and_checkpoint(tmp_path: Path) -> None:
     pd.testing.assert_frame_equal(plan, source.plan)
     assert all(record["patients_seen"] == 3 and record["segments_seen"] == 4 for record in model.history)
     assert all(record["n_steps"] == 2 for record in model.history)
+    assert all(0.0 <= record["n_atoms_never_won"] <= 2.0 for record in model.history)
+    won = model.won_windows
+    assert won["epoch"] == [1, 1, 2, 2] and won["atom"] == [0, 1, 0, 1]
+    assert won["scored_windows"] == [4 * 8] * 4  # four training segments of eight windows per epoch
+    assert sum(won["won_windows"][:2]) <= 4 * 8 and sum(won["won_windows"][2:]) <= 4 * 8
     assert model.fit_meta["manifest_segments"] == 7
+    assert model.fit_meta["selection_scope"] == "pooling_window"
     model.save_artifacts(tmp_path)
     restored = WaveformSAE(model.spec, model.train_spec, pretrained=tmp_path / "sae_state.pt", device="cpu")
     torch.testing.assert_close(restored.atoms, model.atoms)
+    assert restored.won_windows == won and (tmp_path / "sae_won_windows.csv").exists()
     with pytest.raises(ValueError, match="overlap"):
         _model().fit_unsupervised(DataLoader(source), DataLoader(source), {"train_subjects": ["sa", "sb", "sc"]})
 

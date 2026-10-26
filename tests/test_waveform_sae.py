@@ -3,14 +3,15 @@
 Runs under pytest (``uv run pytest tests/test_waveform_sae.py``) or as a script
 (``uv run python tests/test_waveform_sae.py``), which executes every ``test_*``
 function and exits 1 on the first failure. Covered: full-segment encoding and
-pooling-window synthesis, the worked selection example and both tie rules of
-the mathematics note, the support bound, the index conventions of equations (5) and
-(14) for an even atom length, the different encoder/decoder boundaries, the autograd
-gradient against equation (23), crop / full-window equality of the code and the
-reconstruction and gradients using current full-segment window decisions, the atom constraint, the shared row
-pipeline and the unusable-channel mask, the energy gate, grid alignment of the
-sampled crops, the masked loss, a small fit on planted multichannel waveforms, the
-checkpoint round trip with its refusals and the provenance guard, the spec and
+pooling-window synthesis, the worked selection example (equation 11) and both tie
+rules of the mathematics note, the per-window support bound, competition among atoms
+only within a window, the index conventions of equations (5) and (14) for an even atom
+length, the different encoder/decoder boundaries, the autograd gradient against
+equation (23), crop / full-window equality of the code, the reconstruction and the
+gradients with encoder context alone, the atom constraint, the shared row pipeline and
+the unusable-channel mask, the energy gate, grid alignment of the sampled crops, the
+masked loss, a small fit on planted multichannel waveforms with its won-window record,
+the checkpoint round trip with its refusals and the provenance guard, the spec and
 unfitted-module guards, atom re-centering, and the whole-window statistics against
 ``encode`` and ``decode``.
 """
@@ -67,7 +68,7 @@ def _expect_value_error(fn, message: str) -> None:
 
 
 def _full_encoder_window_decoder_reference(x: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """Full convolution, then one max and cropped transpose per window (odd L, R=M)."""
+    """Full convolution, then one max and cropped transpose per window (odd L, R=K)."""
     pad = (w.shape[-1] - 1) // 2
     rows = x.flatten(1, 2).transpose(1, 2)
     responses = F.conv1d(rows, w, padding=pad)
@@ -82,7 +83,7 @@ def _full_encoder_window_decoder_reference(x: torch.Tensor, w: torch.Tensor) -> 
 
 
 def test_all_windows_match_full_encoder_window_decoder_reference() -> None:
-    model = _model(n_atoms=4, atom_len=7, pool_len=10, top_r=6)
+    model = _model(n_atoms=4, atom_len=7, pool_len=10, top_r=4)
     x, w = _randn(2, 6, 10, 2), _randn(4, 2, 7, seed=1)
     y, code, x_hat = _full_encoder_window_decoder_reference(x, w)
     rows = x.reshape(2, 60, 2).permute(0, 2, 1)
@@ -118,13 +119,14 @@ def test_encoder_crosses_pooling_boundaries_and_is_not_decoder_adjoint() -> None
 
 
 def test_selection_worked_example() -> None:
-    y = torch.tensor([[[-3.0, 4.0, 1.0, 2.0, 1.0, 2.0, -1.0, 0.0, -2.0, 3.0, 7.0, 1.0]]])
+    # Equation (11): three atoms in one window of four samples; the rows are the atoms.
+    y = torch.tensor([[[-3.0, 4.0, 1.0, 2.0], [1.0, 2.0, -1.0, 0.0], [-2.0, 3.0, 7.0, 1.0]]])
     expected = torch.zeros_like(y)
-    expected[0, 0, 10] = 7.0
+    expected[0, 2, 2] = 7.0
     assert torch.equal(_model(top_r=1)._select(y), expected)
     expected[0, 0, 1] = 4.0
     assert torch.equal(_model(top_r=2)._select(y), expected)
-    expected[0, 0, 5] = 2.0
+    expected[0, 1, 1] = 2.0  # with R=K, atoms 0 and 1 both keep position 1
     assert torch.equal(_model(top_r=3)._select(y), expected)
 
 
@@ -150,12 +152,15 @@ def test_decoder_discards_tails_and_their_gradients() -> None:
 
 
 def test_selection_ties_keep_the_lowest_index() -> None:
-    y = torch.tensor([[[2.0, 5.0, 5.0, 1.0, 5.0, 5.0, 5.0, 0.0, -1.0, -2.0, -3.0, -4.0]]])
-    one = [0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    two = [0.0, 5.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert _model(top_r=1)._select(y).flatten().tolist() == one
-    assert _model(top_r=2)._select(y).flatten().tolist() == two
-    assert _model(top_r=3)._select(y).flatten().tolist() == two
+    # Every atom's window maximum is 5: the earliest position wins within an atom,
+    # and the lowest atom index wins at the top-R cut.
+    y = torch.tensor([[[2.0, 5.0, 5.0, 1.0], [5.0, 5.0, 0.0, 0.0], [5.0, 0.0, 0.0, 5.0]]])
+    one = [[0.0, 5.0, 0.0, 0.0], [0.0] * 4, [0.0] * 4]
+    two = [[0.0, 5.0, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0], [0.0] * 4]
+    three = [[0.0, 5.0, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0]]
+    assert _model(top_r=1)._select(y)[0].tolist() == one
+    assert _model(top_r=2)._select(y)[0].tolist() == two
+    assert _model(top_r=3)._select(y)[0].tolist() == three
     assert torch.equal(_model(top_r=2)._select(-torch.ones_like(y)), torch.zeros_like(y))
 
 
@@ -165,29 +170,45 @@ def test_support_bound_and_kept_values() -> None:
     code = model._select(y)
     windows, rectified = code.unflatten(-1, (-1, 8)), F.relu(y)
     assert bool((code >= 0).all())
-    assert int((windows > 0).sum(-1).max()) <= 1
-    assert int((code > 0).sum(-1).max()) <= 3
+    assert int((windows > 0).sum(-1).max()) <= 1  # one coefficient per atom and window
+    assert int((windows > 0).sum((1, 3)).max()) <= 3  # R atoms per window
     assert torch.equal(code[code > 0], rectified[code > 0])
-    best = rectified.unflatten(-1, (-1, 8)).amax(-1).topk(3, dim=-1).values.sum(-1)
-    assert torch.allclose(code.sum(-1), best)
+    best = rectified.unflatten(-1, (-1, 8)).amax(-1).topk(3, dim=1).values.sum(1)
+    assert torch.allclose(windows.sum((1, 3)), best)
 
 
-def test_selection_is_independent_across_segments_and_atoms() -> None:
+def test_selection_is_independent_across_segments_and_windows() -> None:
     model = _model(top_r=2)
     responses = _randn(3, 4, 24)
     joint = model._select(responses)
     for b in range(3):
-        for k in range(4):
-            assert torch.equal(joint[b : b + 1, k : k + 1], model._select(responses[b : b + 1, k : k + 1]))
+        for first in range(0, 24, 4):
+            window = slice(first, first + 4)
+            assert torch.equal(joint[b : b + 1, :, window], model._select(responses[b : b + 1, :, window]))
+
+
+def test_atoms_compete_only_within_their_window() -> None:
+    model = _model(n_atoms=2, atom_len=1, pool_len=4, top_r=1)
+    atoms = torch.eye(2, dtype=torch.float64).unsqueeze(-1)  # atom k reads channel k
+    rows = torch.zeros(1, 2, 32, dtype=torch.float64)
+    rows[0, 0, 5], rows[0, 1, 25] = 2.0, 10.0
+    code = model._select(model._responses(rows, atoms))
+    assert float(code[0, 0, 5]) == 2.0 and float(code[0, 1, 25]) == 10.0  # a distant window does not compete
+    rows[0, 1, 6] = 3.0  # a stronger atom in the same window
+    code = model._select(model._responses(rows, atoms))
+    assert float(code[0, 0].sum()) == 0.0 and float(code[0, 1, 6]) == 3.0
+    both = _model(n_atoms=2, atom_len=1, pool_len=4, top_r=2)._select(model._responses(rows, atoms))
+    assert float(both[0, 0, 5]) == 2.0 and float(both[0, 1, 6]) == 3.0
 
 
 def test_selection_gradients_only_reach_retained_positive_maxima() -> None:
     responses = torch.tensor(
-        [[[2.0, 5.0, 5.0, 1.0, 3.0, 1.0, 0.0, -1.0, -1.0, -2.0, 0.0, -3.0]]],
+        [[[2.0, 5.0, 5.0, 1.0, 0.0, -1.0, -1.0, -2.0], [3.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]],
         requires_grad=True,
     )
     code = _model(top_r=1)._select(responses)
     code.sum().backward()
+    assert code[0].tolist() == [[0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]
     assert torch.equal(responses.grad, (code > 0).to(responses.dtype))
 
 
@@ -255,7 +276,7 @@ def test_gradient_matches_equation_23() -> None:
 
 
 def test_crop_code_matches_full_window_code() -> None:
-    for atom_len, pool_len, top_r in ((1, 1, 1), (8, 4, 1), (7, 16, 2), (5, 8, 8), (80, 32, 2), (80, 4, 1)):
+    for atom_len, pool_len, top_r in ((1, 1, 1), (8, 4, 1), (7, 16, 2), (5, 8, 3), (80, 32, 2), (80, 4, 1)):
         model = _model(atom_len=atom_len, pool_len=pool_len, top_r=top_r)
         crop_len, margin = model.train_spec.crop_len, model.margin
         assert margin == max(model.padding)
@@ -263,13 +284,11 @@ def test_crop_code_matches_full_window_code() -> None:
         full_responses = model._responses(rows, atoms)
         full_code = model._select(full_responses)
         full_recon = model._decode(full_code, atoms)
-        model.chunk_windows = 1
         for start in range(0, rows.shape[-1] - crop_len + 1, pool_len):
             window, offset = torch.arange(2), torch.full((2,), start)
-            mask = model._crop_window_mask(rows, window, offset, atoms)
             inputs = model._crop_inputs(rows, window, offset)
             responses = model._center(model._responses(inputs, atoms))
-            code = model._select(responses, mask)
+            code = model._select(responses)  # selection is local: no full-segment pass
             center = slice(start, start + crop_len)
             assert torch.allclose(responses, full_responses[..., center], atol=1e-12)
             assert torch.allclose(code, full_code[..., center], atol=1e-12)
@@ -288,37 +307,21 @@ def test_crop_uses_real_context_across_both_scored_boundaries() -> None:
     assert float(model._responses(rows[..., 4:8], atoms).sum()) == 0.0
 
 
-def test_distant_competitor_suppresses_a_crop_candidate() -> None:
-    model = _model(n_atoms=1, atom_len=1, pool_len=4, crop_len=4)
-    rows = torch.zeros(1, 1, 32, dtype=torch.float64)
-    rows[0, 0, 5], rows[0, 0, 25] = 2.0, 10.0
-    atoms = torch.ones(1, 1, 1, dtype=torch.float64)
-    window, start = torch.tensor([0]), torch.tensor([4])
-    inputs = model._crop_inputs(rows, window, start)
-    local = model._select(model._responses(inputs, atoms))
-    mask = model._crop_window_mask(rows, window, start, atoms)
-    consistent = model._select(model._responses(inputs, atoms), mask)
-    assert float(model._center(local).sum()) == 2.0
-    assert float(model._center(consistent).sum()) == 0.0
-    assert not bool(mask.any())
-
-
-def test_crop_masks_recomputed_after_atom_changes() -> None:
-    model = _model(n_atoms=1, atom_len=1, pool_len=4, crop_len=4)
+def test_distant_competitor_does_not_suppress_a_crop_candidate() -> None:
+    model = _model(n_atoms=2, atom_len=1, pool_len=4, crop_len=4, top_r=1)
     rows = torch.zeros(1, 2, 32, dtype=torch.float64)
-    rows[0, 0, 5], rows[0, 1, 25] = 2.0, 10.0
+    rows[0, 0, 5], rows[0, 0, 25], rows[0, 1, 26] = 2.0, 10.0, 12.0
+    atoms = torch.eye(2, dtype=torch.float64).unsqueeze(-1)
     window, start = torch.tensor([0]), torch.tensor([4])
-    atoms = torch.tensor([[[1.0], [0.0]]], dtype=torch.float64)
-    before = model._crop_window_mask(rows, window, start, atoms)
-    atoms[0, 0, 0], atoms[0, 1, 0] = 0.0, 1.0
-    after = model._crop_window_mask(rows, window, start, atoms)
-    assert bool(before[0, 0, 0]) and not bool(after.any())
+    local = model._center(model._select(model._responses(model._crop_inputs(rows, window, start), atoms)))
+    full = model._select(model._responses(rows, atoms))
+    assert float(local[0, 0, 1]) == 2.0 and float(local.sum()) == 2.0
+    assert torch.equal(local, full[..., 4:8])
 
 
 def test_crop_loss_and_gradients_match_full_segment_scoring() -> None:
     for sampling, atom_len in (("random", 8), ("tiled", 8), ("random", 7), ("tiled", 7)):
-        model = _model(top_r=3, sampling=sampling, atom_len=atom_len)
-        model.chunk_windows = 1
+        model = _model(top_r=2, sampling=sampling, atom_len=atom_len)
         x = _randn(3, 3, 100)
         x[1, 2] = 0.0
         batch = model._crops(x, torch.Generator().manual_seed(2))
@@ -474,7 +477,7 @@ def test_empty_crop_plan_keeps_source_context_and_validation_works() -> None:
     totals, _, full, full_atom, _ = model._evaluate(loader)
     assert float(totals.sum()) == 0.0
     assert full is not None and full_atom is not None
-    assert float(full[4]) == 0.0 and float(full_atom[3].sum()) == 2.0
+    assert float(full[4]) == 0.0 and float(full_atom[3].sum()) == 2 * 8  # R=K=1: one slot in each of 8 windows
 
 
 def test_full_window_statistics_match_encode_decode() -> None:
@@ -492,24 +495,39 @@ def test_full_window_statistics_match_encode_decode() -> None:
     assert torch.allclose(totals[0], (rows - reconstruction).pow(2).sum())
     assert torch.allclose(totals[1], rows.pow(2).sum()) and float(totals[5]) == 5.0
     assert float(totals[6]) == 5 * (64 // 4) and float(totals[4]) == float((code > 0).sum())
-    assert torch.allclose(per_atom[2], (code > 0).sum(dim=(0, 2)).double())
+    won = (code > 0).sum(dim=(0, 2)).double()
+    assert torch.allclose(per_atom[2], won)
     table = model._atom_table(totals, per_atom)
-    assert torch.equal(per_atom[3], torch.full((3,), 5.0, dtype=torch.float64))
-    assert torch.allclose(table["positive_frac"], (code > 0).sum(dim=(0, 2)).double() / 5)
-    assert torch.allclose(table["active_window_frac"], (code > 0).sum(dim=(0, 2)).double() / (5 * 16))
+    assert float(per_atom[3].sum()) == 5 * 16  # R=1 slot in each of the 16 windows of 5 segments
+    assert torch.equal(table["won_windows"], won)
+    assert torch.allclose(table["positive_frac"], won / per_atom[3].clamp_min(1.0))
+    assert torch.allclose(table["active_window_frac"], won / (5 * 16))
 
 
-def test_usage_counts_only_selected_slots() -> None:
-    model = _model(n_atoms=1, top_r=2)
-    model.atoms = nn.Parameter(torch.ones(1, 1, 8))
-    responses = torch.tensor([[[1.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0, -1.0, -2.0, -3.0, -4.0]]])
-    selected = model._select_windows(F.relu(responses).unflatten(-1, (-1, 4)).amax(-1))
-    code = model._select(responses, selected)
+def test_usage_counts_won_windows_and_selected_slots() -> None:
+    model = _model(n_atoms=2, top_r=1)
+    model.atoms = nn.Parameter(torch.ones(2, 1, 8))
+    # Window 0: atom 0 wins; window 1: no positive candidate, atom 0 holds the slot with a zero;
+    # window 2: atom 1 wins.
+    responses = torch.tensor(
+        [
+            [
+                [1.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0, -1.0, -2.0, -3.0, -4.0],
+                [-1.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0, 0.0, 2.0, 0.0, 0.0],
+            ]
+        ]
+    )
+    code, selected = model._selection(responses)
+    assert selected[0].tolist() == [[True, True, False], [False, False, True]]
     totals, per_atom = model._statistics(torch.zeros_like(code), torch.zeros_like(code), code, selected)
     table = model._atom_table(totals, per_atom)
-    assert float(per_atom[2, 0]) == 1.0 and float(per_atom[3, 0]) == 2.0
-    assert float(table["positive_frac"][0]) == 0.5
-    assert torch.allclose(table["active_window_frac"], torch.tensor([1 / 3], dtype=torch.float64))
+    assert per_atom[2].tolist() == [1.0, 1.0] and per_atom[3].tolist() == [2.0, 1.0]
+    assert table["won_windows"].tolist() == [1.0, 1.0]
+    assert table["positive_frac"].tolist() == [0.5, 1.0]
+    assert torch.allclose(table["active_window_frac"], torch.full((2,), 1 / 3, dtype=torch.float64))
+    summary = model._won_window_summary(4, totals, per_atom)
+    assert summary == {"n_atoms_never_won": 0.0, "max_won_share": 0.5}
+    assert model.won_windows == {"epoch": [4, 4], "atom": [0, 1], "won_windows": [1, 1], "scored_windows": [3, 3]}
 
 
 def test_recentering_moves_edge_energy_to_the_center() -> None:
@@ -549,7 +567,7 @@ def _planted(seed: int, n_windows: int = 24) -> torch.Tensor:
 
 
 def _fitted(epochs: int) -> tuple[WaveformSAE, torch.Tensor]:
-    spec = WaveformSpec(n_atoms=2, atom_len=16, pool_len=32, top_r=8, pre_emphasis="none")
+    spec = WaveformSpec(n_atoms=2, atom_len=16, pool_len=32, top_r=1, pre_emphasis="none")
     train_spec = WaveformTrainSpec(epochs=epochs, lr=1e-2, segment_batch=4, init="random")
     model = WaveformSAE(spec=spec, train_spec=train_spec, random_state=0, device="cpu")
     x, x_val = _planted(1), _planted(2, n_windows=8)
@@ -589,8 +607,15 @@ def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
     assert torch.allclose(norms, torch.ones(2), atol=1e-5)
     assert 0.0 <= history[-1]["selected_zero_frac"] <= 1.0
     assert 0.0 < history[-1]["n_effective_atoms"] <= 2.0 + 1e-6
+    assert history[-1]["n_atoms_never_won"] in (0.0, 1.0) and 0.5 <= history[-1]["max_won_share"] <= 1.0
+    won = model.won_windows
+    assert won["epoch"] == [e for e in range(1, 31) for _ in range(2)] and won["atom"] == [0, 1] * 30
+    # R=1: each scored window has one positive winner unless every candidate is zero.
+    assert all(sum(won["won_windows"][2 * e : 2 * e + 2]) <= won["scored_windows"][2 * e] for e in range(30))
+    assert all(s == len(x) * 16 for s in won["scored_windows"])
+    assert model.atom_stats["won_windows"] and len(model.atom_stats["won_windows"]) == 2
     assert model.fit_meta["n_channels"] == 3 and model.fit_meta["margin"] == 8
-    assert model.fit_meta["selection_scope"] == "full_encoded_segment"
+    assert model.fit_meta["selection_scope"] == "pooling_window"
     assert model.fit_meta["scoring_scope"] == "full_encoded_segment"
     assert model.fit_meta["encoder_scope"] == "full_encoded_segment"
     assert model.fit_meta["decoder_scope"] == "pooling_window"
@@ -617,11 +642,13 @@ def test_checkpoint_round_trip_and_refusals() -> None:
         reloaded = WaveformSAE(spec=model.spec, device="cpu", pretrained=path)
         assert reloaded.fitted and reloaded.train_subjects == ["s1", "s2"]
         assert reloaded.history == model.history and reloaded.fit_meta == model.fit_meta
-        assert reloaded.atom_stats == model.atom_stats
+        assert reloaded.atom_stats == model.atom_stats and reloaded.won_windows == model.won_windows
         assert torch.equal(reloaded.encode(x[:2])[0], code)
         assert np.load(out / "sae_atoms.npy").shape == (2, 3, 16)
         assert np.load(out / "sae_atoms_signal.npy").shape == (2, 3, 16)
         assert (out / "sae_training.csv").exists() and (out / "sae_atom_stats.csv").exists()
+        won = pd.read_csv(out / "sae_won_windows.csv")
+        assert list(won.columns) == ["epoch", "atom", "won_windows", "scored_windows"] and len(won) == 2 * 2
         loader = DataLoader(TensorDataset(x, torch.zeros(len(x), dtype=torch.long)), batch_size=8)
         reloaded.fit_unsupervised(loader, provenance={"train_subjects": ["other"]})
         assert reloaded.train_subjects == ["s1", "s2"]
@@ -631,10 +658,11 @@ def test_checkpoint_round_trip_and_refusals() -> None:
             "test-subject overlap was not refused",
         )
         checkpoint = torch.load(path, weights_only=True)
-        assert checkpoint["format"] == 4
+        assert checkpoint["format"] == 5
         torch.save({**checkpoint, "format": 1}, out / "legacy.pt")
         torch.save({**checkpoint, "format": 2}, out / "cross_window.pt")
         torch.save({**checkpoint, "format": 3}, out / "isolated_encoder.pt")
+        torch.save({**checkpoint, "format": 4}, out / "window_selection.pt")
         torch.save({**checkpoint, "provenance": {}}, out / "bare.pt")
         torch.save({k: v for k, v in checkpoint.items() if k != "model"}, out / "untagged.pt")
         for spec, bad in (
@@ -643,6 +671,7 @@ def test_checkpoint_round_trip_and_refusals() -> None:
             (model.spec, out / "legacy.pt"),
             (model.spec, out / "cross_window.pt"),
             (model.spec, out / "isolated_encoder.pt"),
+            (model.spec, out / "window_selection.pt"),
             (replace(model.spec, pool_len=16), path),
             (replace(model.spec, pre_emphasis="diff"), path),
         ):
@@ -653,12 +682,19 @@ def test_checkpoint_round_trip_and_refusals() -> None:
 
 
 def test_spec_and_unfitted_guards() -> None:
-    for kwargs in ({"top_r": 0}, {"top_r": 1.5}, {"top_r": True}, {"pre_emphasis": "diff_ar"}, {"atom_norm": "max"}):
+    for kwargs in (
+        {"top_r": 0},
+        {"top_r": 1.5},
+        {"top_r": True},
+        {"top_r": 4},  # R > K: more atoms per window than the dictionary holds
+        {"pre_emphasis": "diff_ar"},
+        {"atom_norm": "max"},
+    ):
         _expect_value_error(lambda kwargs=kwargs: _model(**kwargs), f"{kwargs} was not refused")
     _expect_value_error(lambda: _model(crop_len=6), "a crop_len off the pooling grid was not refused")
-    assert _model(top_r=5)._select(_randn(1, 3, 24)).shape == (1, 3, 24)
-    _expect_value_error(lambda: _model(top_r=5)._select(_randn(1, 3, 16)), "R > M was not refused")
-    _expect_value_error(lambda: _model(top_r=5)._rows(_randn(1, 3, 19)), "R > trimmed M was not refused")
+    assert _model(top_r=3)._select(_randn(1, 3, 24)).shape == (1, 3, 24)
+    assert _model(top_r=3)._rows(_randn(1, 3, 5))[0].shape == (1, 3, 4)  # one window is enough for any R <= K
+    _expect_value_error(lambda: _model(top_r=2)._select(_randn(1, 1, 8)), "R > competing atoms was not refused")
     _expect_value_error(lambda: _model()._select(_randn(1, 3, 15)), "a partial pooling window was not refused")
     atoms = _randn(3, 3, 8)
     assert _model()._responses(_randn(1, 3, 15), atoms).shape == (1, 3, 15)

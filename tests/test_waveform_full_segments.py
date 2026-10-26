@@ -1,4 +1,4 @@
-"""Full-segment waveform training: coverage, global R=1, masked gradients and validation."""
+"""Full-segment waveform training: coverage, R=1 atom per pooling window, masked gradients and validation."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from src.models.components.waveform_sae import WaveformSAE, WaveformSpec, Wavefo
 
 
 def _model(train_spec: WaveformTrainSpec | None = None) -> WaveformSAE:
-    """Small full-segment model with the default one activation per atom/segment."""
+    """Small full-segment model with the default of one atom per pooling window."""
     return WaveformSAE(
         spec=WaveformSpec(n_atoms=3, atom_len=5, pool_len=4),
         train_spec=train_spec,
@@ -33,6 +33,15 @@ def _signals() -> torch.Tensor:
     signals[2, :, 24:] += 100.0
     signals[-1] = 0.0
     return signals
+
+
+def _one_atom_per_window(rectified: torch.Tensor, pool_len: int = 4) -> torch.Tensor:
+    """Reference R=1 code: per atom and window the first maximum, then the first maximal atom per window."""
+    windows = rectified.unflatten(-1, (-1, pool_len))
+    amplitudes, positions = windows.max(-1)
+    winner = torch.zeros_like(amplitudes, dtype=torch.bool).scatter(1, amplitudes.argmax(1, keepdim=True), True)
+    code = torch.zeros_like(windows).scatter(-1, positions.unsqueeze(-1), (amplitudes * winner).unsqueeze(-1))
+    return code.flatten(-2)
 
 
 def test_full_mode_defaults_and_no_energy_ratio_gate() -> None:
@@ -67,7 +76,7 @@ def test_full_mode_refuses_energy_gating_and_partial_pooling_windows() -> None:
 
 
 def test_full_step_matches_independent_r1_loss_and_gradients() -> None:
-    """A direct full-time argmax and per-window transpose convolution give the same loss/gradient."""
+    """A direct per-window atom competition and per-window transpose convolution give the same loss/gradient."""
     model = _model()
     rows = torch.randn(3, 2, 24, generator=torch.Generator().manual_seed(3), dtype=torch.float64)
     valid = torch.ones(3, 2, dtype=torch.bool)
@@ -80,8 +89,7 @@ def test_full_step_matches_independent_r1_loss_and_gradients() -> None:
 
     reference_atoms = atoms.detach().clone().requires_grad_()
     responses = F.conv1d(F.pad(rows, (2, 2)), reference_atoms)
-    amplitudes, positions = responses.relu().max(-1, keepdim=True)
-    code = torch.zeros_like(responses).scatter(-1, positions, amplitudes)
+    code = _one_atom_per_window(responses.relu())
     reconstruction = torch.cat(
         [
             F.conv_transpose1d(code[..., start : start + 4], reference_atoms)[..., 2:6]
@@ -96,23 +104,25 @@ def test_full_step_matches_independent_r1_loss_and_gradients() -> None:
     assert torch.allclose(loss, expected, atol=1e-12, rtol=1e-10)
     assert torch.allclose(gradient, reference_gradient, atol=1e-12, rtol=1e-10)
     assert torch.allclose(totals[0], residual.square().sum())
-    assert torch.equal(per_atom[3], torch.full((3,), 3.0, dtype=torch.float64))
-    assert bool((per_atom[2] <= 3).all())
+    assert float(per_atom[3].sum()) == 3 * 6  # one selected atom in each of the 6 windows of 3 segments
+    assert bool((per_atom[2] <= per_atom[3]).all())
+    assert torch.equal(per_atom[2], (code > 0).sum((0, 2)).double())
 
 
-def test_r1_competes_across_both_segment_ends() -> None:
-    """A stronger final-sample event suppresses an earlier event in the same segment only."""
-    model = WaveformSAE(spec=WaveformSpec(n_atoms=1, atom_len=1, pool_len=4), device="cpu")
-    rows = torch.zeros(2, 1, 32)
-    rows[0, 0, 0], rows[0, 0, -1] = 3.0, 7.0
-    rows[1, 0, 0], rows[1, 0, -1] = 9.0, 2.0
-    atoms = torch.ones(1, 1, 1, requires_grad=True)
+def test_r1_atoms_compete_within_windows_not_across_them() -> None:
+    """Events in different windows both survive; a stronger atom suppresses a weaker one in its window."""
+    model = WaveformSAE(spec=WaveformSpec(n_atoms=2, atom_len=1, pool_len=4), device="cpu")
+    rows = torch.zeros(2, 2, 32)
+    rows[0, 0, 0], rows[0, 0, -1] = 3.0, 7.0  # atom 0 at both segment ends: different windows
+    rows[1, 0, 0], rows[1, 1, 1] = 9.0, 2.0  # atoms 0 and 1 in the same window
+    atoms = torch.eye(2).unsqueeze(-1).requires_grad_()  # atom k reads channel k
 
-    loss, totals, per_atom = model._segment_step(rows, torch.ones(2, 1, dtype=torch.bool), atoms)
+    loss, totals, per_atom = model._segment_step(rows, torch.ones(2, 2, dtype=torch.bool), atoms)
 
-    assert torch.allclose(loss, torch.tensor(0.5 * (3.0**2 + 2.0**2) / 64))
-    assert float(totals[4]) == 2.0
-    assert per_atom[2:].flatten().tolist() == [2.0, 2.0]
+    assert torch.allclose(loss, torch.tensor(0.5 * 2.0**2 / 128))
+    assert float(totals[4]) == 3.0
+    assert per_atom[2].tolist() == [3.0, 0.0]  # won windows
+    assert per_atom[3].tolist() == [16.0, 0.0]  # empty windows select atom 0 with a zero (lowest index)
 
 
 def test_fit_scores_every_usable_segment_once_without_crop_or_gate_calls() -> None:
@@ -207,9 +217,7 @@ def test_full_fit_matches_independent_adam_update() -> None:
     rows, valid = model._full_rows(signals)
     assert bool(valid.all())
     atoms = reference / torch.linalg.vector_norm(reference, dim=(1, 2), keepdim=True)
-    responses = F.conv1d(F.pad(rows, (2, 2)), atoms).relu()
-    amplitudes, positions = responses.max(-1, keepdim=True)
-    code = torch.zeros_like(responses).scatter(-1, positions, amplitudes)
+    code = _one_atom_per_window(F.conv1d(F.pad(rows, (2, 2)), atoms).relu())
     reconstruction = torch.cat([F.conv_transpose1d(block, atoms)[..., 2:6] for block in code.split(4, dim=-1)], dim=-1)
     loss = 0.5 * (rows - reconstruction).square().mean()
     loss.backward()

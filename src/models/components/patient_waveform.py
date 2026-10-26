@@ -124,7 +124,7 @@ def segment_values(
     """
     rows, valid = model._full_rows(x)
     atoms = model._dictionary()
-    code = model._select(model._responses(rows, atoms))
+    code, selected = model._selection(model._responses(rows, atoms))
     reconstruction = model._decode(code, atoms) * valid.unsqueeze(-1)
     denominator = (2 * valid.sum(-1) * rows.shape[-1]).clamp_min(1)
     loss = (rows - reconstruction).square().sum((1, 2)) / denominator
@@ -133,10 +133,7 @@ def segment_values(
     if statistics is not None:
         with torch.no_grad():
             usable = valid.any(-1)
-            candidates = code[usable].unflatten(-1, (-1, model.spec.pool_len)).amax(-1)
-            totals, per_atom = model._statistics(
-                rows[usable], reconstruction[usable], code[usable], model._select_windows(candidates)
-            )
+            totals, per_atom = model._statistics(rows[usable], reconstruction[usable], code[usable], selected[usable])
             statistics[0].add_(totals)
             statistics[1].add_(per_atom)
     return loss, features, zero, valid.any(-1)
@@ -247,13 +244,22 @@ def _batch_weights(model: WaveformSAE, x: torch.Tensor, patient: torch.Tensor) -
     return inverse, weights
 
 
-def reconstruction_backward(model: WaveformSAE, x: torch.Tensor, patient: torch.Tensor) -> tuple[float, int]:
-    """Accumulate the mean-of-patient-means gradient in segment chunks; perform no optimizer step."""
+def reconstruction_backward(
+    model: WaveformSAE,
+    x: torch.Tensor,
+    patient: torch.Tensor,
+    statistics: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> tuple[float, int]:
+    """Accumulate the mean-of-patient-means gradient in segment chunks; perform no optimizer step.
+
+    With ``statistics``, also add the summed statistics of the usable segments
+    (``WaveformSAE._statistics``, no gradient), including the won windows per atom.
+    """
     _, weights = _batch_weights(model, x, patient)
     total = 0.0
     for start in range(0, len(x), model.train_spec.segment_batch):
         stop = start + model.train_spec.segment_batch
-        losses, _, _, _ = segment_values(model, x[start:stop])
+        losses, _, _, _ = segment_values(model, x[start:stop], statistics)
         loss = (losses * weights[start:stop]).sum()
         loss.backward()
         total += float(loss.detach())
@@ -279,15 +285,20 @@ def fit_patient_reconstruction(
     best, best_atoms, best_epoch = math.inf, None, 0
     best_summary = None
     model.history = []
+    model.won_windows = {}
     saved_draws: list[list[list[int]]] = []
     for epoch in range(spec.epochs):
         epoch_started = time.perf_counter()
         train.batch_sampler.epoch = epoch
         total, patients, seen, skipped, steps = 0.0, 0, 0, 0, 0
         epoch_draws = []
+        statistics = (
+            torch.zeros(7, dtype=torch.float64, device=model.device),
+            torch.zeros(4, model.spec.n_atoms, dtype=torch.float64, device=model.device),
+        )
         for x, _, patient, indices in tqdm(train, desc=f"Patient reconstruction {epoch + 1}/{spec.epochs}"):
             optimizer.zero_grad(set_to_none=True)
-            loss, invalid = reconstruction_backward(model, x, patient)
+            loss, invalid = reconstruction_backward(model, x, patient, statistics)
             optimizer.step()
             with torch.no_grad():
                 model.atoms.copy_(model._constrain(model.atoms))
@@ -327,6 +338,7 @@ def fit_patient_reconstruction(
             "val_segments_skipped": float(summary.skipped) if summary is not None else math.nan,
             "n_steps": float(steps),
             "n_recentered": float(moved),
+            **model._won_window_summary(epoch + 1, *statistics),
         }
         model.history.append(record)
         saved_draws.append(epoch_draws)
@@ -351,7 +363,7 @@ def fit_patient_reconstruction(
         "sampling_unit": "patient",
         "objective_reduction": "mean_patients_mean_segments_mean_usable_samples",
         "scoring_scope": "full_encoded_segment",
-        "selection_scope": "full_encoded_segment",
+        "selection_scope": "pooling_window",
         "encoder_scope": "full_encoded_segment",
         "decoder_scope": "pooling_window",
         "n_channels": int(model.atoms.shape[1]),
@@ -966,7 +978,10 @@ def load_patient_model(path: str | Path, device: str = "cpu") -> tuple[WaveformS
         or dictionary.get("model") != MODEL_TAG
         or dictionary.get("format") != CHECKPOINT_FORMAT
     ):
-        raise ValueError("unsupported patient waveform checkpoint")
+        raise ValueError(
+            f"unsupported patient waveform checkpoint (dictionary format {dictionary.get('format')!r}; "
+            f"this code reads format {CHECKPOINT_FORMAT}, top_r atoms per pooling window)"
+        )
     model = WaveformSAE(
         WaveformSpec(**dictionary["spec"]),
         device=device,
@@ -975,6 +990,7 @@ def load_patient_model(path: str | Path, device: str = "cpu") -> tuple[WaveformS
     model.atoms = nn.Parameter(dictionary["atoms"].to(model.device))
     model.fit_meta, model.provenance = dictionary["fit"], dictionary["provenance"]
     model.history, model.atom_stats = dictionary["history"], dictionary["atom_stats"]
+    model.won_windows = dictionary.get("won_windows") or {}
     model.fitted = True
     model.validate_artifact()
     head = PatientHead(
