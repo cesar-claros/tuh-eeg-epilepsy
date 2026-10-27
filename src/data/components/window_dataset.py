@@ -258,7 +258,8 @@ def _harmonize_one(
 
     Per-window version of the eager global harmonization. Returns ``None`` if a
     target channel is missing (the eager intersection guarantees it is present for
-    ``raw``, so this only guards against surprises).
+    ``raw``, so this only guards against surprises). Resampling is polyphase: MNE's
+    default FFT method shifts a 250 Hz segment by about 2 ms and depends on its length.
     """
     idx_map = {name: i for i, name in enumerate(ch_names)}
     try:
@@ -267,7 +268,9 @@ def _harmonize_one(
         return None
     data = data[indices, :]
     if not np.isclose(sfreq, target_sfreq):
-        data = mne.filter.resample(data, up=target_sfreq, down=sfreq, axis=-1)
+        data = mne.filter.resample(
+            data, up=target_sfreq, down=sfreq, axis=-1, method='polyphase', verbose='ERROR'
+        )
     cur = data.shape[1]
     if cur < target_len:
         pad = np.zeros((data.shape[0], target_len - cur), dtype=data.dtype)
@@ -453,9 +456,12 @@ class WindowDataset(Dataset):
                 sfreq = raw.info['sfreq']
                 if pad > 0.0:  # trim the filter margin back to the exact window
                     if resample:
-                        # Resample the padded crop, so the resampling edge effects fall in the margin
-                        # that is trimmed, not at the window edges (_harmonize_one then skips it).
-                        data = mne.filter.resample(data, up=self.target_sfreq, down=sfreq, axis=-1)
+                        # Resample the padded crop, so no resampling edge falls inside the window
+                        # (_harmonize_one then skips it). Polyphase resampling is local and keeps the
+                        # sample times; MNE's default FFT method shifts 250 Hz data by about 2 ms.
+                        data = mne.filter.resample(
+                            data, up=self.target_sfreq, down=sfreq, axis=-1, method='polyphase', verbose='ERROR'
+                        )
                         sfreq = self.target_sfreq
                     i0 = int(round(left * sfreq))
                     win_n = int(round((row['end'] - row['start']) * sfreq))
