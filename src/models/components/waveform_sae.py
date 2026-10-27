@@ -294,8 +294,9 @@ class WaveformSAE(nn.Module):
             value = getattr(train_spec, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if train_spec.sampling_unit == "patient" and (train_spec.crop_sampling != "full" or spec.top_r != 1):
-            raise ValueError("patient sampling requires complete segments and top_r=1")
+        if train_spec.sampling_unit == "patient" and train_spec.crop_sampling != "full":
+            # Any top_r works for patient reconstruction; joint training keeps R=1 (validate_supervised).
+            raise ValueError("patient sampling requires complete segments (crop_sampling=full)")
         for name, value, allowed in (
             ("spec.pre_emphasis", spec.pre_emphasis, _PRE_EMPHASIS),
             ("spec.atom_norm", spec.atom_norm, _ATOM_NORMS),

@@ -93,8 +93,36 @@ class ArmResult:
     never_won_rising: bool
 
 
+def selected_readout(folder: Path) -> dict[str, Any]:
+    """Readout of one finished arm at its selected epoch (minimum ``val_objective``).
+
+    Reads ``sae_training.csv`` and ``sae_atom_stats.csv``. Won-window columns exist for format 5
+    only; their readouts are NaN (and ``never_won_rising`` false) otherwise.
+    """
+    history = pl.read_csv(folder / "sae_training.csv")
+    stats = pl.read_csv(folder / "sae_atom_stats.csv")
+    selected = history.row(int(history["val_objective"].arg_min()), named=True)
+    share = stats["energy_share"].to_numpy()
+    total = float((share**2).sum())
+    never_won = history["n_atoms_never_won"].to_list() if "n_atoms_never_won" in history.columns else []
+    shares = history["max_won_share"].to_list() if "max_won_share" in history.columns else []
+    tail = never_won[-RISING_EPOCHS:]
+    return {
+        "epochs": history.height,
+        "selected_epoch": int(selected["epoch"]),
+        "val_objective": float(selected["val_objective"]),
+        "val_explained": 1.0 - float(selected["val_full_residual_frac"]),
+        "val_gain": float(selected["val_full_gain"]),
+        "n_effective_atoms": 1.0 / total if total > 0 else 0.0,
+        "val_atoms_never_won": float((stats["won_windows"] == 0).sum()) if "won_windows" in stats.columns else math.nan,
+        "never_won_last": float(never_won[-1]) if never_won else math.nan,
+        "max_won_share_last": float(shares[-1]) if shares else math.nan,
+        "never_won_rising": len(tail) == RISING_EPOCHS and all(a < b for a, b in zip(tail, tail[1:])),
+    }
+
+
 def read_arm(folder: Path) -> ArmResult:
-    """Read ``sae_training.csv`` and ``sae_atom_stats.csv`` of one finished arm.
+    """Read one finished probe arm.
 
     Raises
     ------
@@ -104,30 +132,13 @@ def read_arm(folder: Path) -> ArmResult:
     match = ARM_PATTERN.match(folder.name)
     if match is None:
         raise ValueError(f"not a probe arm directory: {folder}")
-    history = pl.read_csv(folder / "sae_training.csv")
-    stats = pl.read_csv(folder / "sae_atom_stats.csv")
-    selected = history.row(int(history["val_objective"].arg_min()), named=True)
-    share = stats["energy_share"].to_numpy()
-    total = float((share**2).sum())
-    never_won = history["n_atoms_never_won"].to_list() if "n_atoms_never_won" in history.columns else []
-    shares = history["max_won_share"].to_list() if "max_won_share" in history.columns else []
-    tail = never_won[-RISING_EPOCHS:]
     return ArmResult(
         arm=folder.name,
         rule=match["rule"],
         top_r=int(match["r"]),
         frozen=match["frozen"] is not None,
         seed=int(match["seed"]),
-        epochs=history.height,
-        selected_epoch=int(selected["epoch"]),
-        val_objective=float(selected["val_objective"]),
-        val_explained=1.0 - float(selected["val_full_residual_frac"]),
-        val_gain=float(selected["val_full_gain"]),
-        n_effective_atoms=1.0 / total if total > 0 else 0.0,
-        val_atoms_never_won=float((stats["won_windows"] == 0).sum()) if "won_windows" in stats.columns else math.nan,
-        never_won_last=float(never_won[-1]) if never_won else math.nan,
-        max_won_share_last=float(shares[-1]) if shares else math.nan,
-        never_won_rising=len(tail) == RISING_EPOCHS and all(a < b for a, b in zip(tail, tail[1:])),
+        **selected_readout(folder),
     )
 
 
@@ -257,6 +268,10 @@ def run_arm(args: argparse.Namespace) -> None:
     cfg.seed, cfg.feature.random_state = args.seed, args.seed
     cfg.feature.spec.top_r = args.top_r
     cfg.feature.train_spec.epochs = args.epochs
+    if getattr(args, "n_atoms", None) is not None:
+        cfg.feature.spec.n_atoms = args.n_atoms
+    if getattr(args, "init", None) is not None:
+        cfg.feature.train_spec.init = args.init
     if args.lr is not None:
         cfg.feature.train_spec.lr = args.lr
     cfg.supervised = None
@@ -293,6 +308,8 @@ def run_arm(args: argparse.Namespace) -> None:
             "checkpoint_format": waveform_sae.CHECKPOINT_FORMAT,
             "seed": args.seed,
             "top_r": args.top_r,
+            "n_atoms": int(cfg.feature.spec.n_atoms),
+            "init": str(cfg.feature.train_spec.init),
             "epochs": args.epochs,
             "lr": float(cfg.feature.train_spec.lr),
             "audit": audit,
@@ -306,7 +323,8 @@ def run_arm(args: argparse.Namespace) -> None:
     lightning.seed_everything(args.seed, workers=True)
     model = hydra.utils.instantiate(cfg.feature)
     logger.info(
-        f"Probe arm {output.name}: format {waveform_sae.CHECKPOINT_FORMAT}, R={args.top_r}, seed {args.seed}, "
+        f"Arm {output.name}: format {waveform_sae.CHECKPOINT_FORMAT}, K={cfg.feature.spec.n_atoms}, R={args.top_r}, "
+        f"init {cfg.feature.train_spec.init}, seed {args.seed}, "
         f"{args.epochs} epoch(s), lr {cfg.feature.train_spec.lr}. Test signals are not evaluated."
     )
     model.fit_unsupervised(

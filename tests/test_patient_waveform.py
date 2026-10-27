@@ -262,6 +262,14 @@ def test_supervised_stages_and_reload(tmp_path: Path) -> None:
         torch.testing.assert_close(model.atoms, original)
 
 
+def test_patient_reconstruction_accepts_more_than_one_atom_per_window() -> None:
+    """R>1 is a reconstruction setting under patient sampling; only joint patient training keeps R=1."""
+    spec = WaveformSpec(n_atoms=2, atom_len=5, pool_len=4, top_r=2)
+    assert WaveformSAE(spec, WaveformTrainSpec(sampling_unit="patient"), device="cpu").spec.top_r == 2
+    with pytest.raises(ValueError, match="complete segments"):
+        WaveformSAE(spec, WaveformTrainSpec(sampling_unit="patient", crop_sampling="random"), device="cpu")
+
+
 def test_supervised_configuration_and_guards() -> None:
     config_dir = str(Path(__file__).resolve().parents[1] / "configs")
     with initialize_config_dir(version_base="1.3", config_dir=config_dir):
