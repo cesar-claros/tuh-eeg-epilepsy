@@ -332,12 +332,16 @@ def measure(args: argparse.Namespace) -> None:
 
     manifests, output = args.manifests.resolve(), args.output.resolve()
     audit = check_audit(manifests)
+    if audit["skip_start_s"] != 0:
+        raise ValueError(
+            "the start transient is measured on the offset-0 reference audit, whose first windows start at 0 s"
+        )
     cache_root = args.signal_cache_dir.expanduser().resolve()
     if not cache_root.is_dir():
         raise ValueError(f"signal cache root not found: {cache_root}")
     existing = {p.name for p in cache_root.iterdir() if p.is_dir()}
     output.mkdir(parents=True, exist_ok=False)
-    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers)
+    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
     cfg.supervised = None
     datamodule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()

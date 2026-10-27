@@ -165,7 +165,7 @@ def run_smoke(args: argparse.Namespace) -> None:
     cache_root.mkdir(parents=True, exist_ok=False)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = False, True
-    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers)
+    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
     cfg.seed, cfg.feature.random_state = 0, 0
     cfg.feature.train_spec.epochs, cfg.supervised = 2, None
     cfg.signal_cache_dir = str(cache_root)

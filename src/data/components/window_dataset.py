@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -368,6 +369,11 @@ class WindowDataset(Dataset):
                 raw.info['sfreq'], self.filter_freq, self.notch_freqs,
                 minimum_seconds=TUHEEGEpilepsy._FILTER_PAD_SEC,
             ) if sensor_filter else 0.0
+            resample = not np.isclose(raw.info['sfreq'], self.target_sfreq)
+            if pad > 0.0 and resample:
+                # Whole seconds: with window starts on whole seconds, the trim below then falls on a
+                # sample of both the native and the target rate.
+                pad = float(math.ceil(pad))
             rec_end = (raw.n_times - 1) / raw.info['sfreq']
             tmin = max(0.0, row['start'] - pad)
             tmax = min(rec_end, row['end'] + pad)
@@ -446,6 +452,11 @@ class WindowDataset(Dataset):
                 ch_names = raw.ch_names
                 sfreq = raw.info['sfreq']
                 if pad > 0.0:  # trim the filter margin back to the exact window
+                    if resample:
+                        # Resample the padded crop, so the resampling edge effects fall in the margin
+                        # that is trimmed, not at the window edges (_harmonize_one then skips it).
+                        data = mne.filter.resample(data, up=self.target_sfreq, down=sfreq, axis=-1)
+                        sfreq = self.target_sfreq
                     i0 = int(round(left * sfreq))
                     win_n = int(round((row['end'] - row['start']) * sfreq))
                     data = data[:, i0:i0 + win_n]

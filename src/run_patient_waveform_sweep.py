@@ -48,6 +48,7 @@ from src.utils import check_split_disjoint, dump_window_metadata, split_provenan
 
 SEEDS = (0, 1, 2)
 MULTIPLIERS = (0.03, 0.1, 0.3, 1.0, 3.0)
+REFERENCE_RECORDINGS, REFERENCE_SUBJECTS = 1994, 195  # the fresh seed-42 audit at offset 0
 
 
 def digest(path: Path) -> str:
@@ -84,8 +85,12 @@ def finish(folder: Path, attempt: Path, files: tuple[str, ...], metrics: dict[st
     )
 
 
-def make_config(manifests: Path, data_dir: Path, workers: int) -> DictConfig:
-    """Compose the fixed protocol while keeping patient split seed 42 independent of model seeds."""
+def make_config(manifests: Path, data_dir: Path, workers: int, *, skip_start_s: float) -> DictConfig:
+    """Compose the fixed protocol while keeping patient split seed 42 independent of model seeds.
+
+    ``skip_start_s`` must be the offset of the audit behind ``manifests``, i.e.
+    ``check_audit(manifests)["skip_start_s"]``, so that the loader and the manifests agree.
+    """
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
         cfg = compose(config_name="train_patient_waveform")
     cfg.data.data_dir = str(data_dir)
@@ -100,7 +105,7 @@ def make_config(manifests: Path, data_dir: Path, workers: int) -> DictConfig:
     cfg.data.interpolate_bad_channels, cfg.data.apply_aas = True, False
     cfg.data.drop_bad_segments, cfg.data.drop_seizure_segments = False, False
     cfg.data.require_keep_labels, cfg.data.exclude_recordings_file = None, None
-    cfg.data.skip_start_s, cfg.data.overlap_pct = 0.0, 0.0
+    cfg.data.skip_start_s, cfg.data.overlap_pct = float(skip_start_s), 0.0
     cfg.data.max_windows_per_subject = None
     cfg.feature.device, cfg.feature.pretrained = "cuda", None
     cfg.feature.spec.n_atoms = 64
@@ -136,20 +141,75 @@ def shared_center(prepared: list[Path]) -> float:
     return statistics.median(ratios)
 
 
-def check_audit(manifests: Path) -> dict[str, Any]:
-    """Require the fresh uncapped eligible cohort before constructing any signal loaders."""
-    audit = json.loads((manifests / "audit_provenance.json").read_text())
-    checks = (
-        audit["scope"] == "all_metadata_eligible_complete_segments",
-        audit["balance_per_subject"] is False and audit["max_windows_per_subject"] is None,
-        audit["patient_split"]["mode"] == "fresh_stratified" and audit["patient_split"]["seed"] == 42,
-        audit["window_s"] == audit["stride_s"] == 120 and audit["skip_start_s"] == 0,
-        audit["recordings"] == 1994 and audit["subjects"] == 195,
+def _is_uncapped_120(audit: dict[str, Any]) -> bool:
+    """Every complete, nonoverlapping 120 s segment of the eligible pool, without balancing or caps."""
+    return (
+        audit["scope"] == "all_metadata_eligible_complete_segments"
+        and audit["balance_per_subject"] is False
+        and audit["max_windows_per_subject"] is None
+        and audit["window_s"] == audit["stride_s"] == 120
     )
-    if not all(checks):
-        raise ValueError(
-            "need fresh seed-42 stratified, uncapped 120-second manifests for 1994 recordings/195 patients"
-        )
+
+
+def _is_reference(audit: dict[str, Any]) -> bool:
+    """The reference audit: offset 0, fresh seed-42 stratified split, 1994 recordings and 195 patients."""
+    split = audit["patient_split"]
+    return (
+        _is_uncapped_120(audit)
+        and audit["skip_start_s"] == 0
+        and split.get("mode") == "fresh_stratified"
+        and split.get("seed") == 42
+        and audit["recordings"] == REFERENCE_RECORDINGS
+        and audit["subjects"] == REFERENCE_SUBJECTS
+    )
+
+
+def check_audit(manifests: Path) -> dict[str, Any]:
+    """Require the uncapped seed-42 patient cohort before constructing any signal loaders.
+
+    Two audits qualify. The reference audit enumerates every complete 120 s segment from offset 0
+    with the fresh seed-42 stratified split (1994 recordings, 195 patients). An offset audit
+    (``count_pool.py --skip_start_s S --split_manifest_dir <reference audit>``, ``S > 0``) starts
+    the grid at ``S`` and preserves the reference split: its source manifests must be the unchanged
+    outputs of one reference audit, and it must keep all 195 patients. Recordings shorter than
+    ``S + 120`` s drop out, so it can hold fewer recordings. Pass the returned ``skip_start_s`` to
+    ``make_config``.
+
+    Raises
+    ------
+    ValueError
+        If the audit is neither, or an offset audit's reference is not a reference audit, its
+        source manifests changed, or reference patients were lost.
+    """
+    audit = json.loads((manifests / "audit_provenance.json").read_text())
+    offset = float(audit["skip_start_s"])
+    if offset == 0:
+        if not _is_reference(audit):
+            raise ValueError(
+                "need fresh seed-42 stratified, uncapped 120-second manifests for 1994 recordings/195 patients"
+            )
+        return audit
+    sources = audit.get("source_manifests") or {}
+    folders = {Path(source["path"]).parent for source in sources.values()}
+    if not (
+        offset > 0
+        and _is_uncapped_120(audit)
+        and audit["patient_split"].get("mode") == "preserved"
+        and set(sources) == {"train", "val", "test"}
+        and len(folders) == 1
+    ):
+        raise ValueError(f"an offset audit must preserve the split of one reference audit: {manifests}")
+    reference_dir = folders.pop()
+    reference = json.loads((reference_dir / "audit_provenance.json").read_text())
+    if not _is_reference(reference):
+        raise ValueError(f"the split source {reference_dir} is not the seed-42 reference audit")
+    for split, source in sources.items():
+        name = f"windows_{split}.csv"
+        if not source["sha256"] == digest(Path(source["path"])) == reference["output_sha256"][name]:
+            raise ValueError(f"{reference_dir / name} changed since the reference or the offset audit")
+    lost = audit["reference_subjects_without_eligible_recordings"]
+    if lost or audit["subjects"] != REFERENCE_SUBJECTS or audit["recordings"] > REFERENCE_RECORDINGS:
+        raise ValueError(f"the offset audit lost reference patients {lost} or does not nest in the reference")
     return audit
 
 
@@ -163,7 +223,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    cfg = make_config(manifests, data_dir, args.num_workers)
+    cfg = make_config(manifests, data_dir, args.num_workers, skip_start_s=audit["skip_start_s"])
     cache_root = args.signal_cache_dir.expanduser().resolve() if args.signal_cache_dir else None
     cfg.signal_cache_dir = str(cache_root) if cache_root is not None else None
     sources = sorted([*ROOT.glob("src/**/*.py"), *ROOT.glob("configs/**/*.yaml"), ROOT / "run_patient_wsae_sweep.sh"])

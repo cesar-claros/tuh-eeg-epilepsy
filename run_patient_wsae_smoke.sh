@@ -47,27 +47,15 @@ for split in train val test; do
   fi
 done
 
+# Shared audit guard: the offset-0 seed-42 reference audit or an offset audit preserving its split.
 python - "$M" <<'PY'
-import json
 import sys
 from pathlib import Path
 
-p = json.loads((Path(sys.argv[1]) / "audit_provenance.json").read_text())
-checks = {
-    "complete eligible segment scope": p["scope"] == "all_metadata_eligible_complete_segments",
-    "no balancing or caps": p["balance_per_subject"] is False and p["max_windows_per_subject"] is None,
-    "fresh stratified splits with seed 42": (
-        p["patient_split"]["mode"] == "fresh_stratified" and p["patient_split"]["seed"] == 42
-    ),
-    "nonoverlapping 120-second segments from offset zero": (
-        p["window_s"] == p["stride_s"] == 120 and p["skip_start_s"] == 0
-    ),
-    "1994 eligible recordings and 195 patients": p["recordings"] == 1994 and p["subjects"] == 195,
-}
-for description, passed in checks.items():
-    if not passed:
-        raise SystemExit(f"Audit provenance check failed: {description}")
-print(f"Verified: {p['subjects']} patients, {p['segments']} segments")
+from src.run_patient_waveform_sweep import check_audit
+
+p = check_audit(Path(sys.argv[1]))
+print(f"Verified: {p['subjects']} patients, {p['segments']} segments, offset {p['skip_start_s']:g} s")
 PY
 
 mkdir -p logs/waveform_patient

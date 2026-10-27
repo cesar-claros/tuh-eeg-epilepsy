@@ -253,7 +253,7 @@ def run_arm(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=False)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = False, True
-    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers)
+    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
     cfg.seed, cfg.feature.random_state = args.seed, args.seed
     cfg.feature.spec.top_r = args.top_r
     cfg.feature.train_spec.epochs = args.epochs
