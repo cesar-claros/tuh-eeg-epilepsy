@@ -45,6 +45,7 @@ from __future__ import annotations
 import functools
 import json
 import math
+from fractions import Fraction
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -53,6 +54,7 @@ import numpy as np
 import pandas as pd
 import torch
 from loguru import logger
+from scipy.signal import resample_poly
 from torch.utils.data import Dataset
 
 from src.data.components.aas import apply_aas
@@ -246,6 +248,19 @@ def _scan_common_channels(
     return sorted(common)
 
 
+def _resample(data: np.ndarray, sfreq: float, target_sfreq: float) -> np.ndarray:
+    """Polyphase resampling along the last axis at the exact rational ratio ``target_sfreq / sfreq``.
+
+    MNE's default FFT method shifted 250 Hz data by about 2 ms (half an input sample), and MNE's
+    polyphase wrapper adjusts the ratio so the output length is an integer, which slightly stretched
+    a crop whose length is not a multiple of 125 samples (1 percent error on a test tone; 2026-10-26).
+    ``resample_poly`` keeps the ratio (128/125 for 250 to 256 Hz) for any length and only has a
+    local edge effect of a few input samples.
+    """
+    ratio = Fraction(target_sfreq / sfreq).limit_denominator(10_000)
+    return resample_poly(data, ratio.numerator, ratio.denominator, axis=-1)
+
+
 def _harmonize_one(
     data: np.ndarray,
     ch_names: List[str],
@@ -258,8 +273,7 @@ def _harmonize_one(
 
     Per-window version of the eager global harmonization. Returns ``None`` if a
     target channel is missing (the eager intersection guarantees it is present for
-    ``raw``, so this only guards against surprises). Resampling is polyphase: MNE's
-    default FFT method shifts a 250 Hz segment by about 2 ms and depends on its length.
+    ``raw``, so this only guards against surprises). Resampling uses ``_resample``.
     """
     idx_map = {name: i for i, name in enumerate(ch_names)}
     try:
@@ -268,9 +282,7 @@ def _harmonize_one(
         return None
     data = data[indices, :]
     if not np.isclose(sfreq, target_sfreq):
-        data = mne.filter.resample(
-            data, up=target_sfreq, down=sfreq, axis=-1, method='polyphase', verbose='ERROR'
-        )
+        data = _resample(data, sfreq, target_sfreq)
     cur = data.shape[1]
     if cur < target_len:
         pad = np.zeros((data.shape[0], target_len - cur), dtype=data.dtype)
@@ -457,11 +469,8 @@ class WindowDataset(Dataset):
                 if pad > 0.0:  # trim the filter margin back to the exact window
                     if resample:
                         # Resample the padded crop, so no resampling edge falls inside the window
-                        # (_harmonize_one then skips it). Polyphase resampling is local and keeps the
-                        # sample times; MNE's default FFT method shifts 250 Hz data by about 2 ms.
-                        data = mne.filter.resample(
-                            data, up=self.target_sfreq, down=sfreq, axis=-1, method='polyphase', verbose='ERROR'
-                        )
+                        # (_harmonize_one then skips it). _resample is local and keeps the sample times.
+                        data = _resample(data, sfreq, self.target_sfreq)
                         sfreq = self.target_sfreq
                     i0 = int(round(left * sfreq))
                     win_n = int(round((row['end'] - row['start']) * sfreq))

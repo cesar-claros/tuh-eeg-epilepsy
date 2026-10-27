@@ -1,7 +1,9 @@
-"""Polyphase resampling of the context-padded crop in WindowDataset._process; synthetic 250 Hz input, no EDF.
+"""Exact-ratio polyphase resampling of the context-padded crop in WindowDataset._process; synthetic 250 Hz input.
 
-MNE's default FFT resampling shifted 250 Hz segments by about 2 ms (half an input sample) and depended on the
-segment length (2026-10-26). These tests check consistency with the whole recording and the sample times.
+MNE's default FFT resampling shifted 250 Hz segments by about 2 ms (half an input sample), and MNE's polyphase
+wrapper stretched crops whose length is not a multiple of 125 samples (2026-10-26). These tests check the
+windowed loader against the whole recording and the sample times against exact tones, on an interior window
+and on the last window, whose crop is cut by the recording end.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import rootutils
+from scipy.signal import resample_poly
 
 rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
@@ -76,7 +79,7 @@ def _whole_recording(data: np.ndarray) -> np.ndarray:
     raw = _raw(data)
     raw.filter(l_freq=0.1, h_freq=None, verbose="ERROR")
     raw.notch_filter([60.0], verbose="ERROR")
-    return mne.filter.resample(raw.get_data(), up=TARGET, down=NATIVE, axis=-1, method="polyphase", verbose="ERROR")
+    return resample_poly(raw.get_data(), 128, 125, axis=-1)  # 256/250 exactly
 
 
 def _window(data: np.ndarray, start: float) -> np.ndarray:
@@ -98,20 +101,24 @@ def test_window_matches_the_whole_recording_filtered_and_resampled(start: float)
     window = _window(data, start)
     first = int(start * TARGET)
     reference = _whole_recording(data)[:, first : first + window.shape[1]]
-    # Filtering with the full context is exact and polyphase resampling is local, so only the
+    # Filtering with the full context is exact and exact-ratio polyphase resampling is local, so only the
     # float32 output rounding remains (about 3e-8 of the peak in a local MNE 1.11 replica of this check).
     assert np.abs(window - reference).max() < 1e-6 * np.abs(reference).max()
 
 
-def test_resampling_keeps_the_sample_times() -> None:
-    """Tones sampled at 250 Hz come out as the same tones sampled at 256 Hz (FFT resampling: 12 percent off)."""
+@pytest.mark.parametrize("start", [40.0, 160.0])
+def test_resampling_keeps_the_sample_times(start: float) -> None:
+    """Tones sampled at 250 Hz come out as the same tones sampled at 256 Hz.
+
+    MNE's FFT resampling was 12 percent off here, and MNE's polyphase wrapper 1 percent on the last window.
+    """
     t_in = np.arange(int(DURATION * NATIVE)) / NATIVE
     t_out = np.arange(int(DURATION * TARGET)) / TARGET
 
     def tones(t: np.ndarray) -> np.ndarray:
         return 20e-6 * np.sin(2 * np.pi * 9.7 * t) + 15e-6 * np.sin(2 * np.pi * 30.0 * t + 0.4)
 
-    window = _window(np.stack([tones(t_in), -tones(t_in)]), 40.0)
-    truth = tones(t_out)[int(40.0 * TARGET) : int(40.0 * TARGET) + window.shape[1]]
+    window = _window(np.stack([tones(t_in), -tones(t_in)]), start)
+    truth = tones(t_out)[int(start * TARGET) : int(start * TARGET) + window.shape[1]]
     assert np.abs(window[0] - truth).max() < 5e-3 * np.abs(truth).max()
     assert np.abs(window[1] + truth).max() < 5e-3 * np.abs(truth).max()
