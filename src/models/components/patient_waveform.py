@@ -123,12 +123,11 @@ def segment_values(
     invalid segments are marked false and excluded by patient reductions.
     """
     rows, valid = model._full_rows(x)
-    atoms = model._dictionary()
-    code, selected = model._selection(model._responses(rows, atoms))
-    reconstruction = model._decode(code, atoms) * valid.unsqueeze(-1)
-    denominator = (2 * valid.sum(-1) * rows.shape[-1]).clamp_min(1)
-    loss = (rows - reconstruction).square().sum((1, 2)) / denominator
-    zero = rows.square().sum((1, 2)) / denominator
+    code, selected, reconstruction, target, estimate = model._encode_reconstruct(rows, valid, model._dictionary())
+    dims = tuple(range(1, target.ndim))
+    denominator = (2 * valid.sum(-1) * math.prod(target.shape[2:])).clamp_min(1)
+    loss = (target - estimate).square().sum(dims) / denominator
+    zero = target.square().sum(dims) / denominator
     features = code.sum(-1) / (rows.shape[-1] // model.spec.pool_len)
     if statistics is not None:
         with torch.no_grad():
@@ -366,7 +365,7 @@ def fit_patient_reconstruction(
         "selection_scope": "pooling_window",
         "encoder_scope": "full_encoded_segment",
         "decoder_scope": "pooling_window",
-        "n_channels": int(model.atoms.shape[1]),
+        "n_channels": model.n_channels,
         "channels": getattr(base.dataset, "target_channels", None),
         "margin": model.margin,
         "selected_epoch": best_epoch if best_atoms is not None else spec.epochs,

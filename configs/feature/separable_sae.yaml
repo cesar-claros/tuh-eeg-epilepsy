@@ -1,0 +1,37 @@
+_target_: src.models.components.separable_sae.SeparableSAE
+# Separable atom SAE: one waveform w_k per atom shared by all channels, D unit spatial
+# projections U_k, the largest projection response, ReLU, one maximum per atom and pooling
+# window, top-R atoms per window (format-5 rule and tie rules), tied per-window synthesis
+# without cropping. Mathematics: documentation/Separable Atom Encoder Mathematics.md;
+# probe: documentation/separable_atom_sae_protocol.md. Reconstruction loss only.
+# Baseline: src/train_sae.py --config-name train_sae_waveform feature=separable_sae.
+# Writes the format-5 artifacts, with sae_atoms.npy holding the (K, D, C, L) templates,
+# plus sae_time_atoms.npy (K, L) and sae_channel_atoms.npy (K, C, D).
+spec:
+  _target_: src.models.components.separable_sae.SeparableSpec
+  n_atoms: 64
+  atom_len: 256       # L; 1 s at data.target_sfreq=256 (p_L=127, p_R=128)
+  pool_len: 512       # P; 30720 = 60 * 512, so M=60 windows per 120 s segment
+  top_r: 1            # R atoms kept per pooling window
+  n_projections: 4    # D spatial projections per atom
+  loss_support: extended # extended: P+L-1 samples per decoded window; central: format 5's P samples
+  pre_emphasis: none
+  atom_norm: unit     # required: unit w_k and unit u_{k,d} (equation 4)
+  center_atoms: false # required
+train_spec:
+  _target_: src.models.components.waveform_sae.WaveformTrainSpec
+  epochs: 30
+  lr: 0.001
+  crop_sampling: full # required: complete segments
+  sampling_unit: patient
+  patients_per_batch: 8
+  segments_per_patient: 4
+  segment_batch: 2
+  max_crop_energy_ratio: null
+  init: patches       # patches: w_k from the top singular vector of a format-5 patch; random: Gaussian factors
+  recenter_atoms: false # required
+random_state: 42
+# Path to a sae_state.pt written with feature=separable_sae; every spec field must match.
+pretrained: null
+device: auto
+chunk_windows: 8

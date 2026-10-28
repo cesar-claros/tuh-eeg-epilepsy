@@ -116,7 +116,7 @@ def train_sae(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         from src.models.components.patient_waveform import fit_patient_supervised, validate_supervised
         from src.models.components.waveform_sae import WaveformSAE
 
-        if not isinstance(feature_extractor, WaveformSAE):
+        if type(feature_extractor) is not WaveformSAE:
             raise TypeError("pooled patient supervision is implemented for waveform_sae only")
         supervised_spec = hydra.utils.instantiate(supervised, _convert_="all")
         validate_supervised(feature_extractor, supervised_spec)

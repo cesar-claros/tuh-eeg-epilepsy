@@ -259,6 +259,9 @@ class WaveformSAE(nn.Module):
         is not a positive multiple of ``pool_len``.
     """
 
+    model_tag = MODEL_TAG
+    checkpoint_format = CHECKPOINT_FORMAT
+
     def __init__(
         self,
         spec: WaveformSpec | None = None,
@@ -356,9 +359,9 @@ class WaveformSAE(nn.Module):
                 "atoms per pooling window; retrain or use the matching old code "
                 "to evaluate the old checkpoint. Changing the format number is not a valid migration."
             )
-        if checkpoint.get("model") != MODEL_TAG or checkpoint.get("format") != CHECKPOINT_FORMAT:
+        if checkpoint.get("model") != self.model_tag or checkpoint.get("format") != self.checkpoint_format:
             raise ValueError(
-                f"{path}: not a {MODEL_TAG} checkpoint of format {CHECKPOINT_FORMAT} "
+                f"{path}: not a {self.model_tag} checkpoint of format {self.checkpoint_format} "
                 f"(model {checkpoint.get('model')!r}, format {checkpoint.get('format')!r})"
             )
         saved = checkpoint["spec"]
@@ -379,7 +382,7 @@ class WaveformSAE(nn.Module):
         self.won_windows = checkpoint.get("won_windows") or {}
         self.fitted = True
         log.info(
-            f"Loaded {self.spec.n_atoms} pretrained waveform atoms ({self.atoms.shape[1]} channels) from {path} "
+            f"Loaded {self.spec.n_atoms} pretrained waveform atoms ({self.n_channels} channels) from {path} "
             f"({len(self.history)} epochs, {len(provenance['train_subjects'])} training subjects)"
         )
 
@@ -400,8 +403,8 @@ class WaveformSAE(nn.Module):
         np.save(output_dir / "sae_atoms_signal.npy", self.atoms_signal_domain)
         torch.save(
             {
-                "model": MODEL_TAG,
-                "format": CHECKPOINT_FORMAT,
+                "model": self.model_tag,
+                "format": self.checkpoint_format,
                 "spec": asdict(self.spec),
                 "fit": self.fit_meta,
                 "atoms": self.atoms.detach().cpu(),
@@ -487,6 +490,15 @@ class WaveformSAE(nn.Module):
             raise RuntimeError("WaveformSAE has no dictionary yet: call fit_unsupervised or pass pretrained")
         return self._constrain(self.atoms)
 
+    @property
+    def n_channels(self) -> int | None:
+        """Channels of the dictionary, ``None`` before it exists."""
+        return None if self.atoms is None else int(self.atoms.shape[1])
+
+    def _atom_norms(self) -> torch.Tensor:
+        """Norm of every constrained atom ``(K,)``."""
+        return torch.linalg.vector_norm(self._dictionary().detach(), dim=(1, 2))
+
     def _rows(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Encoded rows ``(B, C, T')`` of a window batch ``(B, C, T)`` and the usable-channel mask ``(B, C)``.
 
@@ -506,8 +518,8 @@ class WaveformSAE(nn.Module):
         if raw.ndim != 3:
             raise ValueError(f"expected windows of shape (B, C, T), got {tuple(raw.shape)}")
         n_windows, n_channels, _ = raw.shape
-        if self.atoms is not None and n_channels != self.atoms.shape[1]:
-            raise ValueError(f"windows have {n_channels} channels but the dictionary has {self.atoms.shape[1]}")
+        if self.n_channels is not None and n_channels != self.n_channels:
+            raise ValueError(f"windows have {n_channels} channels but the dictionary has {self.n_channels}")
         flat = raw.flatten(0, 1)
         valid = ShapeConvSAE._valid_rows(flat)
         if self.spec.pre_emphasis == "diff":
@@ -645,14 +657,27 @@ class WaveformSAE(nn.Module):
             )
         return rows, valid
 
+    def _encode_reconstruct(
+        self, rows: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Code, selection, masked reconstruction, and the target and estimate that the loss compares.
+
+        The reconstruction ``(B, C, T)`` feeds the statistics. The loss compares
+        ``target`` with ``estimate`` on its support, here the segment samples
+        themselves: ``rows`` and the reconstruction. Subclasses may score another
+        support with ``(B, C, ...)`` arrays.
+        """
+        code, selected = self._selection(self._responses(rows, atoms))
+        reconstruction = self._decode(code, atoms) * valid.unsqueeze(-1).to(rows.dtype)
+        return code, selected, reconstruction, rows, reconstruction
+
     def _segment_step(
         self, rows: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Score every sample, with top-R atoms per pooling window and a usable-channel denominator."""
-        code, selected = self._selection(self._responses(rows, atoms))
-        mask = valid.unsqueeze(-1).to(rows.dtype)
-        reconstruction = self._decode(code, atoms) * mask
-        loss = 0.5 * (rows - reconstruction).pow(2).sum() / (mask.sum() * rows.shape[-1]).clamp_min(1.0)
+        """Score the loss support, with top-R atoms per pooling window and a usable-channel denominator."""
+        code, selected, reconstruction, target, estimate = self._encode_reconstruct(rows, valid, atoms)
+        scored = valid.to(rows.dtype).sum() * math.prod(target.shape[2:])
+        loss = 0.5 * (target - estimate).pow(2).sum() / scored.clamp_min(1.0)
         with torch.no_grad():
             stats, per_atom = self._statistics(rows, reconstruction, code, selected)
         return loss, stats, per_atom
@@ -827,9 +852,17 @@ class WaveformSAE(nn.Module):
             per_atom += atom_sums
         return totals, per_atom
 
-    def _sample_patches(self, dataloader: DataLoader, generator: torch.Generator) -> torch.Tensor:
-        """Sample ``(K, C, L)`` encoder receptive fields across segments, then gate."""
+    def _sample_patches(
+        self, dataloader: DataLoader, generator: torch.Generator, count: int | None = None
+    ) -> torch.Tensor:
+        """Sample ``(count, C, L)`` encoder receptive fields across segments, then gate.
+
+        ``count`` defaults to ``n_atoms``. The candidate pool depends only on
+        ``n_atoms``, so the first ``n_atoms`` patches are the same for any larger
+        ``count`` under the same generator state.
+        """
         spec = self.spec
+        count = spec.n_atoms if count is None else count
         per_batch = max(math.ceil(_INIT_POOL_FACTOR * spec.n_atoms / max(len(dataloader), 1)), 1)
         pool = []
         for x, _ in tqdm(dataloader, desc="Waveform SAE patch initialization"):
@@ -840,12 +873,12 @@ class WaveformSAE(nn.Module):
             patches = views[window, :, start]
             pool.append(patches[self._gate(patches.pow(2).sum(dim=(1, 2)))])
         candidates = torch.cat(pool)
-        if candidates.shape[0] < spec.n_atoms:
+        if candidates.shape[0] < count:
             raise ValueError(
-                f"patch initialization needs at least n_atoms={spec.n_atoms} non-flat patches, "
+                f"patch initialization needs at least {count} non-flat patches, "
                 f"got {candidates.shape[0]}; supply more windows"
             )
-        chosen = torch.randperm(candidates.shape[0], generator=generator)[: spec.n_atoms].to(candidates.device)
+        chosen = torch.randperm(candidates.shape[0], generator=generator)[:count].to(candidates.device)
         return candidates[chosen]
 
     def _init_atoms(self, dataloader: DataLoader, generator: torch.Generator) -> None:
@@ -936,7 +969,7 @@ class WaveformSAE(nn.Module):
         which its candidate was positive; zero when it was never selected);
         ``active_window_frac`` (won windows per scored pooling window).
         """
-        norms = torch.linalg.vector_norm(self._dictionary().detach(), dim=(1, 2)).double()
+        norms = self._atom_norms().double()
         energy = per_atom[0] * norms.pow(2)
         slots = per_atom[3].clamp_min(1.0)
         return {
@@ -1012,7 +1045,11 @@ class WaveformSAE(nn.Module):
 
     def _median_coherence(self) -> float:
         """Median over atom pairs of the maximum absolute normalized cross-correlation over lags."""
-        atoms = self._unit(self._dictionary().detach())
+        return self._lag_coherence(self._unit(self._dictionary().detach()))
+
+    @staticmethod
+    def _lag_coherence(atoms: torch.Tensor) -> float:
+        """``_median_coherence`` of unit atoms ``(K, C, L)``."""
         if atoms.shape[0] < 2:
             return 0.0
         coherence = F.conv1d(atoms, atoms, padding=atoms.shape[-1] - 1).abs().amax(-1)
@@ -1216,7 +1253,7 @@ class WaveformSAE(nn.Module):
             "selection_scope": "pooling_window",
             "encoder_scope": "full_encoded_segment",
             "decoder_scope": "pooling_window",
-            "n_channels": int(self.atoms.shape[1]),
+            "n_channels": self.n_channels,
             "channels": None if channels is None else [str(c) for c in channels],
             "atom_stats_split": None if last is None else stats_split,
         }
