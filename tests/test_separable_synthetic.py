@@ -94,12 +94,12 @@ def test_waveform_match_and_offset() -> None:
 
 def test_factors_of_a_rank_one_format5_atom() -> None:
     model = WaveformSAE(spec=WaveformSpec(n_atoms=1, atom_len=16, pool_len=16), device="cpu")
-    topography = torch.tensor([3.0, -4.0, 0.0]) / 5.0
-    waveform = torch.linspace(-1.0, 1.0, 16).sin()
-    model.atoms = nn.Parameter((topography[:, None] * waveform[None, :])[None].double())
+    topography = torch.tensor([3.0, -4.0, 0.0], dtype=torch.float64) / 5.0
+    waveform = torch.linspace(-1.0, 1.0, 16, dtype=torch.float64).sin()
+    model.atoms = nn.Parameter((topography[:, None] * waveform[None, :])[None])
     time, channel, share = gate.factors(model)
-    assert abs(abs(float(time[0] @ waveform.double().numpy())) / float(waveform.norm()) - 1.0) < 1e-9
-    assert abs(abs(float(channel[0, :, 0] @ topography.double().numpy())) - 1.0) < 1e-9
+    assert abs(abs(float(time[0] @ waveform.numpy())) / float(waveform.norm()) - 1.0) < 1e-9
+    assert abs(abs(float(channel[0, :, 0] @ topography.numpy())) - 1.0) < 1e-9
     assert share is not None and abs(float(share[0]) - 1.0) < 1e-9
 
 
