@@ -5,7 +5,7 @@ first failure. Covered: the montage topography and its phase reversal, the event
 its draws, the planted amplitude in robust units after the row scaling, the waveform match and
 its offset, the rank-1 factors of a format-5 atom, the detection counts, the readout of a
 dictionary that holds the planted template, the recovery rules and stage outcomes of protocol
-section 4.3 under both matching rules, and a small stage-1a run with its summary.
+section 4.3 under both matching rules, the input figure, and a small stage-1a run with its summary.
 """
 
 from __future__ import annotations
@@ -183,6 +183,13 @@ def test_per_focus_matching_judges_each_focus_on_its_own_events() -> None:
         assert gate.recovery(rows, "1b", "f5")[6] is False, "the single-atom rule ignored the low recall"
     finally:
         gate.PER_FOCUS_MATCHING = True
+
+
+def test_plot_input_writes_a_figure() -> None:
+    settings = gate.Stage1aSettings(n_times=7680)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = gate.plot_input(Path(tmp) / "input.png", seed=0, index=1, settings=settings)
+        assert path.is_file() and path.stat().st_size > 10_000, "no figure was written"
 
 
 def test_stage_1a_run_and_summary() -> None:

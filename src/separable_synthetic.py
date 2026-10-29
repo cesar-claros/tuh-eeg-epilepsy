@@ -3,7 +3,7 @@
 Protocol: ``documentation/separable_atom_sae_protocol.md``, section 4 (equation numbers refer to
 ``documentation/Separable Atom Encoder Mathematics.md``). Spike-and-wave events ``a u* s^T`` from
 two montage foci are planted into background segments; each arm learns a dictionary by
-reconstruction alone, and the readout asks whether it learned the event. Two subcommands:
+reconstruction alone, and the readout asks whether it learned the event. Three subcommands:
 
 - ``run`` fits one arm, named ``{stage}_{arm}_a{amplitude}_s{seed}`` by its output directory:
   stage ``1a`` (AR(1) background with artifacts, CPU or GPU, no corpus) or ``1b`` (real segments
@@ -12,6 +12,8 @@ reconstruction alone, and the readout asks whether it learned the event. Two sub
   and ``synthetic_provenance.json``.
 - ``summarize`` reads the arms of a root, applies the rules fixed before any result (constants
   below) and writes ``synthetic_summary.csv`` and ``synthetic_decision.json``.
+- ``plot`` draws one stage-1a validation segment as the model sees it, at every amplitude, with the
+  waveform and the topographies of the events (CPU, seconds, no corpus).
 
 Events are planted in the loader's signal domain, scaled by the robust scale of each channel, so
 that after the model's row scaling every event is ``a (u*/max|u*|) (s/max|s|)``: peak amplitude
@@ -530,6 +532,98 @@ def _git(*args: str) -> str:
     return git(*args)
 
 
+# ---------------------------------------------------------------------- figure
+
+# Categorical slots 1 and 2 of the dataviz reference palette (validated: CVD Delta E 24.7, contrast >= 3:1).
+FOCUS_COLORS = ("#2a78d6", "#eb6834")
+INK, MUTED, SURFACE = "#0b0b0b", "#52514e", "#fcfcfb"
+ZOOM_SECONDS = 1.0  # half-width of the event zooms
+TRACE_SPACING = 8.0  # robust units between stacked channels
+
+
+def plot_input(path: Path, seed: int = 0, index: int = 0, settings: Stage1aSettings = Stage1aSettings()) -> Path:
+    """Draw stage-1a validation segment ``index`` of ``seed`` as the model sees it, after the row scaling.
+
+    Rows: the whole segment at the largest amplitude, with every event shaded by focus; the first
+    event of each focus at each event amplitude, over the event-free background in gray; the
+    waveform ``s`` and the topographies ``u*`` (unit peak). Units are robust units of each channel.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    channels = [f"{a}-{c}" for a, c in TUHEEGEpilepsy._TCP_BIPOLAR]
+    sfreq, n_times = settings.sfreq, settings.n_times
+    background = ARBackground(index + 1, channels, n_times, sfreq, seed, "val")
+    views = {a: PlantedEvents(background, np.array([index]), a, seed, "val", sfreq) for a in AMPLITUDES}
+    rows = {a: ShapeConvSAE._robust_scale(view[0][0]).numpy() for a, view in views.items()}
+    view, top = views[AMPLITUDES[-1]], AMPLITUDES[-1]
+    onsets, foci = view.events(0, n_times)
+    length, seconds = len(view.shape), np.arange(n_times) / sfreq
+    offsets = TRACE_SPACING * np.arange(len(channels))[::-1]
+    plt.rcParams.update(
+        {
+            "font.size": 9,
+            "text.color": INK,
+            "axes.labelcolor": MUTED,
+            "xtick.color": MUTED,
+            "ytick.color": MUTED,
+            "axes.edgecolor": MUTED,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
+    figure = plt.figure(figsize=(16, 20), facecolor=SURFACE)
+    grid = figure.add_gridspec(3, 2 * len(FOCI), height_ratios=[1.2, 1.0, 0.45], hspace=0.3, wspace=0.15)
+
+    axis = figure.add_subplot(grid[0, :])
+    axis.plot(seconds, (rows[top] + offsets[:, None]).T, color=INK, linewidth=0.4)
+    for onset, focus in zip(onsets.tolist(), foci.tolist()):
+        axis.axvspan(onset / sfreq, (onset + length) / sfreq, color=FOCUS_COLORS[focus], alpha=0.3, linewidth=0)
+    axis.set(yticks=offsets, yticklabels=channels, xlim=(0, n_times / sfreq), xlabel="Time (s)")
+    axis.set_title(f"Validation segment {index}, seed {seed}, amplitude {top}: encoded rows (robust units)", loc="left")
+    axis.legend(
+        handles=[Patch(color=c, alpha=0.3, label=f"{f} event") for f, c in zip(FOCI, FOCUS_COLORS)],
+        loc="upper right",
+        frameon=False,
+        ncols=len(FOCI),
+    )
+
+    half = round(ZOOM_SECONDS * sfreq)
+    for f, focus in enumerate(FOCI):
+        if not (foci == f).any():
+            continue
+        onset = int(onsets[foci == f][0])
+        span = slice(max(onset + length // 2 - half, 0), min(onset + length // 2 + half, n_times))
+        for column, amplitude in enumerate(AMPLITUDES[1:]):
+            axis = figure.add_subplot(grid[1, len(AMPLITUDES[1:]) * f + column])
+            axis.plot(seconds[span], (rows[0][:, span] + offsets[:, None]).T, color=MUTED, alpha=0.45, linewidth=1.2)
+            axis.plot(seconds[span], (rows[amplitude][:, span] + offsets[:, None]).T, color=INK, linewidth=0.6)
+            axis.axvspan(onset / sfreq, (onset + length) / sfreq, color=FOCUS_COLORS[f], alpha=0.25, linewidth=0)
+            axis.set(yticks=offsets, yticklabels=channels if f == column == 0 else [], xlabel="Time (s)")
+            axis.set_title(f"{focus} event, amplitude {amplitude} (gray: without the event)", loc="left")
+
+    axis = figure.add_subplot(grid[2, 0])
+    axis.plot(1000 * np.arange(length) / sfreq, view.shape, color=INK, linewidth=2)
+    axis.set(xlabel="Time (ms)", title="Waveform s (unit peak)")
+    axis = figure.add_subplot(grid[2, 1:])
+    patterns = view.topographies / np.abs(view.topographies).max(axis=1, keepdims=True)
+    width, position = 0.4, np.arange(len(channels))
+    for f, (focus, color) in enumerate(zip(FOCI, FOCUS_COLORS)):
+        axis.bar(position + (f - 0.5) * width, patterns[f], width=0.9 * width, color=color, label=f"u* {focus}")
+    axis.axhline(0.0, color=MUTED, linewidth=0.8)
+    axis.set_xticks(position, channels, rotation=90)
+    axis.set(ylabel="Weight (unit peak)", title="Topographies u*: event amplitude on each derivation")
+    axis.legend(frameon=False, ncols=len(FOCI))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=150, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(figure)
+    logger.info(f"Wrote {path}")
+    return path
+
+
 # ---------------------------------------------------------------------- decision
 
 
@@ -616,7 +710,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Command-line entry point: ``run`` one arm or ``summarize`` a root."""
+    """Command-line entry point: ``run`` one arm, ``summarize`` a root or ``plot`` an input segment."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="fit one arm; its directory name encodes stage, arm, amplitude and seed")
@@ -630,9 +724,16 @@ def main() -> None:
     run.add_argument("--allow-cold-cache", action="store_true")
     summary = commands.add_parser("summarize", help="apply the gate-1 rules to the arms of a root")
     summary.add_argument("--root", type=Path, required=True)
+    figure = commands.add_parser("plot", help="draw one stage-1a validation segment as the model sees it")
+    figure.add_argument("--seed", type=int, default=0)
+    figure.add_argument("--index", type=int, default=0, help="validation segment")
+    figure.add_argument("--output", type=Path, help="default logs/separable_synthetic/input_1a_s{seed}_i{index}.png")
     args = parser.parse_args()
     if args.command == "summarize":
         summarize(args.root.resolve())
+    elif args.command == "plot":
+        default = ROOT / "logs" / "separable_synthetic" / f"input_1a_s{args.seed}_i{args.index}.png"
+        plot_input((args.output or default).resolve(), args.seed, args.index)
     elif parse_arm(args.output.name)["stage"] == "1a":
         fit_stage_1a(args.output.resolve(), args.epochs, args.device)
     else:
