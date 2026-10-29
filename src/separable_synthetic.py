@@ -3,7 +3,7 @@
 Protocol: ``documentation/separable_atom_sae_protocol.md``, section 4 (equation numbers refer to
 ``documentation/Separable Atom Encoder Mathematics.md``). Spike-and-wave events ``a u* s^T`` from
 two montage foci are planted into background segments; each arm learns a dictionary by
-reconstruction alone, and the readout asks whether it learned the event. Three subcommands:
+reconstruction alone, and the readout asks whether it learned the event. Four subcommands:
 
 - ``run`` fits one arm, named ``{stage}_{arm}_a{amplitude}_s{seed}`` by its output directory:
   stage ``1a`` (AR(1) background with artifacts, CPU or GPU, no corpus) or ``1b`` (real segments
@@ -12,6 +12,8 @@ reconstruction alone, and the readout asks whether it learned the event. Three s
   and ``synthetic_provenance.json``.
 - ``summarize`` reads the arms of a root, applies the rules fixed before any result (constants
   below) and writes ``synthetic_summary.csv`` and ``synthetic_decision.json``.
+- ``reread`` re-reads the stage-1b dictionaries of a root with threshold detection, calibrated on
+  event-free validation patients (protocol section 10.6; post hoc, no retraining).
 - ``plot`` draws one stage-1a validation segment as the model sees it, at every amplitude, with the
   waveform and the topographies of the events (CPU, seconds, no corpus).
 
@@ -25,6 +27,7 @@ never read.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 from dataclasses import asdict, dataclass, replace
@@ -35,6 +38,7 @@ import numpy as np
 import polars as pl
 import rootutils
 import torch
+import torch.nn.functional as F
 from loguru import logger
 from scipy.signal import lfilter
 from torch.utils.data import DataLoader, Dataset
@@ -44,7 +48,12 @@ ROOT = rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pyth
 from src.data.components.tuh_eeg_epilepsy import TUHEEGEpilepsy  # noqa: E402
 from src.models.components.separable_sae import SeparableSAE, SeparableSpec  # noqa: E402
 from src.models.components.shapeconv_sae import ShapeConvSAE  # noqa: E402
-from src.models.components.waveform_sae import WaveformSAE, WaveformSpec, WaveformTrainSpec  # noqa: E402
+from src.models.components.waveform_sae import (  # noqa: E402
+    CHECKPOINT_NAME,
+    WaveformSAE,
+    WaveformSpec,
+    WaveformTrainSpec,
+)
 from tests.stage7_shapeconv_sae import _spike_wave  # noqa: E402
 
 # Planted events (protocol section 4.1), fixed before any result.
@@ -98,6 +107,17 @@ class Stage1aSettings:
     pool_len: int = 512
     n_times: int = 30720
     sfreq: float = 256.0
+
+
+def json_safe(value: Any) -> Any:
+    """``value`` with every NaN float, at any depth of dicts and lists, replaced by ``None`` (JSON ``null``)."""
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def parse_arm(name: str) -> dict[str, Any]:
@@ -387,7 +407,7 @@ def _finish(
         f"precision {record['precision']:.3f}, rho_u {record['rho_u_T3']:.3f}/{record['rho_u_C4']:.3f}"
     )
     # Recall and precision are undefined without events (the event-free arms); JSON stores them as null.
-    record = {k: None if isinstance(v, float) and math.isnan(v) else v for k, v in record.items()}
+    record = json_safe(record)
     save_json(output / "synthetic_readout.json", record)
     return record
 
@@ -530,6 +550,221 @@ def _git(*args: str) -> str:
     from src.waveform_probe import _git as git
 
     return git(*args)
+
+
+# ---------------------------------------------------------------------- post-hoc threshold re-read
+
+# Protocol section 10.6, fixed on 2026-10-29 before any result. Post hoc: it does not change the gate decision.
+THRESHOLD_FA_PER_MINUTE = 0.5  # primary false-alarm rate on the event-free calibration half
+THRESHOLD_FA_CURVE = (0.25, 0.5, 1.0, 2.0)  # descriptive rates
+PEAK_RADIUS = 64  # non-maximum suppression of response peaks, samples (0.25 s at 256 Hz)
+
+
+def local_maxima(responses: torch.Tensor, radius: int) -> torch.Tensor:
+    """Boolean mask of the positive local maxima of ``responses`` ``(..., T)`` within ``radius`` samples."""
+    flat = responses.reshape(-1, 1, responses.shape[-1])
+    pooled = F.max_pool1d(flat, 2 * radius + 1, stride=1, padding=radius).reshape(responses.shape)
+    return (responses == pooled) & (responses > 0)
+
+
+def calibrated_threshold(heights: np.ndarray, minutes: float, rate: float) -> float:
+    """Threshold that leaves ``rate * minutes`` calibration peaks above it (0 when fewer peaks exist)."""
+    allowed = int(rate * minutes)
+    ordered = np.sort(heights)[::-1]
+    return float(ordered[allowed]) if allowed < len(ordered) else 0.0
+
+
+def patient_halves(subjects: np.ndarray) -> np.ndarray:
+    """Calibration mask over segments: the patients at even positions of the sorted patient IDs."""
+    calibration = np.unique(subjects)[::2]
+    return np.isin(subjects, calibration)
+
+
+def _atom_responses(model: WaveformSAE, x: torch.Tensor, atoms: list[int]) -> torch.Tensor:
+    """Responses ``(B, A, T)`` of the given atoms before the selection: equation (9), on the encoded rows."""
+    rows, _ = model._rows(x)
+    return F.relu(model._responses(rows, model._dictionary()))[:, atoms]
+
+
+@torch.no_grad()
+def threshold_readout(
+    model: WaveformSAE,
+    calibration: PlantedEvents,
+    evaluation: PlantedEvents,
+    focus_atoms: dict[str, int],
+    loader_kwargs: dict[str, int],
+) -> dict[str, Any]:
+    """Recall and precision of thresholded response peaks of each focus atom (protocol section 10.6).
+
+    ``calibration`` holds event-free segments and sets one threshold per atom and false-alarm rate;
+    ``evaluation`` holds the planted segments of other patients. Returns, per focus, the recall and
+    precision at ``THRESHOLD_FA_PER_MINUTE`` (``{focus}_recall``, ``{focus}_precision``) and the curve
+    over ``THRESHOLD_FA_CURVE``, with the thresholds and the calibration duration.
+    """
+    atoms = sorted(set(focus_atoms.values()))
+    waveforms, _, _ = factors(model)
+    _, offset = waveform_match(waveforms, evaluation.unit)
+    heights: dict[int, list[np.ndarray]] = {k: [] for k in atoms}
+    minutes = 0.0
+    for x, _ in DataLoader(calibration, shuffle=False, **loader_kwargs):
+        responses = _atom_responses(model, x, atoms)
+        peaks = local_maxima(responses, PEAK_RADIUS)
+        for a, k in enumerate(atoms):
+            heights[k].append(responses[:, a][peaks[:, a]].cpu().numpy())
+        minutes += x.shape[0] * x.shape[-1] / calibration.sfreq / 60.0
+    thresholds = {
+        k: {rate: calibrated_threshold(np.concatenate(heights[k]), minutes, rate) for rate in THRESHOLD_FA_CURVE}
+        for k in atoms
+    }
+    left, index = model.padding[0], 0
+    positions: dict[tuple[int, float], list[np.ndarray]] = {(k, r): [] for k in atoms for r in THRESHOLD_FA_CURVE}
+    expected: dict[str, list[np.ndarray]] = {focus: [] for focus in FOCI}
+    for x, _ in DataLoader(evaluation, shuffle=False, **loader_kwargs):
+        responses = _atom_responses(model, x, atoms)
+        peaks = local_maxima(responses, PEAK_RADIUS)
+        for j in range(len(x)):
+            onsets, foci = evaluation.events(index, x.shape[-1])
+            for a, k in enumerate(atoms):
+                for rate in THRESHOLD_FA_CURVE:
+                    above = peaks[j, a] & (responses[j, a] > thresholds[k][rate])
+                    positions[(k, rate)].append(torch.nonzero(above).flatten().cpu().numpy())
+            for f, focus in enumerate(FOCI):
+                expected[focus].append((onsets + left - offset[focus_atoms[focus]])[foci == f])
+            index += 1
+    record: dict[str, Any] = {"calibration_minutes": minutes, "evaluation_segments": index}
+    for focus in FOCI:
+        k = focus_atoms[focus]
+        curve = {}
+        for rate in THRESHOLD_FA_CURVE:
+            recall, precision, _, _ = detection(positions[(k, rate)], expected[focus], DETECTION_TOLERANCE)
+            curve[str(rate)] = {"threshold": thresholds[k][rate], "recall": recall, "precision": precision}
+        primary = curve[str(THRESHOLD_FA_PER_MINUTE)]
+        record.update(
+            {
+                f"{focus}_atom": k,
+                f"{focus}_recall": primary["recall"],
+                f"{focus}_precision": primary["precision"],
+                f"{focus}_curve": curve,
+            }
+        )
+    return record
+
+
+def _stage_1b_validation(args: argparse.Namespace) -> tuple[Any, Any]:
+    """The campaign configuration and its cached validation dataset, as stage 1b built them (no training)."""
+    import hydra
+
+    from src.run_patient_waveform_sweep import check_audit, make_config
+    from src.utils import check_split_disjoint
+
+    manifests, cache_root = args.manifests.resolve(), args.signal_cache_dir.expanduser().resolve()
+    audit = check_audit(manifests)
+    existing = {p.name for p in cache_root.iterdir() if p.is_dir()}
+    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
+    datamodule = hydra.utils.instantiate(cfg.data)
+    datamodule.setup()
+    check_split_disjoint(datamodule)
+    source = datamodule.data_val
+    source.enable_signal_cache(cache_root)
+    if source.signal_cache.identity not in existing:
+        raise ValueError(f"validation signals have no entries under {cache_root}; pass the campaign cache")
+    return cfg, source
+
+
+def reread(args: argparse.Namespace) -> dict[str, Any]:
+    """Re-read every stage-1b dictionary of ``args.root`` with threshold detection, then apply the gate rules.
+
+    Arms that already hold ``threshold_readout.json`` are skipped. Writes ``threshold_summary.csv``
+    and ``threshold_decision.json`` to the root.
+    """
+    import hydra
+
+    from src.run_patient_waveform_sweep import save_json
+
+    root = args.root.resolve()
+    arms = [parse_arm(p.name) for p in sorted(root.iterdir()) if p.is_dir() and ARM_PATTERN.match(p.name)]
+    targets = [a for a in arms if a["stage"] == "1b" and a["amplitude"] > 0]
+    cfg, source = _stage_1b_validation(args)
+    sfreq = float(cfg.data.target_sfreq)
+    negative = np.flatnonzero(source.plan["epilepsy"].to_numpy() == 0)
+    calibrate = patient_halves(source.plan["subject"].astype(str).to_numpy()[negative])
+    spec = hydra.utils.instantiate(cfg.feature.spec)
+    train_spec = hydra.utils.instantiate(cfg.feature.train_spec)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader_kwargs = {"batch_size": 8, "num_workers": args.num_workers}
+    for arm in targets:
+        folder = root / arm["name"]
+        if (folder / "threshold_readout.json").is_file():
+            continue
+        original = json.loads((folder / "synthetic_readout.json").read_text())
+        model = build_model(arm["arm"], spec, train_spec, arm["seed"], device)
+        model.load_checkpoint(folder / CHECKPOINT_NAME)
+        views = [
+            PlantedEvents(source, negative[mask], amplitude, arm["seed"], "val", sfreq)
+            for mask, amplitude in ((calibrate, 0), (~calibrate, arm["amplitude"]))
+        ]
+        focus_atoms = {focus: int(original[f"{focus}_atom"]) for focus in FOCI}
+        record = threshold_readout(model, *views, focus_atoms, loader_kwargs)
+        record = json_safe(record)
+        save_json(folder / "threshold_readout.json", {**arm, **record})
+        logger.info(
+            f"Re-read {arm['name']}: "
+            + ", ".join(f"{f} recall {record[f'{f}_recall']}, precision {record[f'{f}_precision']}" for f in FOCI)
+        )
+    return summarize_threshold(root)
+
+
+def summarize_threshold(root: Path) -> dict[str, Any]:
+    """Apply the gate rules to the stage-1b arms with the re-read recall and precision (protocol section 10.6)."""
+    from src.run_patient_waveform_sweep import save_json
+
+    rows, curves = [], []
+    for folder in sorted(p for p in root.iterdir() if p.is_dir() and ARM_PATTERN.match(p.name)):
+        row = (
+            json.loads((folder / "synthetic_readout.json").read_text())
+            if (folder / "synthetic_readout.json").is_file()
+            else None
+        )
+        if row is None or row["stage"] != "1b":
+            continue
+        reread_path = folder / "threshold_readout.json"
+        if row["amplitude"] > 0 and reread_path.is_file():
+            threshold = json.loads(reread_path.read_text())
+            for focus in FOCI:
+                row[f"{focus}_recall"], row[f"{focus}_precision"] = (
+                    threshold[f"{focus}_recall"],
+                    threshold[f"{focus}_precision"],
+                )
+                for rate, point in threshold[f"{focus}_curve"].items():
+                    curves.append(
+                        {
+                            "arm": row["arm"],
+                            "amplitude": row["amplitude"],
+                            "seed": row["seed"],
+                            "focus": focus,
+                            "atom": threshold[f"{focus}_atom"],
+                            "fa_per_minute": float(rate),
+                            **point,
+                        }
+                    )
+        elif row["amplitude"] > 0:
+            continue  # not re-read yet: recovery() then reports the amplitude as incomplete
+        rows.append(row)
+    if curves:
+        pl.DataFrame(curves).sort("arm", "amplitude", "seed", "focus", "fa_per_minute").write_csv(
+            root / "threshold_summary.csv"
+        )
+    verdicts = {arm: recovery(rows, "1b", arm) for arm in ("f5", "s4ext")}
+    outcome = stage_outcome("1b", verdicts)
+    decision = {
+        "rule": "protocol section 10.6 (post hoc)",
+        "fa_per_minute": THRESHOLD_FA_PER_MINUTE,
+        "recovers": {arm: {str(a): v for a, v in verdict.items()} for arm, verdict in verdicts.items()},
+        "outcome": outcome,
+    }
+    save_json(root / "threshold_decision.json", decision)
+    logger.info(f"Threshold re-read of stage 1b: {outcome}")
+    return decision
 
 
 # ---------------------------------------------------------------------- figure
@@ -682,8 +917,6 @@ def stage_outcome(stage: str, verdicts: dict[str, dict[int, bool | None]]) -> st
 
 def summarize(root: Path) -> dict[str, Any]:
     """Apply the gate-1 rules to the arms of ``root``; write the summary CSV and the decision JSON."""
-    import json
-
     from src.run_patient_waveform_sweep import save_json
 
     rows = []
@@ -710,7 +943,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Command-line entry point: ``run`` one arm, ``summarize`` a root or ``plot`` an input segment."""
+    """Command-line entry point: ``run`` one arm, ``summarize`` or ``reread`` a root, or ``plot`` an input segment."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="fit one arm; its directory name encodes stage, arm, amplitude and seed")
@@ -724,6 +957,12 @@ def main() -> None:
     run.add_argument("--allow-cold-cache", action="store_true")
     summary = commands.add_parser("summarize", help="apply the gate-1 rules to the arms of a root")
     summary.add_argument("--root", type=Path, required=True)
+    again = commands.add_parser("reread", help="post-hoc threshold re-read of the stage-1b dictionaries of a root")
+    again.add_argument("--root", type=Path, required=True)
+    again.add_argument("--manifests", type=Path, required=True, help="the 40 s offset audit")
+    again.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
+    again.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
+    again.add_argument("--num-workers", type=int, default=4)
     figure = commands.add_parser("plot", help="draw one stage-1a validation segment as the model sees it")
     figure.add_argument("--seed", type=int, default=0)
     figure.add_argument("--index", type=int, default=0, help="validation segment")
@@ -731,6 +970,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "summarize":
         summarize(args.root.resolve())
+    elif args.command == "reread":
+        reread(args)
     elif args.command == "plot":
         default = ROOT / "logs" / "separable_synthetic" / f"input_1a_s{args.seed}_i{args.index}.png"
         plot_input((args.output or default).resolve(), args.seed, args.index)

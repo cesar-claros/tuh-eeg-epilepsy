@@ -5,7 +5,8 @@ first failure. Covered: the montage topography and its phase reversal, the event
 its draws, the planted amplitude in robust units after the row scaling, the waveform match and
 its offset, the rank-1 factors of a format-5 atom, the detection counts, the readout of a
 dictionary that holds the planted template, the recovery rules and stage outcomes of protocol
-section 4.3 under both matching rules, the input figure, and a small stage-1a run with its summary.
+section 4.3 under both matching rules, the input figure, the threshold re-read of section 10.6 (its
+helpers and an exact template), and a small stage-1a run with its summary.
 """
 
 from __future__ import annotations
@@ -110,18 +111,46 @@ def test_detection_counts() -> None:
     assert np.isnan(recall) and np.isnan(precision)
 
 
-def test_readout_of_the_planted_template() -> None:
-    view = gate.PlantedEvents(_background(4), np.arange(4), 6, seed=0, split="val", sfreq=SFREQ)
+def _template_model(view: gate.PlantedEvents, offset: int = 89) -> SeparableSAE:
+    """One separable atom that holds the planted waveform at ``offset`` and both topographies."""
     model = SeparableSAE(spec=SeparableSpec(n_atoms=1, atom_len=256, pool_len=512, n_projections=2), device="cpu")
-    offset = 89
     time = torch.zeros(1, 256)
     time[0, offset : offset + len(view.unit)] = torch.from_numpy(view.unit)
     channel = torch.from_numpy(view.topographies.T.copy()).float()[None]
-    model.atoms = nn.Parameter(torch.cat([time, channel.flatten(1)], dim=1))
+    model.atoms = nn.Parameter(model._constrain(model._pack(time, channel)))
+    return model
+
+
+def test_readout_of_the_planted_template() -> None:
+    view = gate.PlantedEvents(_background(4), np.arange(4), 6, seed=0, split="val", sfreq=SFREQ)
+    offset = 89
+    model = _template_model(view, offset)
     record = gate.readout(model, view, batch_size=2, num_workers=0)
     assert abs(record["rho_w"] - 1.0) < 1e-6 and record["best_offset"] == offset
     assert record["rho_u_T3"] > 0.999 and record["rho_u_C4"] > 0.999
     assert record["n_events"] == 16 and record["recall"] >= 0.9, f"recall {record['recall']} of the exact template"
+
+
+def test_threshold_helpers() -> None:
+    responses = torch.tensor([[0.0, 1.0, 0.0, 3.0, 2.0, 0.0, 0.0, 5.0]])
+    assert torch.nonzero(gate.local_maxima(responses, 1)[0]).flatten().tolist() == [1, 3, 7]
+    heights = np.array([1.0, 5.0, 3.0, 2.0, 4.0])
+    assert gate.calibrated_threshold(heights, minutes=2.0, rate=1.0) == 3.0, "two peaks must stay above"
+    assert gate.calibrated_threshold(heights, minutes=2.0, rate=10.0) == 0.0
+    assert gate.patient_halves(np.array(["b", "a", "b", "c"])).tolist() == [False, True, False, True]
+    assert gate.json_safe({"a": float("nan"), "b": {"c": [1.0, float("nan")]}}) == {"a": None, "b": {"c": [1.0, None]}}
+
+
+def test_threshold_readout_of_the_planted_template() -> None:
+    background = _background(4)
+    calibration = gate.PlantedEvents(background, np.arange(2), 0, seed=0, split="val", sfreq=SFREQ)
+    evaluation = gate.PlantedEvents(background, np.arange(2, 4), 6, seed=0, split="val", sfreq=SFREQ)
+    loader = {"batch_size": 2, "num_workers": 0}
+    record = gate.threshold_readout(_template_model(evaluation), calibration, evaluation, {"T3": 0, "C4": 0}, loader)
+    assert abs(record["calibration_minutes"] - 4.0) < 1e-9 and record["evaluation_segments"] == 2
+    assert record["T3_recall"] >= 0.9 and record["C4_recall"] >= 0.9, "the exact template missed its events"
+    thresholds = [record["T3_curve"][str(rate)]["threshold"] for rate in gate.THRESHOLD_FA_CURVE]
+    assert thresholds == sorted(thresholds, reverse=True), "a higher false-alarm rate raised the threshold"
 
 
 def _row(stage: str, arm: str, amplitude: int, seed: int, passed: bool) -> dict[str, Any]:
