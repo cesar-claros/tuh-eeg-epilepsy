@@ -3,7 +3,7 @@
 Protocol: ``documentation/separable_atom_sae_protocol.md``, section 4 (equation numbers refer to
 ``documentation/Separable Atom Encoder Mathematics.md``). Spike-and-wave events ``a u* s^T`` from
 two montage foci are planted into background segments; each arm learns a dictionary by
-reconstruction alone, and the readout asks whether it learned the event. Four subcommands:
+reconstruction alone, and the readout asks whether it learned the event. Five subcommands:
 
 - ``run`` fits one arm, named ``{stage}_{arm}_a{amplitude}_s{seed}`` by its output directory:
   stage ``1a`` (AR(1) background with artifacts, CPU or GPU, no corpus) or ``1b`` (real segments
@@ -14,6 +14,8 @@ reconstruction alone, and the readout asks whether it learned the event. Four su
   below) and writes ``synthetic_summary.csv`` and ``synthetic_decision.json``.
 - ``reread`` re-reads the stage-1b dictionaries of a root with threshold detection, calibrated on
   event-free validation patients (protocol section 10.6; post hoc, no retraining).
+- ``oracle`` applies the same threshold readout to oracle atoms that hold the planted template and
+  topography, on plain and first-differenced rows (protocol section 10.9; post hoc, no training).
 - ``plot`` draws one stage-1a validation segment as the model sees it, at every amplitude, with the
   waveform and the topographies of the events (CPU, seconds, no corpus).
 
@@ -41,6 +43,7 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from scipy.signal import lfilter
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 ROOT = rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
@@ -593,17 +596,23 @@ def threshold_readout(
     evaluation: PlantedEvents,
     focus_atoms: dict[str, int],
     loader_kwargs: dict[str, int],
+    offsets: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     """Recall and precision of thresholded response peaks of each focus atom (protocol section 10.6).
 
     ``calibration`` holds event-free segments and sets one threshold per atom and false-alarm rate;
-    ``evaluation`` holds the planted segments of other patients. Returns, per focus, the recall and
-    precision at ``THRESHOLD_FA_PER_MINUTE`` (``{focus}_recall``, ``{focus}_precision``) and the curve
-    over ``THRESHOLD_FA_CURVE``, with the thresholds and the calibration duration.
+    ``evaluation`` holds the planted segments of other patients. ``offsets`` gives the template's
+    start in each atom; by default it is the best-lag offset of the planted template. Returns, per
+    focus, the recall and precision at ``THRESHOLD_FA_PER_MINUTE`` (``{focus}_recall``,
+    ``{focus}_precision``) and the curve over ``THRESHOLD_FA_CURVE``, with the thresholds and the
+    durations of both halves. Each curve point also holds the events, the detections and the
+    false-alarm rate per minute of the evaluation half (section 10.9).
     """
     atoms = sorted(set(focus_atoms.values()))
-    waveforms, _, _ = factors(model)
-    _, offset = waveform_match(waveforms, evaluation.unit)
+    if offsets is None:
+        waveforms, _, _ = factors(model)
+        _, best = waveform_match(waveforms, evaluation.unit)
+        offsets = {k: int(best[k]) for k in atoms}
     heights: dict[int, list[np.ndarray]] = {k: [] for k in atoms}
     minutes = 0.0
     for x, _ in DataLoader(calibration, shuffle=False, **loader_kwargs):
@@ -616,7 +625,7 @@ def threshold_readout(
         k: {rate: calibrated_threshold(np.concatenate(heights[k]), minutes, rate) for rate in THRESHOLD_FA_CURVE}
         for k in atoms
     }
-    left, index = model.padding[0], 0
+    left, index, evaluation_minutes = model.padding[0], 0, 0.0
     positions: dict[tuple[int, float], list[np.ndarray]] = {(k, r): [] for k in atoms for r in THRESHOLD_FA_CURVE}
     expected: dict[str, list[np.ndarray]] = {focus: [] for focus in FOCI}
     for x, _ in DataLoader(evaluation, shuffle=False, **loader_kwargs):
@@ -629,15 +638,30 @@ def threshold_readout(
                     above = peaks[j, a] & (responses[j, a] > thresholds[k][rate])
                     positions[(k, rate)].append(torch.nonzero(above).flatten().cpu().numpy())
             for f, focus in enumerate(FOCI):
-                expected[focus].append((onsets + left - offset[focus_atoms[focus]])[foci == f])
+                expected[focus].append((onsets + left - offsets[focus_atoms[focus]])[foci == f])
             index += 1
-    record: dict[str, Any] = {"calibration_minutes": minutes, "evaluation_segments": index}
+        evaluation_minutes += x.shape[0] * x.shape[-1] / evaluation.sfreq / 60.0
+    record: dict[str, Any] = {
+        "calibration_minutes": minutes,
+        "evaluation_minutes": evaluation_minutes,
+        "evaluation_segments": index,
+    }
     for focus in FOCI:
         k = focus_atoms[focus]
         curve = {}
         for rate in THRESHOLD_FA_CURVE:
-            recall, precision, _, _ = detection(positions[(k, rate)], expected[focus], DETECTION_TOLERANCE)
-            curve[str(rate)] = {"threshold": thresholds[k][rate], "recall": recall, "precision": precision}
+            recall, precision, n_events, n_detections = detection(
+                positions[(k, rate)], expected[focus], DETECTION_TOLERANCE
+            )
+            hits = round(precision * n_detections) if n_detections else 0
+            curve[str(rate)] = {
+                "threshold": thresholds[k][rate],
+                "recall": recall,
+                "precision": precision,
+                "n_events": n_events,
+                "n_detections": n_detections,
+                "evaluation_fa_per_minute": (n_detections - hits) / max(evaluation_minutes, 1e-30),
+            }
         primary = curve[str(THRESHOLD_FA_PER_MINUTE)]
         record.update(
             {
@@ -751,9 +775,10 @@ def summarize_threshold(root: Path) -> dict[str, Any]:
             continue  # not re-read yet: recovery() then reports the amplitude as incomplete
         rows.append(row)
     if curves:
-        pl.DataFrame(curves).sort("arm", "amplitude", "seed", "focus", "fa_per_minute").write_csv(
-            root / "threshold_summary.csv"
-        )
+        # Records written before section 10.9 lack the evaluation counts; their cells stay empty.
+        pl.DataFrame(curves, infer_schema_length=None).sort(
+            "arm", "amplitude", "seed", "focus", "fa_per_minute"
+        ).write_csv(root / "threshold_summary.csv")
     verdicts = {arm: recovery(rows, "1b", arm) for arm in ("f5", "s4ext")}
     outcome = stage_outcome("1b", verdicts)
     decision = {
@@ -764,6 +789,183 @@ def summarize_threshold(root: Path) -> dict[str, Any]:
     }
     save_json(root / "threshold_decision.json", decision)
     logger.info(f"Threshold re-read of stage 1b: {outcome}")
+    return decision
+
+
+# ---------------------------------------------------------------------- post-hoc oracle matched filter
+
+# Protocol section 10.9, fixed on 2026-10-29 before any result. Post hoc: it does not change the gate decision.
+ORACLE_DOMAINS = ("none", "diff")  # pre-emphasis of the rows; "none" is the encoder of every gate-1 arm
+ORACLE_PATTERN = re.compile(r"^oracle_(?P<domain>none|diff)_a(?P<amplitude>\d+)_s(?P<seed>\d+)\.json$")
+ORACLE_OUTCOMES = {
+    "atoms_limit": "A perfect atom passes where the learned atoms failed: a changed objective is worth a test",
+    "input_limit": "Only differenced rows let a perfect atom pass: the next test is a retrain on differenced rows",
+    "task_limit": "No perfect atom passes at amplitude 6: the objective is not the limit; this supports closing",
+    "incomplete": "Some oracle runs are missing: finish them before reading the rule",
+}
+
+
+def oracle_template(sfreq: float, domain: str) -> np.ndarray:
+    """The unit planted template in the row domain of the oracle: the template itself or its first difference.
+
+    Under ``diff``, an event that starts at ``onset`` becomes ``diff([0, s, 0])`` (one sample
+    longer), which also starts at ``onset``, so the alignment of section 4.2 does not change.
+    """
+    unit, _ = event_template(sfreq)
+    if domain == "diff":
+        unit = np.diff(np.r_[0.0, unit, 0.0])
+    return unit / np.linalg.norm(unit)
+
+
+def oracle_model(
+    spec: WaveformSpec, channels: list[str], domain: str, sfreq: float, device: str
+) -> tuple[SeparableSAE, int]:
+    """The oracle dictionary of section 10.9: atom ``f`` holds the planted template and ``u*`` of focus ``f``.
+
+    Every other field of ``spec`` (atom length, pooling, clip) is the campaign's, so the rows and
+    the responses are those of the gate-1 arms. Returns the model and the template's offset in
+    every atom.
+    """
+    template = oracle_template(sfreq, domain)
+    offset = (spec.atom_len - len(template)) // 2
+    fields = {name: getattr(spec, name) for name in WaveformSpec.__dataclass_fields__}
+    fields.update(n_atoms=len(FOCI), pre_emphasis=domain)
+    model = SeparableSAE(spec=SeparableSpec(**fields, n_projections=1, loss_support="extended"), device=device)
+    time = torch.zeros(len(FOCI), spec.atom_len, dtype=torch.float64)
+    time[:, offset : offset + len(template)] = torch.from_numpy(template)
+    channel = torch.from_numpy(np.stack([focal_topography(channels, focus) for focus in FOCI]))[:, :, None]
+    model.atoms = nn.Parameter(model._constrain(model._pack(time, channel)).float().to(model.device))
+    return model, offset
+
+
+def oracle_passes(records: list[dict[str, Any]], domain: str) -> dict[int, bool | None]:
+    """Whether the oracle of ``domain`` passes at each event amplitude (section 10.9; ``None`` if incomplete).
+
+    It passes when, in every seed, at least one focus meets the recall and precision criteria of
+    section 4.3 at ``THRESHOLD_FA_PER_MINUTE``.
+    """
+    table = {(r["amplitude"], r["seed"]): r for r in records if r["domain"] == domain}
+
+    def meets(value: float | None, threshold: float) -> bool:
+        return value is not None and not math.isnan(value) and value >= threshold
+
+    verdict: dict[int, bool | None] = {}
+    for amplitude in AMPLITUDES[1:]:
+        if any((amplitude, seed) not in table for seed in SEEDS):
+            verdict[amplitude] = None
+            continue
+        verdict[amplitude] = all(
+            any(
+                meets(table[(amplitude, seed)][f"{f}_recall"], RECALL_MIN)
+                and meets(table[(amplitude, seed)][f"{f}_precision"], PRECISION_MIN)
+                for f in FOCI
+            )
+            for seed in SEEDS
+        )
+    return verdict
+
+
+def oracle_outcome(verdicts: dict[str, dict[int, bool | None]]) -> str:
+    """The outcome label of section 10.9 from the verdicts of both domains, read at the top amplitude."""
+    if any(v is None for verdict in verdicts.values() for v in verdict.values()):
+        return "incomplete"
+    top = AMPLITUDES[-1]
+    if verdicts["none"][top]:
+        return "atoms_limit"
+    return "input_limit" if verdicts["diff"][top] else "task_limit"
+
+
+def oracle(args: argparse.Namespace) -> dict[str, Any]:
+    """Threshold readout of the oracle atoms in both domains, at every event amplitude and seed (section 10.9).
+
+    Uses the validation patients, halves and event draws of the re-read (section 10.6). Runs that
+    already hold their ``oracle_{domain}_a{amplitude}_s{seed}.json`` are skipped. Writes
+    ``oracle_summary.csv`` and ``oracle_decision.json`` to the root.
+
+    Raises
+    ------
+    ValueError
+        If the root is not a directory.
+    """
+    import hydra
+
+    from src.run_patient_waveform_sweep import save_json
+
+    root = args.root.resolve()
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory; pass the gate-1 root")
+    cfg, source = _stage_1b_validation(args)
+    sfreq = float(cfg.data.target_sfreq)
+    negative = np.flatnonzero(source.plan["epilepsy"].to_numpy() == 0)
+    calibrate = patient_halves(source.plan["subject"].astype(str).to_numpy()[negative])
+    spec = hydra.utils.instantiate(cfg.feature.spec)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader_kwargs = {"batch_size": 8, "num_workers": args.num_workers}
+    focus_atoms = {focus: f for f, focus in enumerate(FOCI)}
+    for domain in ORACLE_DOMAINS:
+        model, offset = oracle_model(spec, list(source.target_channels), domain, sfreq, device)
+        for amplitude in AMPLITUDES[1:]:
+            for seed in SEEDS:
+                path = root / f"oracle_{domain}_a{amplitude}_s{seed}.json"
+                if path.is_file():
+                    continue
+                views = [
+                    PlantedEvents(source, negative[mask], planted, seed, "val", sfreq)
+                    for mask, planted in ((calibrate, 0), (~calibrate, amplitude))
+                ]
+                offsets = dict.fromkeys(focus_atoms.values(), offset)
+                record = threshold_readout(model, *views, focus_atoms, loader_kwargs, offsets)
+                record = json_safe({"domain": domain, "amplitude": amplitude, "seed": seed, "offset": offset, **record})
+                save_json(path, record)
+                logger.info(
+                    f"Oracle {domain} a{amplitude} s{seed}: "
+                    + ", ".join(
+                        f"{f} recall {record[f'{f}_recall']}, precision {record[f'{f}_precision']}" for f in FOCI
+                    )
+                )
+    return summarize_oracle(root)
+
+
+def summarize_oracle(root: Path) -> dict[str, Any]:
+    """Apply the rule of section 10.9 to the oracle runs of ``root``; write the summary CSV and the decision JSON.
+
+    Raises
+    ------
+    ValueError
+        If the root holds no oracle run.
+    """
+    from src.run_patient_waveform_sweep import save_json
+
+    records = [json.loads(p.read_text()) for p in sorted(root.iterdir()) if ORACLE_PATTERN.match(p.name)]
+    if not records:
+        raise ValueError(f"no oracle runs under {root}")
+    points = [
+        {
+            "domain": r["domain"],
+            "amplitude": r["amplitude"],
+            "seed": r["seed"],
+            "focus": focus,
+            "fa_per_minute": float(rate),
+            **point,
+        }
+        for r in records
+        for focus in FOCI
+        for rate, point in r[f"{focus}_curve"].items()
+    ]
+    pl.DataFrame(points, infer_schema_length=None).sort(
+        "domain", "amplitude", "seed", "focus", "fa_per_minute"
+    ).write_csv(root / "oracle_summary.csv")
+    verdicts = {domain: oracle_passes(records, domain) for domain in ORACLE_DOMAINS}
+    outcome = oracle_outcome(verdicts)
+    decision = {
+        "rule": "protocol section 10.9 (post hoc)",
+        "fa_per_minute": THRESHOLD_FA_PER_MINUTE,
+        "passes": {domain: {str(a): v for a, v in verdict.items()} for domain, verdict in verdicts.items()},
+        "outcome": outcome,
+        "next_step": ORACLE_OUTCOMES[outcome],
+    }
+    save_json(root / "oracle_decision.json", decision)
+    logger.info(f"Oracle matched filter: {outcome}. {ORACLE_OUTCOMES[outcome]}")
     return decision
 
 
@@ -943,7 +1145,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Command-line entry point: ``run`` one arm, ``summarize`` or ``reread`` a root, or ``plot`` an input segment."""
+    """Command-line entry point: ``run`` an arm, ``summarize``, ``reread`` or ``oracle`` a root, ``plot`` a segment."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="fit one arm; its directory name encodes stage, arm, amplitude and seed")
@@ -963,6 +1165,12 @@ def main() -> None:
     again.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
     again.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
     again.add_argument("--num-workers", type=int, default=4)
+    best = commands.add_parser("oracle", help="post-hoc threshold readout of oracle atoms that hold the planted event")
+    best.add_argument("--root", type=Path, required=True, help="the gate-1 root that holds the re-read")
+    best.add_argument("--manifests", type=Path, required=True, help="the 40 s offset audit")
+    best.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
+    best.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
+    best.add_argument("--num-workers", type=int, default=4)
     figure = commands.add_parser("plot", help="draw one stage-1a validation segment as the model sees it")
     figure.add_argument("--seed", type=int, default=0)
     figure.add_argument("--index", type=int, default=0, help="validation segment")
@@ -972,6 +1180,8 @@ def main() -> None:
         summarize(args.root.resolve())
     elif args.command == "reread":
         reread(args)
+    elif args.command == "oracle":
+        oracle(args)
     elif args.command == "plot":
         default = ROOT / "logs" / "separable_synthetic" / f"input_1a_s{args.seed}_i{args.index}.png"
         plot_input((args.output or default).resolve(), args.seed, args.index)

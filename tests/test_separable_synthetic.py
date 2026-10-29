@@ -6,7 +6,8 @@ its draws, the planted amplitude in robust units after the row scaling, the wave
 its offset, the rank-1 factors of a format-5 atom, the detection counts, the readout of a
 dictionary that holds the planted template, the recovery rules and stage outcomes of protocol
 section 4.3 under both matching rules, the input figure, the threshold re-read of section 10.6 (its
-helpers and an exact template), and a small stage-1a run with its summary.
+helpers and an exact template), the oracle matched filter of section 10.9 (its template, model,
+detection and rule), and a small stage-1a run with its summary.
 """
 
 from __future__ import annotations
@@ -151,6 +152,77 @@ def test_threshold_readout_of_the_planted_template() -> None:
     assert record["T3_recall"] >= 0.9 and record["C4_recall"] >= 0.9, "the exact template missed its events"
     thresholds = [record["T3_curve"][str(rate)]["threshold"] for rate in gate.THRESHOLD_FA_CURVE]
     assert thresholds == sorted(thresholds, reverse=True), "a higher false-alarm rate raised the threshold"
+    point = record["C4_curve"][str(gate.THRESHOLD_FA_PER_MINUTE)]
+    assert abs(record["evaluation_minutes"] - 4.0) < 1e-9 and point["n_events"] == 4
+    hits = round(point["precision"] * point["n_detections"])
+    assert abs(point["evaluation_fa_per_minute"] - (point["n_detections"] - hits) / 4.0) < 1e-12
+
+
+def test_oracle_template_and_model() -> None:
+    unit, _ = gate.event_template(SFREQ)
+    differenced = gate.oracle_template(SFREQ, "diff")
+    assert np.allclose(gate.oracle_template(SFREQ, "none"), unit) and len(differenced) == len(unit) + 1
+    signal = np.zeros(400)
+    signal[100 : 100 + len(unit)] = unit
+    rows = np.diff(signal, prepend=signal[0])  # the row pipeline's first difference
+    assert np.allclose(rows[100 : 100 + len(differenced)] / np.linalg.norm(rows), differenced)
+    assert not rows[:100].any() and not rows[100 + len(differenced) :].any(), "the differenced event moved"
+    spec = WaveformSpec(n_atoms=64, atom_len=256, pool_len=512, top_r=1)
+    for domain in gate.ORACLE_DOMAINS:
+        model, offset = gate.oracle_model(spec, CHANNELS, domain, SFREQ, "cpu")
+        template = gate.oracle_template(SFREQ, domain)
+        time, channel, _ = gate.factors(model)
+        assert offset == 89 and model.spec.n_atoms == 2 and model.spec.pre_emphasis == domain
+        assert np.allclose(time[:, offset : offset + len(template)], template, atol=1e-6)
+        for f, focus in enumerate(gate.FOCI):
+            assert abs(float(channel[f, :, 0] @ gate.focal_topography(CHANNELS, focus)) - 1.0) < 1e-5
+
+
+def test_oracle_detects_on_the_ar_background() -> None:
+    background = _background(4)
+    calibration = gate.PlantedEvents(background, np.arange(2), 0, seed=0, split="val", sfreq=SFREQ)
+    evaluation = gate.PlantedEvents(background, np.arange(2, 4), 6, seed=0, split="val", sfreq=SFREQ)
+    spec = WaveformSpec(n_atoms=64, atom_len=256, pool_len=512, top_r=1)
+    loader = {"batch_size": 2, "num_workers": 0}
+    for domain in gate.ORACLE_DOMAINS:
+        model, offset = gate.oracle_model(spec, CHANNELS, domain, SFREQ, "cpu")
+        offsets = dict.fromkeys((0, 1), offset)
+        record = gate.threshold_readout(model, calibration, evaluation, {"T3": 0, "C4": 1}, loader, offsets)
+        for focus in gate.FOCI:
+            assert record[f"{focus}_recall"] >= 0.9, f"the {domain} oracle missed its {focus} events"
+
+
+def _oracle_record(domain: str, amplitude: int, seed: int, precision: float | None) -> dict[str, Any]:
+    point = {"threshold": 1.0, "recall": 0.95, "precision": precision, "n_events": 4, "n_detections": 4}
+    curve = {str(rate): {**point, "evaluation_fa_per_minute": 0.5} for rate in gate.THRESHOLD_FA_CURVE}
+    focus = {
+        f"{f}_{k}": v for f in gate.FOCI for k, v in (("recall", 0.95), ("precision", precision), ("curve", curve))
+    }
+    return {"domain": domain, "amplitude": amplitude, "seed": seed, **focus}
+
+
+def test_oracle_rule_and_summary() -> None:
+    cases = (
+        ({"none": set(), "diff": set()}, "task_limit"),
+        ({"none": set(), "diff": {6}}, "input_limit"),
+        ({"none": {6}, "diff": set()}, "atoms_limit"),
+        ({"none": {3}, "diff": {3}}, "task_limit"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for passing, expected in cases:
+            for domain in gate.ORACLE_DOMAINS:
+                for amplitude in gate.AMPLITUDES[1:]:
+                    for seed in gate.SEEDS:
+                        precision = 0.6 if amplitude in passing[domain] else 0.3
+                        record = _oracle_record(domain, amplitude, seed, precision)
+                        (root / f"oracle_{domain}_a{amplitude}_s{seed}.json").write_text(json.dumps(record))
+            assert gate.summarize_oracle(root)["outcome"] == expected, f"{passing} did not give {expected}"
+        assert (root / "oracle_summary.csv").is_file() and (root / "oracle_decision.json").is_file()
+        (root / "oracle_diff_a3_s1.json").unlink()
+        assert gate.summarize_oracle(root)["outcome"] == "incomplete"
+    one_seed = [_oracle_record("none", 6, 0, 0.6), _oracle_record("none", 6, 1, None)]
+    assert gate.oracle_passes(one_seed, "none")[6] is False, "a seed without detections passed"
 
 
 def _row(stage: str, arm: str, amplitude: int, seed: int, passed: bool) -> dict[str, Any]:
