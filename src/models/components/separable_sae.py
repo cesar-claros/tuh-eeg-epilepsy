@@ -17,11 +17,15 @@ the format-5 decoder output for the same code.
 The two factors share one parameter ``atoms`` of shape ``(K, L + C*D)``: ``w_k`` first,
 then ``U_k`` flattened in ``(C, D)`` order. The training loops of ``waveform_sae.py`` and
 ``patient_waveform.py`` handle ``atoms`` as one tensor (one Adam group, one constraint
-step, one best-state copy), so they run unchanged.
+step, one best-state copy), so they run unchanged. With ``step_matched`` the parameter
+stores ``w_k / sqrt(C)`` and ``U_k / sqrt(L)``. Adam moves every stored entry by about
+``lr`` per step, so the factors move by ``lr sqrt(C)`` and ``lr sqrt(L)``: the same
+relative step as a format-5 entry of size ``1 / sqrt(C L)``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +43,7 @@ __all__ = ["CHECKPOINT_FORMAT", "MODEL_TAG", "SeparableSAE", "SeparableSpec"]
 _EPS = 1e-8
 _LOSS_SUPPORTS = ("extended", "central")
 MODEL_TAG = "separable_sae"
-CHECKPOINT_FORMAT = 1
+CHECKPOINT_FORMAT = 2  # format 1 stored the factors unscaled
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,10 @@ class SeparableSpec(WaveformSpec):
         ``extended``: score every decoded window over its ``P + L - 1`` samples against
         the overlapping target windows (equations 22 to 24). ``central``: score the
         window's own ``P`` samples, as format 5 does.
+    step_matched : bool
+        Store ``w_k / sqrt(C)`` and ``U_k / sqrt(L)``, so that Adam gives the factors the
+        relative step of a format-5 entry at the same learning rate (learning rates
+        ``lr sqrt(C)`` and ``lr sqrt(L)``). The model function does not change.
 
     ``atom_norm`` must stay ``unit`` and ``center_atoms`` false: equation (4) normalizes
     ``w_k`` and every ``u_{k,d}`` separately.
@@ -61,6 +69,7 @@ class SeparableSpec(WaveformSpec):
 
     n_projections: int = 4
     loss_support: str = "extended"
+    step_matched: bool = True
 
 
 class SeparableSAE(WaveformSAE):
@@ -130,6 +139,8 @@ class SeparableSAE(WaveformSAE):
             raise ValueError(f"spec.n_projections must be a positive integer, got {n_projections!r}")
         if spec.loss_support not in _LOSS_SUPPORTS:
             raise ValueError(f"spec.loss_support must be one of {_LOSS_SUPPORTS}, got {spec.loss_support!r}")
+        if not isinstance(spec.step_matched, bool):
+            raise ValueError(f"spec.step_matched must be a boolean, got {spec.step_matched!r}")
         if spec.atom_norm != "unit" or spec.center_atoms:
             raise ValueError("the separable SAE needs atom_norm='unit' and center_atoms=False (equation 4)")
         if train_spec.crop_sampling != "full" or train_spec.recenter_atoms:
@@ -137,17 +148,31 @@ class SeparableSAE(WaveformSAE):
 
     # ------------------------------------------------------------------ factors
 
+    def _scales(self, n_channels: int) -> tuple[float, float]:
+        """Factors per stored unit of the waveforms and of the projections: ``(sqrt(C), sqrt(L))`` or ``(1, 1)``."""
+        if not self.spec.step_matched:
+            return 1.0, 1.0
+        return math.sqrt(n_channels), math.sqrt(self.spec.atom_len)
+
     def _split(self, atoms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Waveforms ``(K, L)`` and spatial projections ``(K, C, D)`` of packed atoms ``(K, L + C*D)``."""
-        length = self.spec.atom_len
-        return atoms[:, :length], atoms[:, length:].unflatten(1, (-1, self.spec.n_projections))
+        length, n_projections = self.spec.atom_len, self.spec.n_projections
+        n_channels = (atoms.shape[1] - length) // n_projections
+        time_scale, channel_scale = self._scales(n_channels)
+        channel = atoms[:, length:].unflatten(1, (n_channels, n_projections))
+        return time_scale * atoms[:, :length], channel_scale * channel
+
+    def _pack(self, time: torch.Tensor, channel: torch.Tensor) -> torch.Tensor:
+        """Packed atoms ``(K, L + C*D)`` of waveforms ``(K, L)`` and projections ``(K, C, D)``: ``_split`` inverted."""
+        time_scale, channel_scale = self._scales(channel.shape[1])
+        return torch.cat([time / time_scale, channel.flatten(1) / channel_scale], dim=1)
 
     def _constrain(self, atoms: torch.Tensor) -> torch.Tensor:
         """Unit norm for every waveform and every spatial projection (equation 4); a zero factor stays zero."""
         time, channel = self._split(atoms)
         time = time / torch.linalg.vector_norm(time, dim=1, keepdim=True).clamp_min(_EPS)
         channel = channel / torch.linalg.vector_norm(channel, dim=1, keepdim=True).clamp_min(_EPS)
-        return torch.cat([time, channel.flatten(1)], dim=1)
+        return self._pack(time, channel)
 
     @property
     def n_channels(self) -> int | None:
@@ -284,7 +309,7 @@ class SeparableSAE(WaveformSAE):
             sources = patches.detach().cpu().double().unflatten(0, (n_projections, n_atoms))
             time = torch.linalg.svd(sources[0], full_matrices=False).Vh[:, 0]
             channel = torch.einsum("dkcl,kl->kcd", sources, time)
-        atoms = torch.cat([time, channel.flatten(1)], dim=1).to(self.device, dtype)
+        atoms = self._pack(time, channel).to(self.device, dtype)
         self.atoms = nn.Parameter(self._constrain(atoms))
         log.info(
             f"Initialized {n_atoms} separable atoms ({self.n_channels} channels, {n_projections} projections, "

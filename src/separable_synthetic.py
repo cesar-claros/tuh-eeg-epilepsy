@@ -603,7 +603,7 @@ def plot_input(path: Path, seed: int = 0, index: int = 0, settings: Stage1aSetti
             axis.plot(seconds[span], (rows[amplitude][:, span] + offsets[:, None]).T, color=INK, linewidth=0.6)
             axis.axvspan(onset / sfreq, (onset + length) / sfreq, color=FOCUS_COLORS[f], alpha=0.25, linewidth=0)
             axis.set(yticks=offsets, yticklabels=channels if f == column == 0 else [], xlabel="Time (s)")
-            axis.set_title(f"{focus} event, amplitude {amplitude} (gray: without the event)", loc="left")
+            axis.set_title(f"{focus} event, amplitude {amplitude}\ngray: without the event", loc="left")
 
     axis = figure.add_subplot(grid[2, 0])
     axis.plot(1000 * np.arange(length) / sfreq, view.shape, color=INK, linewidth=2)

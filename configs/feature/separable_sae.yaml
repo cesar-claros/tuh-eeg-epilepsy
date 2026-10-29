@@ -15,6 +15,7 @@ spec:
   top_r: 1            # R atoms kept per pooling window
   n_projections: 4    # D spatial projections per atom
   loss_support: extended # extended: P+L-1 samples per decoded window; central: format 5's P samples
+  step_matched: true  # store w/sqrt(C) and U/sqrt(L): Adam steps lr*sqrt(C) and lr*sqrt(L), format 5's relative step
   pre_emphasis: none
   atom_norm: unit     # required: unit w_k and unit u_{k,d} (equation 4)
   center_atoms: false # required

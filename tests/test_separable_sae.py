@@ -9,8 +9,9 @@ window to its extended window (25), the decoder as the adjoint of the encoder,
 identity (26) and the R=1 optimum against a brute-force search, the tie rules of (10),
 (17) and (18), the index maps of (20) and (22), the separable fast path against the
 full-weight convolutions, equality with format 5 at D=1 under central loss support,
-a small fit on planted rank-1 events with the unit-norm constraint, the checkpoint
-round trip with its refusals, and the spec guards.
+the Adam step of each factor with and without step matching, a small fit on planted
+rank-1 events with the unit-norm constraint, the checkpoint round trip with its refusals, and the
+spec guards.
 """
 
 from __future__ import annotations
@@ -261,6 +262,25 @@ def _residual(model: SeparableSAE, x: torch.Tensor) -> float:
     return float(totals[0] / totals[1])
 
 
+def test_step_matching_scales_the_adam_step_of_each_factor() -> None:
+    for matched, expected in ((True, (np.sqrt(N_CHANNELS), np.sqrt(8))), (False, (1.0, 1.0))):
+        model = _model(step_matched=matched)
+        time, channel = model._split(model.atoms.detach())
+        assert torch.allclose(model._split(model._pack(time, channel))[0], time), "_pack is not the inverse of _split"
+        before = [t.clone() for t in (time, channel)]
+        weights = (_randn(*time.shape, seed=60), _randn(*channel.shape, seed=61))
+        optimizer = torch.optim.Adam([model.atoms], lr=1e-3)
+        time, channel = model._split(model.atoms)
+        ((time * weights[0]).sum() + (channel * weights[1]).sum()).backward()
+        optimizer.step()
+        after = model._split(model.atoms.detach())
+        for factor, (old, new) in enumerate(zip(before, after)):
+            step, target = (new - old).abs(), 1e-3 * expected[factor]
+            assert torch.allclose(step, torch.full_like(step, target), rtol=1e-4), (
+                f"factor {factor} moved by {float(step.mean()):.2e}, not {target:.2e} (step_matched={matched})"
+            )
+
+
 def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
     initial, x = _fitted(epochs=0)
     model, _ = _fitted(epochs=30)
@@ -288,7 +308,7 @@ def test_checkpoint_round_trip_and_refusals() -> None:
         assert np.load(out / "sae_time_atoms.npy").shape == (2, 16)
         assert np.load(out / "sae_channel_atoms.npy").shape == (2, 3, 2)
         checkpoint = torch.load(path, weights_only=True)
-        assert checkpoint["model"] == MODEL_TAG and checkpoint["format"] == 1
+        assert checkpoint["model"] == MODEL_TAG and checkpoint["format"] == 2
         torch.save({**checkpoint, "model": "waveform_sae", "format": 5}, out / "format5.pt")
         for spec, bad in ((model.spec, out / "format5.pt"), (replace(model.spec, n_projections=3), path)):
             _expect_error(
@@ -310,6 +330,7 @@ def test_spec_guards() -> None:
         SeparableSpec(loss_support="wide"),
         SeparableSpec(atom_norm="free"),
         SeparableSpec(center_atoms=True),
+        SeparableSpec(step_matched=1),  # type: ignore[arg-type]
     ):
         _expect_error(lambda spec=spec: SeparableSAE(spec=spec, device="cpu"), ValueError, f"{spec} was accepted")
     for train_spec in (WaveformTrainSpec(), WaveformTrainSpec(recenter_atoms=False, crop_sampling="tiled")):
