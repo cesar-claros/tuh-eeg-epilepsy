@@ -7,7 +7,9 @@ its offset, the rank-1 factors of a format-5 atom, the detection counts, the rea
 dictionary that holds the planted template, the recovery rules and stage outcomes of protocol
 section 4.3 under both matching rules, the input figure, the threshold re-read of section 10.6 (its
 helpers and an exact template), the oracle matched filter of section 10.9 (its template, model,
-detection and rule), and a small stage-1a run with its summary.
+detection and rule), the readouts on differenced rows of section 10.11, the initialization rule of
+section 10.12, and small stage-1a runs with their summary, also on differenced rows from a random
+start.
 """
 
 from __future__ import annotations
@@ -160,8 +162,8 @@ def test_threshold_readout_of_the_planted_template() -> None:
 
 def test_oracle_template_and_model() -> None:
     unit, _ = gate.event_template(SFREQ)
-    differenced = gate.oracle_template(SFREQ, "diff")
-    assert np.allclose(gate.oracle_template(SFREQ, "none"), unit) and len(differenced) == len(unit) + 1
+    differenced = gate.row_template(SFREQ, "diff")
+    assert np.allclose(gate.row_template(SFREQ, "none"), unit) and len(differenced) == len(unit) + 1
     signal = np.zeros(400)
     signal[100 : 100 + len(unit)] = unit
     rows = np.diff(signal, prepend=signal[0])  # the row pipeline's first difference
@@ -170,12 +172,32 @@ def test_oracle_template_and_model() -> None:
     spec = WaveformSpec(n_atoms=64, atom_len=256, pool_len=512, top_r=1)
     for domain in gate.ORACLE_DOMAINS:
         model, offset = gate.oracle_model(spec, CHANNELS, domain, SFREQ, "cpu")
-        template = gate.oracle_template(SFREQ, domain)
+        template = gate.row_template(SFREQ, domain)
         time, channel, _ = gate.factors(model)
         assert offset == 89 and model.spec.n_atoms == 2 and model.spec.pre_emphasis == domain
         assert np.allclose(time[:, offset : offset + len(template)], template, atol=1e-6)
         for f, focus in enumerate(gate.FOCI):
             assert abs(float(channel[f, :, 0] @ gate.focal_topography(CHANNELS, focus)) - 1.0) < 1e-5
+
+
+def test_readout_in_the_difference_domain() -> None:
+    view = gate.PlantedEvents(_background(4), np.arange(4), 6, seed=0, split="val", sfreq=SFREQ)
+    spec = WaveformSpec(n_atoms=64, atom_len=256, pool_len=512, top_r=1)
+    model, offset = gate.oracle_model(spec, CHANNELS, "diff", SFREQ, "cpu")
+    record = gate.readout(model, view, batch_size=2, num_workers=0)
+    assert abs(record["T3_rho_w"] - 1.0) < 1e-5 and abs(record["C4_rho_w"] - 1.0) < 1e-5, "no row-domain match"
+    assert record["best_offset"] == offset and (record["T3_atom"], record["C4_atom"]) == (0, 1)
+    plain, _ = gate.waveform_match(gate.factors(model)[0], view.unit)
+    assert plain.max() < 0.9, "the plain template also matches a differenced atom"
+
+
+def test_arm_pre_emphasis_reads_the_saved_config() -> None:
+    from omegaconf import OmegaConf
+
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        OmegaConf.save(OmegaConf.create({"feature": {"spec": {"pre_emphasis": "diff"}}}), folder / "config.yaml")
+        assert gate.arm_pre_emphasis(folder) == "diff"
 
 
 def test_oracle_detects_on_the_ar_background() -> None:
@@ -293,6 +315,72 @@ def test_plot_input_writes_a_figure() -> None:
         assert path.is_file() and path.stat().st_size > 10_000, "no figure was written"
 
 
+def _write_root(
+    root: Path, recovered: dict[str, set[int]], provenance: dict[str, Any], seeds: tuple[int, ...] = gate.SEEDS
+) -> None:
+    for row in _rows("1a", recovered):
+        row = {**row, "seed": seeds[gate.SEEDS.index(row["seed"])]}
+        folder = root / f"1a_{row['arm']}_a{row['amplitude']}_s{row['seed']}"
+        folder.mkdir(parents=True)
+        (folder / "synthetic_readout.json").write_text(json.dumps(row))
+        (folder / "synthetic_provenance.json").write_text(json.dumps(provenance))
+        (folder / "sae_training.csv").write_text("epoch,n_atoms_never_won,median_coherence\n1,5,0.9\n2,3,0.5\n")
+
+
+def test_initialization_rule_of_sections_10_12_and_10_13() -> None:
+    cases = (
+        ({"f5": {6}, "s4ext": {3, 6}}, {"f5": {6}, "s4ext": {6}}, ["s4ext_a3"], [], True),
+        ({"f5": {6}, "s4ext": set()}, {"f5": {6}, "s4ext": set()}, [], [], False),
+        ({"f5": set(), "s4ext": set()}, {"f5": {6}, "s4ext": set()}, [], ["f5_a6"], False),
+    )
+    for random_recovered, patch_recovered, gains, losses, run_1b in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            random_root, patch_root = Path(tmp) / "random", Path(tmp) / "patches"
+            _write_root(random_root, random_recovered, {"init": "random", "pre_emphasis": "none"})
+            _write_root(patch_root, patch_recovered, {})  # arms written before section 10.12
+            decision = gate.compare_initializations(random_root, patch_root)
+            assert (decision["gains"], decision["losses"], decision["gain"]) == (gains, losses, run_1b)
+            assert decision["median_atoms_never_won"] == {"random": 3.0, "patches": 3.0}
+            assert decision["median_coherence"] == {"random": 0.5, "patches": 0.5}
+            expected_cells = 2 * sum(len(v) for v in random_recovered.values())
+            assert decision["event_atom_cells"]["random"] == expected_cells
+            assert (random_root / "init_decision.json").is_file()
+    with tempfile.TemporaryDirectory() as tmp:
+        random_root, patch_root = Path(tmp) / "random", Path(tmp) / "patches"
+        _write_root(random_root, {"f5": {6}, "s4ext": set()}, {"init": "random", "pre_emphasis": "diff"})
+        _write_root(patch_root, {"f5": {6}, "s4ext": set()}, {"init": "patches", "pre_emphasis": "none"})
+        _expect_value_error(lambda: gate.compare_initializations(random_root, patch_root), "domains were mixed")
+        _expect_value_error(lambda: gate.compare_initializations(random_root, random_root), "two random roots passed")
+        short = Path(tmp) / "patches_5_epochs"
+        _write_root(short, {"f5": {6}, "s4ext": set()}, {"init": "patches", "pre_emphasis": "diff"})
+        for path in short.glob("*/synthetic_readout.json"):
+            path.write_text(json.dumps({**json.loads(path.read_text()), "epochs": 5}))
+        _expect_value_error(lambda: gate.compare_initializations(random_root, short), "epoch counts were mixed")
+        for folder in random_root.glob("1a_s4ext_a3_s1"):
+            (folder / "synthetic_readout.json").unlink()
+        _write_root(
+            Path(tmp) / "patches_diff", {"f5": {6}, "s4ext": set()}, {"init": "patches", "pre_emphasis": "diff"}
+        )
+        decision = gate.compare_initializations(random_root, Path(tmp) / "patches_diff")
+        assert decision["gain"] is None, "a missing arm did not leave the rule open"
+    with tempfile.TemporaryDirectory() as tmp:
+        random_root, patch_root = Path(tmp) / "random", Path(tmp) / "patches"
+        settings = {"init": "random", "pre_emphasis": "none", "reseed": True}
+        _write_root(random_root, {"f5": {6}, "s4ext": {3}}, settings)
+        _write_root(random_root, {"f5": {6}, "s4ext": {3}}, settings, seeds=(2, 3))
+        _write_root(patch_root, {"f5": {6}, "s4ext": set()}, {})
+        _write_root(patch_root, {"f5": {6}, "s4ext": set()}, {}, seeds=(2, 3))
+        decision = gate.compare_initializations(random_root, patch_root, seeds=(2, 3))
+        assert decision["gain"] is True and decision["gains"] == ["s4ext_a3"] and decision["random_reseeds"]
+        assert (random_root / "init_decision_s2_s3.json").is_file(), "the replication overwrote the first decision"
+        assert decision["event_atom_cells"]["random"] == 4, "cells of other seeds were counted"
+        reseeding = Path(tmp) / "patches_reseed"
+        _write_root(reseeding, {"f5": {6}, "s4ext": set()}, {"init": "patches", "reseed": True})
+        _expect_value_error(
+            lambda: gate.compare_initializations(random_root, reseeding), "a reseeding patch root passed"
+        )
+
+
 def test_stage_1a_run_and_summary() -> None:
     settings = gate.Stage1aSettings(n_train=4, n_val=2, n_atoms=2, atom_len=32, pool_len=64, n_times=7680)
     with tempfile.TemporaryDirectory() as tmp:
@@ -307,6 +395,17 @@ def test_stage_1a_run_and_summary() -> None:
         assert decision["1a"]["outcome"] == "incomplete" and (root / "synthetic_summary.csv").is_file()
         assert json.loads((root / "synthetic_decision.json").read_text())["per_focus_matching"] is True
         _expect_value_error(lambda: gate.parse_arm("1a_f5_a4_s0"), "an amplitude outside the gate was accepted")
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "1a_s4ext_a6_s0"
+        record = gate.fit_stage_1a(
+            output, epochs=2, device="cpu", settings=settings, pre_emphasis="diff", init="random", reseed=True
+        )
+        assert record["n_events"] == 2 and 0.0 <= record["rho_w"] <= 1.0
+        provenance = json.loads((output / "synthetic_provenance.json").read_text())
+        assert (provenance["pre_emphasis"], provenance["init"], provenance["reseed"]) == ("diff", "random", True)
+        assert "n_reseeded" in (output / "sae_training.csv").read_text().splitlines()[0]
+        saved = torch.load(output / "sae_state.pt", map_location="cpu", weights_only=False)
+        assert saved["spec"]["pre_emphasis"] == "diff", "the checkpoint does not record the differencing"
 
 
 if __name__ == "__main__":

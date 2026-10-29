@@ -13,12 +13,13 @@
 #*   STAGE=1a bash run_separable_synthetic.sh                  # stage 1a only, no corpus
 #*   STAGE=1b ROOT=<root with stage 1a> M=... SMOKE_DIR=... bash run_separable_synthetic.sh
 #* Environment: STAGE=all|1a|1b, ROOT, EPOCHS=5, DEVICE=auto (1a), NUM_WORKERS=4, M, SMOKE_DIR or
-#* SIGNAL_CACHE_DIR, DATA_DIR, FORCE_1B=0.
+#* SIGNAL_CACHE_DIR, DATA_DIR, FORCE_1B=0, PRE_EMPHASIS=none|diff (10.11), INIT=patches|random (10.12),
+#* RESEED=0|1 (stage 1a only, 10.13), SEEDS="0 1" ("2 3" for the replication of 10.13).
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  sed -n '3,16p' "$0" | sed 's/^#\* \{0,1\}//'
+  sed -n '3,17p' "$0" | sed 's/^#\* \{0,1\}//'
   exit 0
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -27,18 +28,36 @@ EPOCHS="${EPOCHS:-5}"
 DEVICE="${DEVICE:-auto}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 FORCE_1B="${FORCE_1B:-0}"
+PRE_EMPHASIS="${PRE_EMPHASIS:-none}"
+INIT="${INIT:-patches}"
+RESEED="${RESEED:-0}"
+SEEDS="${SEEDS:-0 1}"
 ROOT="${ROOT:-$SCRIPT_DIR/logs/separable_synthetic/gate1_$(date +%Y%m%d_%H%M%S)}"
 [[ "$STAGE" =~ ^(all|1a|1b)$ ]] || { echo "ERROR: STAGE must be all, 1a or 1b" >&2; exit 2; }
 [[ "$EPOCHS" =~ ^[1-9][0-9]*$ && "$NUM_WORKERS" =~ ^[0-9]+$ ]] || { echo "ERROR: bad EPOCHS or NUM_WORKERS" >&2; exit 2; }
+[[ "$PRE_EMPHASIS" =~ ^(none|diff)$ ]] || { echo "ERROR: PRE_EMPHASIS must be none or diff" >&2; exit 2; }
+[[ "$INIT" =~ ^(patches|random)$ ]] || { echo "ERROR: INIT must be patches or random" >&2; exit 2; }
+[[ "$RESEED" =~ ^[01]$ ]] || { echo "ERROR: RESEED must be 0 or 1" >&2; exit 2; }
+[[ "$SEEDS" =~ ^[0-9]+( [0-9]+)*$ ]] || { echo "ERROR: SEEDS must be seeds separated by spaces" >&2; exit 2; }
 cd -- "$SCRIPT_DIR"
 mkdir -p -- "$ROOT"
 ROOT=$(cd -- "$ROOT" && pwd)
+# One arm setting per root: summarize, reread and compare read every arm of a root together.
+marker="$ROOT/arm_settings.txt"
+settings="PRE_EMPHASIS=$PRE_EMPHASIS INIT=$INIT RESEED=$RESEED"
+if [[ -f "$marker" ]]; then
+  [[ "$(cat "$marker")" == "$settings" ]] || { echo "ERROR: $ROOT holds $(cat "$marker") arms; use a new ROOT" >&2; exit 2; }
+elif compgen -G "$ROOT/1?_*/synthetic_readout.json" > /dev/null && [[ "$settings" != "PRE_EMPHASIS=none INIT=patches RESEED=0" ]]; then
+  echo "ERROR: $ROOT holds arms of PRE_EMPHASIS=none INIT=patches RESEED=0; use a new ROOT" >&2
+  exit 2
+fi
+echo "$settings" > "$marker"
 STAMP=$(date +%Y%m%d_%H%M%S)
 failures="$ROOT/failures_$STAMP.txt"
 : > "$failures"
 git rev-parse HEAD >> "$ROOT/sha.txt"
 git diff > "$ROOT/dirty_$STAMP.diff"  # empty file = clean tree
-echo "$STAMP STAGE=$STAGE EPOCHS=$EPOCHS DEVICE=$DEVICE NUM_WORKERS=$NUM_WORKERS" >> "$ROOT/settings.txt"
+echo "$STAMP STAGE=$STAGE EPOCHS=$EPOCHS DEVICE=$DEVICE NUM_WORKERS=$NUM_WORKERS PRE_EMPHASIS=$PRE_EMPHASIS INIT=$INIT RESEED=$RESEED SEEDS=$SEEDS" >> "$ROOT/settings.txt"
 
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
@@ -48,7 +67,7 @@ python -m pytest -q tests/test_separable_synthetic.py tests/test_separable_sae.p
 run_stage() {
   local stage=$1
   shift
-  for seed in 0 1; do
+  for seed in $SEEDS; do
     for amplitude in 0 3 6; do
       for arm in f5 s4ext; do
         local name="${stage}_${arm}_a${amplitude}_s${seed}"
@@ -62,7 +81,7 @@ run_stage() {
         fi
         echo "$(date '+%F %T') start $name"
         if ! python -u src/separable_synthetic.py run --output "$ROOT/$name" --epochs "$EPOCHS" \
-            --num-workers "$NUM_WORKERS" "$@" > "$ROOT/$name.log" 2>&1; then
+            --num-workers "$NUM_WORKERS" --pre-emphasis "$PRE_EMPHASIS" --init "$INIT" --reseed "$RESEED" "$@" > "$ROOT/$name.log" 2>&1; then
           echo "FAILED $name" | tee -a "$failures"
           continue
         fi

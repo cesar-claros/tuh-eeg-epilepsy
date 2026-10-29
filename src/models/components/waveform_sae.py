@@ -52,6 +52,8 @@ _ATOM_NORMS = ("unit", "free")
 _INITS = ("patches", "random")
 _SAMPLINGS = ("full", "random", "tiled")
 _INIT_POOL_FACTOR = 8  # candidate patches drawn per atom for the data-patch initialization
+_RESEED_PER_STEP = 4  # residual patches offered to the reseeding pool by each training step
+_RESEED_POOL_FACTOR = 4  # pool capacity in patches per atom and per patch an atom consumes
 MODEL_TAG = "waveform_sae"
 CHECKPOINT_FORMAT = 5
 
@@ -174,6 +176,14 @@ class WaveformTrainSpec:
         No extra reading; the windows are encoded in chunks of ``chunk_windows``.
         Full mode always measures whole segments, with ``val_*`` and ``val_full_*``
         as aliases of the same statistics.
+    reseed_dead : bool
+        Segment sampling of full segments only (post hoc, separable atom protocol
+        section 10.13). The training steps of an epoch keep a pool of the
+        highest-energy residual patches; after every epoch but the last, every atom
+        that won no training window in the epoch is replaced from the pool, highest
+        energy first, as the initialization builds an atom from patches, and its
+        Adam moments are cleared. Under hard selection an atom that never wins gets
+        no gradient, so without this it stays dead.
     """
 
     epochs: int = 30
@@ -190,6 +200,7 @@ class WaveformTrainSpec:
     sampling_unit: str = "segment"
     patients_per_batch: int = 8
     segments_per_patient: int = 4
+    reseed_dead: bool = False
 
 
 @dataclass(frozen=True)
@@ -284,6 +295,7 @@ class WaveformSAE(nn.Module):
         self.fit_meta: dict[str, Any] = {}
         self.atom_stats: dict[str, list[float]] = {}
         self.won_windows: dict[str, list[int]] = {}
+        self._reseed_pool: tuple[torch.Tensor, torch.Tensor] | None = None
         self.fitted = False
         if pretrained:
             self.load_checkpoint(pretrained)
@@ -300,6 +312,8 @@ class WaveformSAE(nn.Module):
         if train_spec.sampling_unit == "patient" and train_spec.crop_sampling != "full":
             # Any top_r works for patient reconstruction; joint training keeps R=1 (validate_supervised).
             raise ValueError("patient sampling requires complete segments (crop_sampling=full)")
+        if train_spec.reseed_dead and (train_spec.sampling_unit != "segment" or train_spec.crop_sampling != "full"):
+            raise ValueError("reseed_dead is implemented for segment sampling of full segments only")
         for name, value, allowed in (
             ("spec.pre_emphasis", spec.pre_emphasis, _PRE_EMPHASIS),
             ("spec.atom_norm", spec.atom_norm, _ATOM_NORMS),
@@ -672,14 +686,20 @@ class WaveformSAE(nn.Module):
         return code, selected, reconstruction, rows, reconstruction
 
     def _segment_step(
-        self, rows: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor
+        self, rows: torch.Tensor, valid: torch.Tensor, atoms: torch.Tensor, collect: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Score the loss support, with top-R atoms per pooling window and a usable-channel denominator."""
+        """Score the loss support, with top-R atoms per pooling window and a usable-channel denominator.
+
+        ``collect`` (training steps under ``reseed_dead`` only) offers the residual patches of
+        the step to the reseeding pool; validation never does.
+        """
         code, selected, reconstruction, target, estimate = self._encode_reconstruct(rows, valid, atoms)
         scored = valid.to(rows.dtype).sum() * math.prod(target.shape[2:])
         loss = 0.5 * (target - estimate).pow(2).sum() / scored.clamp_min(1.0)
         with torch.no_grad():
             stats, per_atom = self._statistics(rows, reconstruction, code, selected)
+            if collect:
+                self._collect_reseed_patches(rows - reconstruction)
         return loss, stats, per_atom
 
     def _center(self, t: torch.Tensor) -> torch.Tensor:
@@ -1043,6 +1063,84 @@ class WaveformSAE(nn.Module):
             atoms.copy_(self._constrain(atoms))
         return len(moved)
 
+    # ------------------------------------------------------------------ dead-atom reseeding
+
+    @property
+    def _patches_per_atom(self) -> int:
+        """Patches that ``_atoms_from_patches`` consumes per atom: 1 for a free multichannel atom."""
+        return 1
+
+    def _atoms_from_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        """Constrained atoms from patches ``(P, n, C, L)`` (``P = _patches_per_atom``), as the patch initialization."""
+        return self._unit(self._constrain(patches[0].to(self.device)))
+
+    @torch.no_grad()
+    def _collect_reseed_patches(self, residual: torch.Tensor) -> None:
+        """Offer the highest-energy residual patches ``(C, L)`` of one step ``(B, C, T)`` to the bounded pool.
+
+        Candidates are local maxima of the residual energy over ``atom_len`` samples, at
+        least ``atom_len`` apart within a segment; non-finite and flat patches are
+        excluded. The pool keeps the most energetic patches up to its capacity.
+        """
+        if self._reseed_pool is None:
+            raise RuntimeError("the reseeding pool is not active (reseed_dead training only)")
+        length = self.spec.atom_len
+        if residual.shape[-1] < length:
+            return
+        energy = F.avg_pool1d(residual.pow(2).sum(1, keepdim=True), length, stride=1)
+        peaks = energy == F.max_pool1d(energy, 2 * length + 1, stride=1, padding=length)
+        flat = (energy * peaks).flatten()
+        top = flat.topk(min(_RESEED_PER_STEP, flat.numel()))
+        width = energy.shape[-1]
+        segment, start = top.indices // width, top.indices % width
+        patches = residual.unfold(-1, length, 1)[segment, :, start]
+        keep = (top.values > _ENERGY_FLOOR) & torch.isfinite(patches).flatten(1).all(-1)
+        if not bool(keep.any()):
+            return
+        pool_energy, pool_patches = self._reseed_pool
+        pool_energy = torch.cat([pool_energy, top.values[keep]])
+        pool_patches = torch.cat([pool_patches, patches[keep]])
+        capacity = _RESEED_POOL_FACTOR * self.spec.n_atoms * self._patches_per_atom
+        if pool_energy.numel() > capacity:
+            best = pool_energy.topk(capacity).indices
+            pool_energy, pool_patches = pool_energy[best], pool_patches[best]
+        self._reseed_pool = (pool_energy, pool_patches)
+
+    @torch.no_grad()
+    def _reseed_dead(self, won: torch.Tensor, optimizer: torch.optim.Optimizer) -> int:
+        """Replace the atoms that won no window (``won`` ``(K,)``) from the pool; returns the number replaced.
+
+        The most energetic patches go to the lowest-index dead atoms. Atoms without a
+        replacement are left as they are. The Adam moments of a replaced atom are cleared.
+        """
+        if self._reseed_pool is None:
+            raise RuntimeError("the reseeding pool is not active (reseed_dead training only)")
+        pool_energy, pool_patches = self._reseed_pool
+        dead = torch.nonzero(won == 0).flatten()
+        per_atom = self._patches_per_atom
+        n_new = min(int(dead.numel()), int(pool_energy.numel()) // per_atom)
+        if n_new == 0:
+            return 0
+        chosen = pool_energy.topk(n_new * per_atom).indices
+        patches = pool_patches[chosen].unflatten(0, (per_atom, n_new))
+        targets = dead[:n_new].to(self.atoms.device)
+        self.atoms[targets] = self._atoms_from_patches(patches).to(self.atoms.dtype)
+        state = optimizer.state.get(self.atoms) or {}
+        for key in ("exp_avg", "exp_avg_sq"):
+            if key in state:
+                state[key][targets] = 0.0
+        return n_new
+
+    def _empty_reseed_pool(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """An empty pool: energies ``(0,)`` and patches ``(0, C, L)`` on the atoms' device."""
+        if self.atoms is None or self.n_channels is None:
+            raise RuntimeError("the reseeding pool needs initialized atoms")
+        device, dtype = self.atoms.device, self.atoms.dtype
+        return (
+            torch.zeros(0, device=device, dtype=dtype),
+            torch.zeros(0, self.n_channels, self.spec.atom_len, device=device, dtype=dtype),
+        )
+
     def _median_coherence(self) -> float:
         """Median over atom pairs of the maximum absolute normalized cross-correlation over lags."""
         return self._lag_coherence(self._unit(self._dictionary().detach()))
@@ -1092,7 +1190,8 @@ class WaveformSAE(nn.Module):
         and ``scored_samples`` (usable channel-samples). Legacy modes record
         ``crops_dropped_frac`` and ``crop_energy_mean_over_median``;
         ``clipped_frac`` and ``val_clipped_frac`` (share of usable encoded samples at
-        the clip); ``n_recentered``; ``n_steps``. ``atom_stats`` keeps the per-atom table of the last epoch
+        the clip); ``n_recentered``; ``n_reseeded`` (``reseed_dead``); ``n_steps``.
+        ``atom_stats`` keeps the per-atom table of the last epoch
         (whole validation segments, else legacy validation crops, else training data). A module loaded from a checkpoint
         (``fitted``) returns at once and keeps its provenance.
 
@@ -1133,6 +1232,7 @@ class WaveformSAE(nn.Module):
         self.history = []
         self.won_windows = {}
         last: tuple[torch.Tensor, torch.Tensor] | None = None
+        reseed = train_spec.reseed_dead
         stats_split = "train"
         for epoch in range(train_spec.epochs):
             totals = torch.zeros(7, dtype=torch.float64, device=self.device)
@@ -1141,6 +1241,7 @@ class WaveformSAE(nn.Module):
             segments_seen, segments_skipped, scored_samples = 0, 0, 0
             clip = torch.zeros(2, dtype=torch.float64, device=self.device)
             energies = [torch.zeros(0, device=self.device)]
+            self._reseed_pool = self._empty_reseed_pool() if reseed else None
             for x, _ in tqdm(loader, desc=f"Waveform SAE epoch {epoch + 1}/{train_spec.epochs}"):
                 if full_segments:
                     rows, valid = self._full_rows(x)
@@ -1159,7 +1260,9 @@ class WaveformSAE(nn.Module):
                 for start in range(0, order.numel(), step_batch):
                     index = order[start : start + step_batch]
                     if full_segments:
-                        loss, stats, atom_sums = self._segment_step(rows[index], valid[index], self._dictionary())
+                        loss, stats, atom_sums = self._segment_step(
+                            rows[index], valid[index], self._dictionary(), collect=reseed
+                        )
                         scored_samples += int(valid[index].sum()) * rows.shape[-1]
                     else:
                         loss, stats, atom_sums = self._step(crops, index, self._dictionary())
@@ -1190,6 +1293,8 @@ class WaveformSAE(nn.Module):
             # last epoch) only prepares the next one.
             final = epoch + 1 == train_spec.epochs
             n_recentered = self._recenter(optimizer) if train_spec.recenter_atoms and not final else 0
+            n_reseeded = self._reseed_dead(per_atom[2], optimizer) if reseed and not final else 0
+            self._reseed_pool = None
             all_energy = torch.cat(energies)
             n_nonflat = int(all_energy.numel())
             record = {
@@ -1225,6 +1330,7 @@ class WaveformSAE(nn.Module):
                 "clipped_frac": float(clip[0] / clip[1].clamp_min(1.0)),
                 "val_clipped_frac": val_clipped_frac,
                 "n_recentered": n_recentered,
+                "n_reseeded": n_reseeded,
                 "n_steps": n_steps,
             }
             self.history.append(record)
@@ -1237,7 +1343,7 @@ class WaveformSAE(nn.Module):
                 f"never won {record['n_atoms_never_won']:.0f}, zero slots "
                 f"{record['selected_zero_frac']:.1%}, median coherence {record['median_coherence']:.2f}, "
                 f"clipped {record['clipped_frac']:.3%}, "
-                f"re-centered {n_recentered}, steps {n_steps}"
+                f"re-centered {n_recentered}, reseeded {n_reseeded}, steps {n_steps}"
             )
         if last is not None:
             self.atom_stats = {

@@ -1,9 +1,9 @@
 """Checks of the read-only factor analysis ``src/separable_factor_analysis.py`` (no corpus; CPU; seconds).
 
 Runs under pytest or as a script, which executes every ``test_*`` function and exits 1 on the
-first failure. Covered: the template and the topography against the gate-1 driver, the dominant
-frequency, the lag coherence and the signed best lag, and the arm summaries and event-atom rows
-of written format-5 and separable factors.
+first failure. Covered: the template (both row domains) and the topography against the gate-1
+driver, the dominant frequency, the lag coherence and the signed best lag, and the arm summaries
+and event-atom rows of written format-5 and separable factors.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ def _write_arm(folder: Path, energy: list[float], focus_atoms: tuple[int, int]) 
 
 def test_formulas_match_the_gate1_driver() -> None:
     assert np.allclose(fa.spike_wave(77), gate.event_template(256.0)[0]), "the template drifted from the driver"
+    for pre_emphasis in ("none", "diff"):
+        assert np.allclose(fa.row_template(77, pre_emphasis), gate.row_template(256.0, pre_emphasis))
     without_ears = [c for c in CHANNELS if "A1" not in c and "A2" not in c]
     for channels in (CHANNELS, without_ears):
         for focus in fa.FOCI:

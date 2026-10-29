@@ -3,19 +3,25 @@
 Protocol: ``documentation/separable_atom_sae_protocol.md``, section 4 (equation numbers refer to
 ``documentation/Separable Atom Encoder Mathematics.md``). Spike-and-wave events ``a u* s^T`` from
 two montage foci are planted into background segments; each arm learns a dictionary by
-reconstruction alone, and the readout asks whether it learned the event. Five subcommands:
+reconstruction alone, and the readout asks whether it learned the event. Six subcommands:
 
 - ``run`` fits one arm, named ``{stage}_{arm}_a{amplitude}_s{seed}`` by its output directory:
   stage ``1a`` (AR(1) background with artifacts, CPU or GPU, no corpus) or ``1b`` (real segments
   of non-epilepsy patients from the campaign cache, GPU); arm ``f5`` (format 5) or ``s4ext``
   (separable, D=4, extended loss support). Writes the dictionary artifacts, ``synthetic_readout.json``
-  and ``synthetic_provenance.json``.
+  and ``synthetic_provenance.json``. ``--pre-emphasis diff`` differences every row before the robust
+  scaling (protocol section 10.11, post hoc); ``--init random`` starts from Gaussian atoms in place
+  of data patches (section 10.12, post hoc); ``--reseed 1`` replaces atoms that won no window from
+  the residual after every epoch (stage 1a only; section 10.13, post hoc).
 - ``summarize`` reads the arms of a root, applies the rules fixed before any result (constants
   below) and writes ``synthetic_summary.csv`` and ``synthetic_decision.json``.
 - ``reread`` re-reads the stage-1b dictionaries of a root with threshold detection, calibrated on
   event-free validation patients (protocol section 10.6; post hoc, no retraining).
 - ``oracle`` applies the same threshold readout to oracle atoms that hold the planted template and
   topography, on plain and first-differenced rows (protocol section 10.9; post hoc, no training).
+- ``compare`` applies the initialization rule of sections 10.12 and 10.13 to a root of
+  random-initialized arms and a root of patch-initialized arms with the same pre-emphasis, at the
+  given seeds.
 - ``plot`` draws one stage-1a validation segment as the model sees it, at every amplitude, with the
   waveform and the topographies of the events (CPU, seconds, no corpus).
 
@@ -153,6 +159,19 @@ def event_template(sfreq: float) -> tuple[np.ndarray, np.ndarray]:
     """The stage-7 spike-and-wave template: unit norm for matching, unit peak for planting."""
     unit = _spike_wave(np, round(TEMPLATE_SECONDS * sfreq))
     return unit, unit / np.abs(unit).max()
+
+
+def row_template(sfreq: float, pre_emphasis: str = "none") -> np.ndarray:
+    """The unit planted template as the encoder sees it: the template itself or its first difference.
+
+    Under ``diff``, an event that starts at ``onset`` becomes ``diff([0, s, 0])`` (one sample
+    longer), which also starts at ``onset``, so the alignment of section 4.2 does not change
+    (protocol sections 10.9 and 10.11).
+    """
+    unit, _ = event_template(sfreq)
+    if pre_emphasis == "diff":
+        unit = np.diff(np.r_[0.0, unit, 0.0])
+    return unit / np.linalg.norm(unit)
 
 
 def focal_topography(channels: list[str], focus: str) -> np.ndarray:
@@ -329,9 +348,12 @@ def detection(positions: list[np.ndarray], expected: list[np.ndarray], tolerance
 
 @torch.no_grad()
 def readout(model: WaveformSAE, dataset: PlantedEvents, batch_size: int, num_workers: int) -> dict[str, Any]:
-    """Waveform and topography recovery and detection of the planted validation events (protocol section 4.2)."""
+    """Waveform and topography recovery and detection of the planted validation events (protocol section 4.2).
+
+    ``rho_w`` compares the waveforms with the template in the model's row domain (``row_template``).
+    """
     waveforms, topographies, rank_one = factors(model)
-    rho_w, offset = waveform_match(waveforms, dataset.unit)
+    rho_w, offset = waveform_match(waveforms, row_template(dataset.sfreq, model.spec.pre_emphasis))
     rho_u = np.abs(np.einsum("kcd,fc->kfd", topographies, dataset.topographies)).max(axis=2)
     best = int(rho_w.argmax())
     per_focus = [int((rho_w * rho_u[:, f]).argmax()) for f in range(len(FOCI))]
@@ -416,9 +438,15 @@ def _finish(
 
 
 def fit_stage_1a(
-    output: Path, epochs: int, device: str, settings: Stage1aSettings = Stage1aSettings()
+    output: Path,
+    epochs: int,
+    device: str,
+    settings: Stage1aSettings = Stage1aSettings(),
+    pre_emphasis: str = "none",
+    init: str = "patches",
+    reseed: bool = False,
 ) -> dict[str, Any]:
-    """Fit one stage-1a arm on AR(1) background with planted events (segment sampling, patch initialization)."""
+    """Fit one stage-1a arm on AR(1) background with planted events (segment sampling, patch or random start)."""
     from src.run_patient_waveform_sweep import save_json
 
     arm = parse_arm(output.name)
@@ -443,14 +471,25 @@ def fit_stage_1a(
         "val",
         settings.sfreq,
     )
-    spec = WaveformSpec(n_atoms=settings.n_atoms, atom_len=settings.atom_len, pool_len=settings.pool_len, top_r=1)
-    train_spec = WaveformTrainSpec(epochs=epochs, lr=1e-3, segment_batch=2, init="patches", recenter_atoms=False)
+    spec = WaveformSpec(
+        n_atoms=settings.n_atoms,
+        atom_len=settings.atom_len,
+        pool_len=settings.pool_len,
+        top_r=1,
+        pre_emphasis=pre_emphasis,
+    )
+    train_spec = WaveformTrainSpec(
+        epochs=epochs, lr=1e-3, segment_batch=2, init=init, recenter_atoms=False, reseed_dead=reseed
+    )
     save_json(
         output / "synthetic_provenance.json",
         {
             **arm,
             "settings": asdict(settings),
             "epochs": epochs,
+            "pre_emphasis": pre_emphasis,
+            "init": init,
+            "reseed": reseed,
             "commit": _git("rev-parse", "HEAD").strip(),
             "uncommitted": _git("status", "--porcelain").splitlines(),
         },
@@ -497,6 +536,8 @@ def fit_stage_1b(args: argparse.Namespace) -> dict[str, Any]:
     torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = False, True
     cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
     cfg.seed, cfg.feature.random_state, cfg.supervised = arm["seed"], arm["seed"], None
+    cfg.feature.spec.pre_emphasis, cfg.feature.train_spec.init = args.pre_emphasis, args.init
+    cfg.feature.train_spec.reseed_dead = bool(args.reseed)  # refused by the patient loop (section 10.13)
     OmegaConf.save(cfg, output / "config.yaml", resolve=False)
     datamodule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()
@@ -523,6 +564,9 @@ def fit_stage_1b(args: argparse.Namespace) -> dict[str, Any]:
         {
             **arm,
             "epochs": args.epochs,
+            "pre_emphasis": args.pre_emphasis,
+            "init": args.init,
+            "reseed": bool(args.reseed),
             "commit": _git("rev-parse", "HEAD").strip(),
             "uncommitted": _git("status", "--porcelain").splitlines(),
             "audit": audit,
@@ -602,16 +646,16 @@ def threshold_readout(
 
     ``calibration`` holds event-free segments and sets one threshold per atom and false-alarm rate;
     ``evaluation`` holds the planted segments of other patients. ``offsets`` gives the template's
-    start in each atom; by default it is the best-lag offset of the planted template. Returns, per
-    focus, the recall and precision at ``THRESHOLD_FA_PER_MINUTE`` (``{focus}_recall``,
-    ``{focus}_precision``) and the curve over ``THRESHOLD_FA_CURVE``, with the thresholds and the
-    durations of both halves. Each curve point also holds the events, the detections and the
-    false-alarm rate per minute of the evaluation half (section 10.9).
+    start in each atom; by default it is the best-lag offset of the planted template in the model's
+    row domain. Returns, per focus, the recall and precision at ``THRESHOLD_FA_PER_MINUTE``
+    (``{focus}_recall``, ``{focus}_precision``) and the curve over ``THRESHOLD_FA_CURVE``, with the
+    thresholds and the durations of both halves. Each curve point also holds the events, the
+    detections and the false-alarm rate per minute of the evaluation half (section 10.9).
     """
     atoms = sorted(set(focus_atoms.values()))
     if offsets is None:
         waveforms, _, _ = factors(model)
-        _, best = waveform_match(waveforms, evaluation.unit)
+        _, best = waveform_match(waveforms, row_template(evaluation.sfreq, model.spec.pre_emphasis))
         offsets = {k: int(best[k]) for k in atoms}
     heights: dict[int, list[np.ndarray]] = {k: [] for k in atoms}
     minutes = 0.0
@@ -695,11 +739,19 @@ def _stage_1b_validation(args: argparse.Namespace) -> tuple[Any, Any]:
     return cfg, source
 
 
+def arm_pre_emphasis(folder: Path) -> str:
+    """The pre-emphasis a stage-1b arm trained with, from its saved ``config.yaml``."""
+    from omegaconf import OmegaConf
+
+    return str(OmegaConf.load(folder / "config.yaml").feature.spec.pre_emphasis)
+
+
 def reread(args: argparse.Namespace) -> dict[str, Any]:
     """Re-read every stage-1b dictionary of ``args.root`` with threshold detection, then apply the gate rules.
 
-    Arms that already hold ``threshold_readout.json`` are skipped. Writes ``threshold_summary.csv``
-    and ``threshold_decision.json`` to the root.
+    Each arm is rebuilt with the pre-emphasis it trained with (``arm_pre_emphasis``). Arms that
+    already hold ``threshold_readout.json`` are skipped. Writes ``threshold_summary.csv`` and
+    ``threshold_decision.json`` to the root.
     """
     import hydra
 
@@ -721,7 +773,8 @@ def reread(args: argparse.Namespace) -> dict[str, Any]:
         if (folder / "threshold_readout.json").is_file():
             continue
         original = json.loads((folder / "synthetic_readout.json").read_text())
-        model = build_model(arm["arm"], spec, train_spec, arm["seed"], device)
+        pre_emphasis = arm_pre_emphasis(folder)
+        model = build_model(arm["arm"], replace(spec, pre_emphasis=pre_emphasis), train_spec, arm["seed"], device)
         model.load_checkpoint(folder / CHECKPOINT_NAME)
         views = [
             PlantedEvents(source, negative[mask], amplitude, arm["seed"], "val", sfreq)
@@ -730,7 +783,8 @@ def reread(args: argparse.Namespace) -> dict[str, Any]:
         focus_atoms = {focus: int(original[f"{focus}_atom"]) for focus in FOCI}
         record = threshold_readout(model, *views, focus_atoms, loader_kwargs)
         record = json_safe(record)
-        save_json(folder / "threshold_readout.json", {**arm, **record})
+        commit = _git("rev-parse", "HEAD").strip()
+        save_json(folder / "threshold_readout.json", {**arm, "pre_emphasis": pre_emphasis, "commit": commit, **record})
         logger.info(
             f"Re-read {arm['name']}: "
             + ", ".join(f"{f} recall {record[f'{f}_recall']}, precision {record[f'{f}_precision']}" for f in FOCI)
@@ -805,18 +859,6 @@ ORACLE_OUTCOMES = {
 }
 
 
-def oracle_template(sfreq: float, domain: str) -> np.ndarray:
-    """The unit planted template in the row domain of the oracle: the template itself or its first difference.
-
-    Under ``diff``, an event that starts at ``onset`` becomes ``diff([0, s, 0])`` (one sample
-    longer), which also starts at ``onset``, so the alignment of section 4.2 does not change.
-    """
-    unit, _ = event_template(sfreq)
-    if domain == "diff":
-        unit = np.diff(np.r_[0.0, unit, 0.0])
-    return unit / np.linalg.norm(unit)
-
-
 def oracle_model(
     spec: WaveformSpec, channels: list[str], domain: str, sfreq: float, device: str
 ) -> tuple[SeparableSAE, int]:
@@ -826,7 +868,7 @@ def oracle_model(
     the responses are those of the gate-1 arms. Returns the model and the template's offset in
     every atom.
     """
-    template = oracle_template(sfreq, domain)
+    template = row_template(sfreq, domain)
     offset = (spec.atom_len - len(template)) // 2
     fields = {name: getattr(spec, name) for name in WaveformSpec.__dataclass_fields__}
     fields.update(n_atoms=len(FOCI), pre_emphasis=domain)
@@ -915,7 +957,9 @@ def oracle(args: argparse.Namespace) -> dict[str, Any]:
                 ]
                 offsets = dict.fromkeys(focus_atoms.values(), offset)
                 record = threshold_readout(model, *views, focus_atoms, loader_kwargs, offsets)
-                record = json_safe({"domain": domain, "amplitude": amplitude, "seed": seed, "offset": offset, **record})
+                commit = _git("rev-parse", "HEAD").strip()
+                header = {"domain": domain, "amplitude": amplitude, "seed": seed, "offset": offset, "commit": commit}
+                record = json_safe({**header, **record})
                 save_json(path, record)
                 logger.info(
                     f"Oracle {domain} a{amplitude} s{seed}: "
@@ -966,6 +1010,126 @@ def summarize_oracle(root: Path) -> dict[str, Any]:
     }
     save_json(root / "oracle_decision.json", decision)
     logger.info(f"Oracle matched filter: {outcome}. {ORACLE_OUTCOMES[outcome]}")
+    return decision
+
+
+# ---------------------------------------------------------------------- post-hoc initialization screen
+
+
+def root_arms(root: Path, stage: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Readouts of the finished ``stage`` arms of ``root`` and the settings they share.
+
+    The shared settings are the pre-emphasis, the start, the reseeding and the epochs. Each
+    readout gains ``pre_emphasis``, ``init`` and ``reseed`` from its provenance (arms written
+    before sections 10.11 to 10.13 ran with ``none``, ``patches`` and no reseeding), and
+    ``n_atoms_never_won`` and ``median_coherence`` from the last epoch of its training record.
+
+    Raises
+    ------
+    ValueError
+        If the root holds no finished arm of the stage, or arms with different settings.
+    """
+    rows, settings = [], set()
+    for folder in sorted(p for p in root.iterdir() if p.is_dir() and ARM_PATTERN.match(p.name)):
+        path = folder / "synthetic_readout.json"
+        if parse_arm(folder.name)["stage"] != stage or not path.is_file():
+            continue
+        row = json.loads(path.read_text())
+        provenance = folder / "synthetic_provenance.json"
+        saved = json.loads(provenance.read_text()) if provenance.is_file() else {}
+        row["pre_emphasis"], row["init"] = saved.get("pre_emphasis", "none"), saved.get("init", "patches")
+        row["reseed"] = bool(saved.get("reseed", False))
+        training = folder / "sae_training.csv"
+        history = pl.read_csv(training) if training.is_file() else None
+        never_won = history is not None and "n_atoms_never_won" in history.columns and len(history) > 0
+        row["n_atoms_never_won"] = float(history["n_atoms_never_won"][-1]) if never_won else None
+        coherent = history is not None and "median_coherence" in history.columns and len(history) > 0
+        row["median_coherence"] = float(history["median_coherence"][-1]) if coherent else None
+        rows.append(row)
+        settings.add((row["pre_emphasis"], row["init"], row["reseed"], row.get("epochs")))
+    if len(settings) != 1:
+        raise ValueError(f"{root}: expected stage-{stage} arms with one setting, got {sorted(settings)}")
+    pre_emphasis, init, reseed, epochs = settings.pop()
+    return rows, {"pre_emphasis": pre_emphasis, "init": init, "reseed": reseed, "epochs": epochs}
+
+
+def event_atom_cells(rows: list[dict[str, Any]]) -> int:
+    """(arm, amplitude, seed, focus) cells with an event atom: ``rho_w`` and ``rho_u`` of section 4.3 for that focus."""
+    return sum(
+        row[f"{f}_rho_w"] >= RHO_W_MIN and row[f"{f}_rho_u"] >= RHO_U_MIN
+        for row in rows
+        if row["amplitude"] > 0
+        for f in FOCI
+    )
+
+
+def _median(rows: list[dict[str, Any]], key: str, seeds: tuple[int, ...]) -> float | None:
+    """Median of ``key`` over the rows at ``seeds`` that hold it (``None`` when none does)."""
+    values = [r[key] for r in rows if r["seed"] in seeds and r.get(key) is not None]
+    return float(np.median(values)) if values else None
+
+
+def compare_initializations(
+    random_root: Path, patch_root: Path, stage: str = "1a", seeds: tuple[int, ...] = SEEDS
+) -> dict[str, Any]:
+    """The rule of protocol sections 10.12 and 10.13: does a random start recover where the patch start does not?
+
+    The random root may reseed dead atoms; the patch root may not. Writes
+    ``init_decision.json`` (seeds 0 and 1) or ``init_decision_s{seed}_...json`` (other seeds, the
+    replication of section 10.13) to ``random_root``: the recovery verdicts of both roots at
+    ``seeds``, the gains and losses of the random start, the gain flag (``None`` while an arm is
+    missing), and the descriptive event-atom cells, starved atoms and coherence.
+
+    Raises
+    ------
+    ValueError
+        If the roots do not hold random and patch starts with the same pre-emphasis and epochs, or
+        the patch root reseeds.
+    """
+    from src.run_patient_waveform_sweep import save_json
+
+    rows, settings = {}, {}
+    for name, root in (("random", random_root), ("patches", patch_root)):
+        rows[name], settings[name] = root_arms(root, stage)
+        if settings[name]["init"] != name:
+            raise ValueError(f"{root} holds init={settings[name]['init']} arms; expected {name}")
+    if settings["patches"]["reseed"]:
+        raise ValueError(f"{patch_root} reseeds dead atoms; section 10.13 compares against patch starts without it")
+    for key in ("pre_emphasis", "epochs"):
+        if settings["random"][key] != settings["patches"][key]:
+            raise ValueError(f"the roots differ in {key}: {settings}")
+    arms = ("f5", "s4ext")
+    seeds = tuple(seeds)
+    verdicts = {name: {arm: recovery(rows[name], stage, arm, seeds) for arm in arms} for name in rows}
+    complete = all(v is not None for verdict in verdicts.values() for arm in verdict.values() for v in arm.values())
+    pairs = [(arm, a) for arm in arms for a in AMPLITUDES[1:]]
+    gains = [f"{arm}_a{a}" for arm, a in pairs if verdicts["random"][arm][a] and not verdicts["patches"][arm][a]]
+    losses = [f"{arm}_a{a}" for arm, a in pairs if verdicts["patches"][arm][a] and not verdicts["random"][arm][a]]
+    decision = {
+        "rule": "protocol sections 10.12 and 10.13 (post hoc)",
+        "stage": stage,
+        "seeds": list(seeds),
+        "pre_emphasis": settings["random"]["pre_emphasis"],
+        "random_reseeds": settings["random"]["reseed"],
+        "random_root": str(random_root),
+        "patch_root": str(patch_root),
+        "recovers": {
+            name: {arm: {str(a): v for a, v in verdict[arm].items()} for arm in arms}
+            for name, verdict in verdicts.items()
+        },
+        "gains": gains,
+        "losses": losses,
+        "gain": bool(gains) if complete else None,
+        "event_atom_cells": {name: event_atom_cells([r for r in rows[name] if r["seed"] in seeds]) for name in rows},
+        "median_atoms_never_won": {name: _median(rows[name], "n_atoms_never_won", seeds) for name in rows},
+        "median_coherence": {name: _median(rows[name], "median_coherence", seeds) for name in rows},
+    }
+    name = "init_decision.json" if seeds == SEEDS else "init_decision_" + "_".join(f"s{s}" for s in seeds) + ".json"
+    save_json(random_root / name, decision)
+    logger.info(
+        f"Initialization screen ({decision['pre_emphasis']}): gains {gains}, losses {losses}, "
+        f"gain at seeds {list(seeds)}: {decision['gain']}"
+    )
     return decision
 
 
@@ -1085,15 +1249,17 @@ def _passes(row: dict[str, Any], baseline: float) -> bool:
     )
 
 
-def recovery(rows: list[dict[str, Any]], stage: str, arm: str) -> dict[int, bool | None]:
+def recovery(
+    rows: list[dict[str, Any]], stage: str, arm: str, seeds: tuple[int, ...] = SEEDS
+) -> dict[int, bool | None]:
     """Whether ``arm`` recovers at each event amplitude of ``stage`` in every seed (``None`` if incomplete)."""
     table = {(r["amplitude"], r["seed"]): r for r in rows if r["stage"] == stage and r["arm"] == arm}
     verdict: dict[int, bool | None] = {}
     for amplitude in AMPLITUDES[1:]:
-        if any((a, s) not in table for a in (0, amplitude) for s in SEEDS):
+        if any((a, s) not in table for a in (0, amplitude) for s in seeds):
             verdict[amplitude] = None
             continue
-        verdict[amplitude] = all(_passes(table[(amplitude, s)], table[(0, s)]["rho_w"]) for s in SEEDS)
+        verdict[amplitude] = all(_passes(table[(amplitude, s)], table[(0, s)]["rho_w"]) for s in seeds)
     return verdict
 
 
@@ -1145,7 +1311,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Command-line entry point: ``run`` an arm, ``summarize``, ``reread`` or ``oracle`` a root, ``plot`` a segment."""
+    """Command-line entry point for the six subcommands of the module docstring."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="fit one arm; its directory name encodes stage, arm, amplitude and seed")
@@ -1157,6 +1323,11 @@ def main() -> None:
     run.add_argument("--signal-cache-dir", type=Path, help="stage 1b: the campaign signal cache")
     run.add_argument("--num-workers", type=int, default=4)
     run.add_argument("--allow-cold-cache", action="store_true")
+    run.add_argument(
+        "--pre-emphasis", choices=("none", "diff"), default="none", help="row pre-emphasis (section 10.11)"
+    )
+    run.add_argument("--init", choices=("patches", "random"), default="patches", help="atom start (section 10.12)")
+    run.add_argument("--reseed", type=int, choices=(0, 1), default=0, help="reseed dead atoms (section 10.13)")
     summary = commands.add_parser("summarize", help="apply the gate-1 rules to the arms of a root")
     summary.add_argument("--root", type=Path, required=True)
     again = commands.add_parser("reread", help="post-hoc threshold re-read of the stage-1b dictionaries of a root")
@@ -1171,6 +1342,11 @@ def main() -> None:
     best.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
     best.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
     best.add_argument("--num-workers", type=int, default=4)
+    screen = commands.add_parser("compare", help="post-hoc initialization rule: random against patch starts")
+    screen.add_argument("--random-root", type=Path, required=True, help="a root of random-initialized arms")
+    screen.add_argument("--patch-root", type=Path, required=True, help="a root of patch-initialized arms")
+    screen.add_argument("--stage", choices=("1a", "1b"), default="1a")
+    screen.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS), help="2 3 for the replication")
     figure = commands.add_parser("plot", help="draw one stage-1a validation segment as the model sees it")
     figure.add_argument("--seed", type=int, default=0)
     figure.add_argument("--index", type=int, default=0, help="validation segment")
@@ -1182,11 +1358,20 @@ def main() -> None:
         reread(args)
     elif args.command == "oracle":
         oracle(args)
+    elif args.command == "compare":
+        compare_initializations(args.random_root.resolve(), args.patch_root.resolve(), args.stage, tuple(args.seeds))
     elif args.command == "plot":
         default = ROOT / "logs" / "separable_synthetic" / f"input_1a_s{args.seed}_i{args.index}.png"
         plot_input((args.output or default).resolve(), args.seed, args.index)
     elif parse_arm(args.output.name)["stage"] == "1a":
-        fit_stage_1a(args.output.resolve(), args.epochs, args.device)
+        fit_stage_1a(
+            args.output.resolve(),
+            args.epochs,
+            args.device,
+            pre_emphasis=args.pre_emphasis,
+            init=args.init,
+            reseed=bool(args.reseed),
+        )
     else:
         missing = [flag for flag in ("manifests", "data_dir", "signal_cache_dir") if getattr(args, flag) is None]
         if missing:

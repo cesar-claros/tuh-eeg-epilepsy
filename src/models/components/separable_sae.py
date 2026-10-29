@@ -287,6 +287,24 @@ class SeparableSAE(WaveformSAE):
 
     # ------------------------------------------------------------------ initialization
 
+    @property
+    def _patches_per_atom(self) -> int:
+        """Patches per atom: one for the waveform and each projection's own patch, ``D`` in all."""
+        return self.spec.n_projections
+
+    def _atoms_from_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        """Packed constrained atoms from patches ``(D, n, C, L)``, as the patch initialization builds them.
+
+        ``w`` is the top right singular vector of the first patch of each atom, and
+        projection ``d`` is ``X_d w / ||X_d w||`` for its patch ``X_d``, so every
+        template responds positively at its source patch. The dtype of ``patches`` is kept.
+        """
+        dtype = patches.dtype
+        sources = patches.detach().cpu().double()
+        time = torch.linalg.svd(sources[0], full_matrices=False).Vh[:, 0]
+        channel = torch.einsum("dkcl,kl->kcd", sources, time)
+        return self._constrain(self._pack(time, channel).to(self.device, dtype))
+
     def _init_atoms(self, dataloader: DataLoader, generator: torch.Generator) -> None:
         """Create the packed factors from data patches or Gaussian draws, then impose equation (4).
 
@@ -302,15 +320,11 @@ class SeparableSAE(WaveformSAE):
             n_channels = int(dataloader.dataset[0][0].shape[0])
             time = torch.randn(n_atoms, spec.atom_len, generator=generator)
             channel = torch.randn(n_atoms, n_channels, n_projections, generator=generator)
-            dtype = time.dtype
+            atoms = self._pack(time, channel).to(self.device, time.dtype)
+            self.atoms = nn.Parameter(self._constrain(atoms))
         else:
             patches = self._sample_patches(dataloader, generator, count=n_atoms * n_projections)
-            dtype = patches.dtype
-            sources = patches.detach().cpu().double().unflatten(0, (n_projections, n_atoms))
-            time = torch.linalg.svd(sources[0], full_matrices=False).Vh[:, 0]
-            channel = torch.einsum("dkcl,kl->kcd", sources, time)
-        atoms = self._pack(time, channel).to(self.device, dtype)
-        self.atoms = nn.Parameter(self._constrain(atoms))
+            self.atoms = nn.Parameter(self._atoms_from_patches(patches.unflatten(0, (n_projections, n_atoms))))
         log.info(
             f"Initialized {n_atoms} separable atoms ({self.n_channels} channels, {n_projections} projections, "
             f"{self.train_spec.init})"

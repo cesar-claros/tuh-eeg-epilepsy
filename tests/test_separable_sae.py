@@ -10,8 +10,8 @@ identity (26) and the R=1 optimum against a brute-force search, the tie rules of
 (17) and (18), the index maps of (20) and (22), the separable fast path against the
 full-weight convolutions, equality with format 5 at D=1 under central loss support,
 the Adam step of each factor with and without step matching, a small fit on planted
-rank-1 events with the unit-norm constraint, the checkpoint round trip with its refusals, and the
-spec guards.
+rank-1 events with the unit-norm constraint, dead-atom reseeding from residual patches (protocol
+section 10.13) and a fit with it, the checkpoint round trip with its refusals, and the spec guards.
 """
 
 from __future__ import annotations
@@ -290,6 +290,48 @@ def test_fit_reduces_the_residual_and_keeps_the_constraint() -> None:
     assert torch.allclose(torch.linalg.vector_norm(time, dim=1), torch.ones(2), atol=1e-5)
     assert torch.allclose(torch.linalg.vector_norm(channel, dim=1), torch.ones(2, 2), atol=1e-5)
     assert model.fit_meta["n_channels"] == 3 and model.n_channels == 3
+
+
+def test_reseeding_builds_separable_atoms_from_residual_patches() -> None:
+    model = _model()
+    optimizer = torch.optim.Adam([model.atoms], lr=1e-3)
+    model.atoms.grad = torch.ones_like(model.atoms)
+    optimizer.step()
+    before = model.atoms.detach().clone()
+    bump = torch.hann_window(8, periodic=False, dtype=torch.float64)
+    first, second = (torch.tensor(v, dtype=torch.float64) for v in ([1.0, -2.0, 0.5], [0.5, 1.0, -1.0]))
+    residual = torch.zeros(1, N_CHANNELS, 64, dtype=torch.float64)
+    residual[0, :, 10:18], residual[0, :, 40:48] = 3.0 * first[:, None] * bump, second[:, None] * bump
+    model._reseed_pool = model._empty_reseed_pool()
+    model._collect_reseed_patches(residual)
+    assert model._patches_per_atom == 2
+    assert model._reseed_dead(torch.tensor([5.0, 0.0, 0.0]), optimizer) == 1, "one atom takes both patches"
+    time, channel = model._split(model.atoms.detach())
+    assert abs(abs(float(time[1] @ bump)) / float(bump.norm()) - 1.0) < TOLERANCE, "w is not the residual waveform"
+    for d, pattern in enumerate((first, second)):
+        assert abs(abs(float(channel[1, :, d] @ pattern)) / float(pattern.norm()) - 1.0) < TOLERANCE
+    template = channel[1, :, 0, None] * time[1][None, :]
+    assert float((template * residual[0, :, 10:18]).sum()) > 0, "the reseeded template responds negatively"
+    assert torch.equal(model.atoms[0], before[0]) and torch.equal(model.atoms[2], before[2]), "another atom changed"
+    assert not optimizer.state[model.atoms]["exp_avg"][1].any(), "the Adam moments of the reseeded atom remain"
+
+
+def test_fit_with_reseeding_keeps_the_constraint() -> None:
+    spec = SeparableSpec(n_atoms=4, atom_len=16, pool_len=32, n_projections=2)
+    train_spec = WaveformTrainSpec(
+        epochs=3, lr=1e-2, segment_batch=4, init="random", recenter_atoms=False, reseed_dead=True
+    )
+    model = SeparableSAE(spec=spec, train_spec=train_spec, random_state=0, device="cpu")
+    x = _planted(1)
+    model.fit_unsupervised(
+        DataLoader(TensorDataset(x, torch.zeros(len(x), dtype=torch.long)), batch_size=8), provenance=PROVENANCE
+    )
+    assert all(row["n_reseeded"] <= row["n_atoms_never_won"] for row in model.history)
+    assert model.history[-1]["n_reseeded"] == 0, "atoms were reseeded after the last epoch"
+    time, channel = model._split(model.atoms.detach())
+    assert torch.allclose(torch.linalg.vector_norm(time, dim=1), torch.ones(4, dtype=time.dtype), atol=1e-5)
+    assert torch.allclose(torch.linalg.vector_norm(channel, dim=1), torch.ones(4, 2, dtype=time.dtype), atol=1e-5)
+    assert model._reseed_pool is None and model.fit_meta["train_spec"]["reseed_dead"] is True
 
 
 def test_checkpoint_round_trip_and_refusals() -> None:

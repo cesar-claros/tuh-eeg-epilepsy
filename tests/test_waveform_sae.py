@@ -717,6 +717,46 @@ def test_spec_and_unfitted_guards() -> None:
     raise AssertionError("forward used an unfitted dictionary")
 
 
+def test_reseeding_replaces_dead_atoms_from_the_largest_residual() -> None:
+    model = _model()
+    model.atoms = nn.Parameter(model._unit(_randn(3, 3, 8, seed=3)))
+    optimizer = torch.optim.Adam([model.atoms], lr=1e-3)
+    model.atoms.grad = torch.ones_like(model.atoms)
+    optimizer.step()
+    before = model.atoms.detach().clone()
+    bump = torch.hann_window(8, periodic=False, dtype=torch.float64)
+    strong = 3.0 * torch.tensor([1.0, -2.0, 0.5], dtype=torch.float64)[:, None] * bump
+    weak = torch.tensor([0.5, 1.0, -1.0], dtype=torch.float64)[:, None] * bump
+    residual = torch.zeros(1, 3, 64, dtype=torch.float64)
+    residual[0, :, 10:18], residual[0, :, 40:48] = strong, weak
+    model._reseed_pool = model._empty_reseed_pool()
+    model._collect_reseed_patches(residual)
+    energy, patches = model._reseed_pool
+    assert energy.numel() == 2 and torch.allclose(patches[0], strong), "the pool missed the largest residual"
+    assert model._reseed_dead(torch.tensor([5.0, 0.0, 0.0]), optimizer) == 2
+    exp_avg = optimizer.state[model.atoms]["exp_avg"]
+    for k, source in ((1, strong), (2, weak)):
+        assert torch.allclose(model.atoms[k], model._unit(model._constrain(source[None]))[0]), f"atom {k} not reseeded"
+        assert not exp_avg[k].any(), "the Adam moments of a reseeded atom remain"
+    assert torch.equal(model.atoms[0], before[0]) and exp_avg[0].any(), "a live atom changed"
+    model._reseed_pool = None
+    try:
+        model._collect_reseed_patches(residual)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("patches were collected without an active pool")
+    spec = WaveformSpec(n_atoms=3, atom_len=8, pool_len=4)
+    for train_spec in (
+        WaveformTrainSpec(reseed_dead=True, sampling_unit="patient"),
+        WaveformTrainSpec(reseed_dead=True, crop_sampling="tiled", crop_len=8),
+    ):
+        _expect_value_error(
+            lambda train_spec=train_spec: WaveformSAE(spec=spec, train_spec=train_spec, device="cpu"),
+            f"reseeding with {train_spec} was not refused",
+        )
+
+
 def test_diagnostics_descriptors_and_histogram_quantiles() -> None:
     sfreq, length = 256.0, 64
     atoms = np.zeros((2, 4, length), dtype=np.float32)

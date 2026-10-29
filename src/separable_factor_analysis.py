@@ -10,9 +10,10 @@ and imports no other project module, so it runs anywhere with numpy and polars::
 It writes ``factor_summary.csv`` (one row per arm: dominant frequency, band energy, waveform
 coherence, rank-1 share or projection similarity) and ``factor_event_atoms.csv`` (one row per
 amplitude-6 arm and focus: the signed waveform match and the signed cosine of every projection)
-to the root. Format-5 atoms are reduced to their best rank-1 approximation. The template and the
-topography repeat the formulas of ``src/separable_synthetic.py`` (``event_template``,
-``focal_topography``); ``tests/test_separable_factor_analysis.py`` checks that they agree.
+to the root. Format-5 atoms are reduced to their best rank-1 approximation. The template (in the
+arm's row domain, from the ``pre_emphasis`` of its provenance) and the topography repeat the
+formulas of ``src/separable_synthetic.py`` (``row_template``, ``focal_topography``);
+``tests/test_separable_factor_analysis.py`` checks that they agree.
 """
 
 from __future__ import annotations
@@ -43,6 +44,14 @@ def spike_wave(length: int) -> np.ndarray:
     template = np.exp(-(((t - 0.2) / 0.03) ** 2)) - 0.5 * np.exp(-(((t - 0.6) / 0.15) ** 2))
     template = template - template.mean()
     return template / np.linalg.norm(template)
+
+
+def row_template(length: int, pre_emphasis: str = "none") -> np.ndarray:
+    """The template as the encoder sees it: itself or, under ``diff``, the unit ``diff([0, s, 0])``."""
+    template = spike_wave(length)
+    if pre_emphasis == "diff":
+        template = unit(np.diff(np.r_[0.0, template, 0.0]))
+    return template
 
 
 def focal_topography(channels: list[str], focus: str) -> np.ndarray:
@@ -137,7 +146,9 @@ def event_atoms(folder: Path) -> list[dict[str, Any]]:
         return []
     waveforms, projections, _ = arm_factors(folder)
     channels = (folder / "sae_channels.txt").read_text().split()
-    template = spike_wave(round(TEMPLATE_SECONDS * SFREQ))
+    provenance = folder / "synthetic_provenance.json"
+    pre_emphasis = json.loads(provenance.read_text()).get("pre_emphasis", "none") if provenance.is_file() else "none"
+    template = row_template(round(TEMPLATE_SECONDS * SFREQ), pre_emphasis)
     rows = []
     for focus in FOCI:
         k = int(readout[f"{focus}_atom"])
@@ -149,6 +160,7 @@ def event_atoms(folder: Path) -> list[dict[str, Any]]:
                 "arm": folder.name,
                 "focus": focus,
                 "atom": k,
+                "pre_emphasis": pre_emphasis,
                 "waveform_correlation": correlation,
                 "offset": offset,
                 "projection_cosines": json.dumps(np.round(cosines, 3).tolist()),
