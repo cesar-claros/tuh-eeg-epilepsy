@@ -724,7 +724,9 @@ def test_reseeding_replaces_dead_atoms_from_the_largest_residual() -> None:
     model.atoms.grad = torch.ones_like(model.atoms)
     optimizer.step()
     before = model.atoms.detach().clone()
-    bump = torch.hann_window(8, periodic=False, dtype=torch.float64)
+    bump = torch.exp(
+        -(((torch.arange(8, dtype=torch.float64) - 3.5) / 1.5) ** 2)
+    )  # nonzero ends: one strict energy maximum per bump
     strong = 3.0 * torch.tensor([1.0, -2.0, 0.5], dtype=torch.float64)[:, None] * bump
     weak = torch.tensor([0.5, 1.0, -1.0], dtype=torch.float64)[:, None] * bump
     residual = torch.zeros(1, 3, 64, dtype=torch.float64)
@@ -739,6 +741,12 @@ def test_reseeding_replaces_dead_atoms_from_the_largest_residual() -> None:
         assert torch.allclose(model.atoms[k], model._unit(model._constrain(source[None]))[0]), f"atom {k} not reseeded"
         assert not exp_avg[k].any(), "the Adam moments of a reseeded atom remain"
     assert torch.equal(model.atoms[0], before[0]) and exp_avg[0].any(), "a live atom changed"
+    # A Hann bump has zero end samples, so the windows one sample earlier and later tie with it.
+    plateau = torch.zeros(1, 3, 64, dtype=torch.float64)
+    plateau[0, :, 10:18] = torch.hann_window(8, periodic=False, dtype=torch.float64)
+    model._reseed_pool = model._empty_reseed_pool()
+    model._collect_reseed_patches(plateau)
+    assert model._reseed_pool[0].numel() == 1, "one transient entered the pool more than once"
     model._reseed_pool = None
     try:
         model._collect_reseed_patches(residual)

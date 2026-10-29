@@ -298,7 +298,9 @@ def test_reseeding_builds_separable_atoms_from_residual_patches() -> None:
     model.atoms.grad = torch.ones_like(model.atoms)
     optimizer.step()
     before = model.atoms.detach().clone()
-    bump = torch.hann_window(8, periodic=False, dtype=torch.float64)
+    bump = torch.exp(
+        -(((torch.arange(8, dtype=torch.float64) - 3.5) / 1.5) ** 2)
+    )  # nonzero ends: one strict energy maximum per bump
     first, second = (torch.tensor(v, dtype=torch.float64) for v in ([1.0, -2.0, 0.5], [0.5, 1.0, -1.0]))
     residual = torch.zeros(1, N_CHANNELS, 64, dtype=torch.float64)
     residual[0, :, 10:18], residual[0, :, 40:48] = 3.0 * first[:, None] * bump, second[:, None] * bump

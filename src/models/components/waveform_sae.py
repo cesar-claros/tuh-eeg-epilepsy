@@ -1078,27 +1078,39 @@ class WaveformSAE(nn.Module):
     def _collect_reseed_patches(self, residual: torch.Tensor) -> None:
         """Offer the highest-energy residual patches ``(C, L)`` of one step ``(B, C, T)`` to the bounded pool.
 
-        Candidates are local maxima of the residual energy over ``atom_len`` samples, at
-        least ``atom_len`` apart within a segment; non-finite and flat patches are
-        excluded. The pool keeps the most energetic patches up to its capacity.
+        Candidates are local maxima of the residual energy over ``atom_len`` samples. A
+        greedy pass, highest energy first, then keeps only candidates at least ``atom_len``
+        apart within a segment, so a transient whose neighboring windows tie in energy (a
+        plateau) enters the pool once. Non-finite and flat patches are excluded. The pool
+        keeps the most energetic patches up to its capacity.
         """
         if self._reseed_pool is None:
             raise RuntimeError("the reseeding pool is not active (reseed_dead training only)")
         length = self.spec.atom_len
         if residual.shape[-1] < length:
             return
-        energy = F.avg_pool1d(residual.pow(2).sum(1, keepdim=True), length, stride=1)
-        peaks = energy == F.max_pool1d(energy, 2 * length + 1, stride=1, padding=length)
-        flat = (energy * peaks).flatten()
-        top = flat.topk(min(_RESEED_PER_STEP, flat.numel()))
-        width = energy.shape[-1]
-        segment, start = top.indices // width, top.indices % width
-        patches = residual.unfold(-1, length, 1)[segment, :, start]
-        keep = (top.values > _ENERGY_FLOOR) & torch.isfinite(patches).flatten(1).all(-1)
+        energy = F.avg_pool1d(residual.pow(2).sum(1, keepdim=True), length, stride=1).squeeze(1)
+        peaks = energy == F.max_pool1d(energy.unsqueeze(1), 2 * length + 1, stride=1, padding=length).squeeze(1)
+        candidates = torch.nonzero(peaks & (energy > _ENERGY_FLOOR))
+        if candidates.numel() == 0:
+            return
+        order = torch.argsort(energy[candidates[:, 0], candidates[:, 1]], descending=True, stable=True)
+        positions = candidates.tolist()
+        kept: list[list[int]] = []
+        for i in order.tolist():
+            segment, start = positions[i]
+            if all(segment != s or abs(start - t) >= length for s, t in kept):
+                kept.append([segment, start])
+                if len(kept) == _RESEED_PER_STEP:
+                    break
+        index = torch.tensor(kept, device=residual.device)
+        patches = residual.unfold(-1, length, 1)[index[:, 0], :, index[:, 1]]
+        values = energy[index[:, 0], index[:, 1]]
+        keep = torch.isfinite(patches).flatten(1).all(-1)
         if not bool(keep.any()):
             return
         pool_energy, pool_patches = self._reseed_pool
-        pool_energy = torch.cat([pool_energy, top.values[keep]])
+        pool_energy = torch.cat([pool_energy, values[keep]])
         pool_patches = torch.cat([pool_patches, patches[keep]])
         capacity = _RESEED_POOL_FACTOR * self.spec.n_atoms * self._patches_per_atom
         if pool_energy.numel() > capacity:

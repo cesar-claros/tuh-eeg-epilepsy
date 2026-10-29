@@ -73,7 +73,11 @@ def test_arm_summaries_and_event_atoms() -> None:
         flat = fa.unit(np.ones(len(CHANNELS)))
         np.save(format5 / "sae_atoms.npy", np.stack([np.outer(u_c4, waveform), np.outer(flat, slope)]))
         summary = fa.summarize_arm(format5)
-        assert abs(summary["median_rank_one_share"] - 1.0) < 1e-9 and summary["median_dominant_hz"] == 0.5
+        # Two atoms: the median is the mean of the template's peak (4 Hz) and the slope's (0.625 Hz).
+        frequencies = fa.dominant_frequency(np.stack([waveform, slope]))
+        assert 3.0 < frequencies[0] < 5.0 and frequencies[1] < 1.0, f"dominant frequencies {frequencies}"
+        assert abs(summary["median_rank_one_share"] - 1.0) < 1e-9
+        assert abs(summary["median_dominant_hz"] - frequencies.mean()) < 1e-12
         c4 = next(row for row in fa.event_atoms(format5) if row["focus"] == "C4")
         assert abs(abs(c4["waveform_correlation"]) - 1.0) < 1e-9 and c4["offset"] == 93
         assert abs(c4["best_effective_cosine"] - 1.0) < 1e-9, "the rank-1 signs were not combined"
