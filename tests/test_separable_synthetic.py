@@ -8,8 +8,8 @@ dictionary that holds the planted template, the recovery rules and stage outcome
 section 4.3 under both matching rules, the input figure, the threshold re-read of section 10.6 (its
 helpers and an exact template), the oracle matched filter of section 10.9 (its template, model,
 detection and rule), the readouts on differenced rows of section 10.11, the initialization rule of
-section 10.12, and small stage-1a runs with their summary, also on differenced rows from a random
-start.
+section 10.12, the stage-1b configuration with its refusal of reseeding, and small stage-1a runs
+with their summary, also on differenced rows from a random start.
 """
 
 from __future__ import annotations
@@ -379,6 +379,26 @@ def test_initialization_rule_of_sections_10_12_and_10_13() -> None:
         _expect_value_error(
             lambda: gate.compare_initializations(random_root, reseeding), "a reseeding patch root passed"
         )
+
+
+def test_stage_1b_config_and_reseeding_refusal() -> None:
+    from argparse import Namespace
+
+    import hydra
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for pre_emphasis, init in (("none", "random"), ("diff", "patches")):
+            cfg = gate.stage_1b_config(root, root, 0, 40.0, seed=1, pre_emphasis=pre_emphasis, init=init)
+            assert (cfg.seed, cfg.feature.random_state, cfg.supervised) == (1, 1, None)
+            spec = hydra.utils.instantiate(cfg.feature.spec)
+            train_spec = hydra.utils.instantiate(cfg.feature.train_spec)
+            assert (spec.pre_emphasis, train_spec.init, train_spec.reseed_dead) == (pre_emphasis, init, False)
+        output = root / "1b_s4ext_a6_s0"
+        _expect_value_error(
+            lambda: gate.fit_stage_1b(Namespace(output=output, reseed=1)), "stage 1b accepted reseeding"
+        )
+        assert not output.exists(), "a refused arm left its directory behind"
 
 
 def test_stage_1a_run_and_summary() -> None:

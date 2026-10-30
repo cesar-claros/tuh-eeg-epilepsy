@@ -504,6 +504,22 @@ def fit_stage_1a(
     return _finish(model, val, output, arm, batch_size=8, num_workers=0)
 
 
+def stage_1b_config(
+    manifests: Path, data_dir: Path, num_workers: int, skip_start_s: float, seed: int, pre_emphasis: str, init: str
+) -> Any:
+    """The campaign configuration of one stage-1b arm: ``make_config`` with the arm's seed, row domain and start.
+
+    Only keys that the composed configuration holds are set: it is in struct mode, so a new key
+    raises (``reseed_dead`` is not one of them; stage 1b refuses reseeding instead).
+    """
+    from src.run_patient_waveform_sweep import make_config
+
+    cfg = make_config(manifests, data_dir, num_workers, skip_start_s=skip_start_s)
+    cfg.seed, cfg.feature.random_state, cfg.supervised = seed, seed, None
+    cfg.feature.spec.pre_emphasis, cfg.feature.train_spec.init = pre_emphasis, init
+    return cfg
+
+
 def fit_stage_1b(args: argparse.Namespace) -> dict[str, Any]:
     """Fit one stage-1b arm on real non-epilepsy segments of the campaign configuration (patient sampling, GPU).
 
@@ -512,20 +528,22 @@ def fit_stage_1b(args: argparse.Namespace) -> dict[str, Any]:
     RuntimeError
         Without a CUDA GPU.
     ValueError
-        If the arm is not a stage-1b arm, the patient counts changed, or a signal cache is cold
-        without ``--allow-cold-cache``.
+        If the arm is not a stage-1b arm, reseeding is asked for (stage 1a only, protocol section
+        10.13), the patient counts changed, or a signal cache is cold without ``--allow-cold-cache``.
     """
     import hydra
     import lightning
     from omegaconf import OmegaConf
 
-    from src.run_patient_waveform_sweep import check_audit, digest, make_config, save_json
+    from src.run_patient_waveform_sweep import check_audit, digest, save_json
     from src.utils import check_split_disjoint, split_provenance
 
     output = args.output.resolve()
     arm = parse_arm(output.name)
     if arm["stage"] != "1b":
         raise ValueError(f"{output.name} is not a stage-1b arm")
+    if args.reseed:  # checked before the arm directory exists, so a refused arm leaves nothing behind
+        raise ValueError("dead-atom reseeding is implemented for stage 1a only (protocol section 10.13)")
     if not torch.cuda.is_available():
         raise RuntimeError("run stage 1b inside the HPC container on an allocated CUDA GPU")
     manifests, cache_root = args.manifests.resolve(), args.signal_cache_dir.expanduser().resolve()
@@ -534,10 +552,15 @@ def fit_stage_1b(args: argparse.Namespace) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=False)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = False, True
-    cfg = make_config(manifests, args.data_dir.resolve(), args.num_workers, skip_start_s=audit["skip_start_s"])
-    cfg.seed, cfg.feature.random_state, cfg.supervised = arm["seed"], arm["seed"], None
-    cfg.feature.spec.pre_emphasis, cfg.feature.train_spec.init = args.pre_emphasis, args.init
-    cfg.feature.train_spec.reseed_dead = bool(args.reseed)  # refused by the patient loop (section 10.13)
+    cfg = stage_1b_config(
+        manifests,
+        args.data_dir.resolve(),
+        args.num_workers,
+        audit["skip_start_s"],
+        arm["seed"],
+        args.pre_emphasis,
+        args.init,
+    )
     OmegaConf.save(cfg, output / "config.yaml", resolve=False)
     datamodule = hydra.utils.instantiate(cfg.data)
     datamodule.setup()
