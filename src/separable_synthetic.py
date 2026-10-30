@@ -3,7 +3,7 @@
 Protocol: ``documentation/separable_atom_sae_protocol.md``, section 4 (equation numbers refer to
 ``documentation/Separable Atom Encoder Mathematics.md``). Spike-and-wave events ``a u* s^T`` from
 two montage foci are planted into background segments; each arm learns a dictionary by
-reconstruction alone, and the readout asks whether it learned the event. Six subcommands:
+reconstruction alone, and the readout asks whether it learned the event. Seven subcommands:
 
 - ``run`` fits one arm, named ``{stage}_{arm}_a{amplitude}_s{seed}`` by its output directory:
   stage ``1a`` (AR(1) background with artifacts, CPU or GPU, no corpus) or ``1b`` (real segments
@@ -22,6 +22,8 @@ reconstruction alone, and the readout asks whether it learned the event. Six sub
 - ``compare`` applies the initialization rule of sections 10.12 and 10.13 to a root of
   random-initialized arms and a root of patch-initialized arms with the same pre-emphasis, at the
   given seeds.
+- ``allevent`` re-reads the amplitude-6 dictionaries of a root under the all-event rule in both
+  patient folds, optionally with a one-atom oracle (protocol section 10.18; post hoc, no training).
 - ``plot`` draws one stage-1a validation segment as the model sees it, at every amplitude, with the
   waveform and the topographies of the events (CPU, seconds, no corpus).
 
@@ -644,9 +646,9 @@ def calibrated_threshold(heights: np.ndarray, minutes: float, rate: float) -> fl
     return float(ordered[allowed]) if allowed < len(ordered) else 0.0
 
 
-def patient_halves(subjects: np.ndarray) -> np.ndarray:
-    """Calibration mask over segments: the patients at even positions of the sorted patient IDs."""
-    calibration = np.unique(subjects)[::2]
+def patient_halves(subjects: np.ndarray, fold: int = 0) -> np.ndarray:
+    """Calibration mask over segments: the patients at even (fold 0) or odd (fold 1) positions of the sorted IDs."""
+    calibration = np.unique(subjects)[fold::2]
     return np.isin(subjects, calibration)
 
 
@@ -664,6 +666,7 @@ def threshold_readout(
     focus_atoms: dict[str, int],
     loader_kwargs: dict[str, int],
     offsets: dict[int, int] | None = None,
+    atom_foci: dict[int, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Recall and precision of thresholded response peaks of each focus atom (protocol section 10.6).
 
@@ -673,7 +676,9 @@ def threshold_readout(
     row domain. Returns, per focus, the recall and precision at ``THRESHOLD_FA_PER_MINUTE``
     (``{focus}_recall``, ``{focus}_precision``) and the curve over ``THRESHOLD_FA_CURVE``, with the
     thresholds and the durations of both halves. Each curve point also holds the events, the
-    detections and the false-alarm rate per minute of the evaluation half (section 10.9).
+    detections and the false-alarm rate per minute of the evaluation half (section 10.9). With
+    ``atom_foci`` (atom to the foci it holds, section 10.18), ``atoms`` adds the curve of each such
+    atom against the events of all its held foci, with the background false alarms per minute.
     """
     atoms = sorted(set(focus_atoms.values()))
     if offsets is None:
@@ -695,6 +700,7 @@ def threshold_readout(
     left, index, evaluation_minutes = model.padding[0], 0, 0.0
     positions: dict[tuple[int, float], list[np.ndarray]] = {(k, r): [] for k in atoms for r in THRESHOLD_FA_CURVE}
     expected: dict[str, list[np.ndarray]] = {focus: [] for focus in FOCI}
+    expected_held: dict[int, list[np.ndarray]] = {k: [] for k in atom_foci or {}}
     for x, _ in DataLoader(evaluation, shuffle=False, **loader_kwargs):
         responses = _atom_responses(model, x, atoms)
         peaks = local_maxima(responses, PEAK_RADIUS)
@@ -706,6 +712,9 @@ def threshold_readout(
                     positions[(k, rate)].append(torch.nonzero(above).flatten().cpu().numpy())
             for f, focus in enumerate(FOCI):
                 expected[focus].append((onsets + left - offsets[focus_atoms[focus]])[foci == f])
+            for k, held in (atom_foci or {}).items():
+                codes = [FOCI.index(focus) for focus in held]
+                expected_held[k].append((onsets + left - offsets[k])[np.isin(foci, codes)])
             index += 1
         evaluation_minutes += x.shape[0] * x.shape[-1] / evaluation.sfreq / 60.0
     record: dict[str, Any] = {
@@ -738,6 +747,24 @@ def threshold_readout(
                 f"{focus}_curve": curve,
             }
         )
+    if atom_foci is not None:
+        record["atoms"] = {}
+        for k, held in atom_foci.items():
+            curve = {}
+            for rate in THRESHOLD_FA_CURVE:
+                recall, precision, n_events, n_detections = detection(
+                    positions[(k, rate)], expected_held[k], DETECTION_TOLERANCE
+                )
+                hits = round(precision * n_detections) if n_detections else 0
+                curve[str(rate)] = {
+                    "threshold": thresholds[k][rate],
+                    "recall": recall,
+                    "precision": precision,
+                    "n_events": n_events,
+                    "n_detections": n_detections,
+                    "background_fa_per_minute": (n_detections - hits) / max(evaluation_minutes, 1e-30),
+                }
+            record["atoms"][str(k)] = {"foci": list(held), "curve": curve}
     return record
 
 
@@ -1156,6 +1183,219 @@ def compare_initializations(
     return decision
 
 
+# ---------------------------------------------------------------------- post-hoc all-event check
+
+# Protocol section 10.18, fixed on 2026-10-30 before any of its numbers. Post hoc: it does not change the gate decision.
+FOLDS = (0, 1)  # 0: the patient split of section 10.6; 1: the two halves swapped
+ALL_EVENT_AMPLITUDE = AMPLITUDES[-1]
+ALL_EVENT_NEXT = {
+    "passed": "Every condition holds: step 2 at seeds 2 and 3 after seeds 0 and 1; gate 2 after step 2",
+    "close_line": "A condition failed: close the separable line, with no further variants",
+    "incomplete": "Some runs are missing and none has failed: finish them before reading the rule",
+    "descriptive": "A patch-start root is descriptive here; the random-start root decides",
+}
+
+
+def joint_oracle_model(
+    spec: WaveformSpec, channels: list[str], domain: str, sfreq: float, device: str
+) -> tuple[SeparableSAE, int]:
+    """The one-atom oracle of section 10.18: the planted template and one projection ``u*`` per focus (``K=1``).
+
+    Every other field of ``spec`` is the campaign's. Returns the model and the template's offset.
+    """
+    template = row_template(sfreq, domain)
+    offset = (spec.atom_len - len(template)) // 2
+    fields = {name: getattr(spec, name) for name in WaveformSpec.__dataclass_fields__}
+    fields.update(n_atoms=1, pre_emphasis=domain)
+    separable = SeparableSpec(**fields, n_projections=len(FOCI), loss_support="extended")
+    model = SeparableSAE(spec=separable, device=device)
+    time = torch.zeros(1, spec.atom_len, dtype=torch.float64)
+    time[:, offset : offset + len(template)] = torch.from_numpy(template)
+    channel = torch.from_numpy(np.stack([focal_topography(channels, focus) for focus in FOCI], axis=1))[None]
+    model.atoms = nn.Parameter(model._constrain(model._pack(time, channel)).float().to(model.device))
+    return model, offset
+
+
+def held_foci(readout: dict[str, Any], baseline: float) -> dict[int, list[str]]:
+    """The foci each focus atom holds: ``rho_w``, its gain over ``baseline`` and ``rho_u`` of section 4.3 are met."""
+    held: dict[int, list[str]] = {}
+    for focus in FOCI:
+        rho_w, rho_u = readout[f"{focus}_rho_w"], readout[f"{focus}_rho_u"]
+        if rho_w >= RHO_W_MIN and rho_w - baseline >= RHO_W_GAIN_MIN and rho_u >= RHO_U_MIN:
+            held.setdefault(int(readout[f"{focus}_atom"]), []).append(focus)
+    return held
+
+
+def all_event_passes(record: dict[str, Any]) -> bool:
+    """Whether one seed passes: an atom meets recall and precision at ``THRESHOLD_FA_PER_MINUTE`` on its held foci."""
+
+    def meets(value: float | None, threshold: float) -> bool:
+        return value is not None and not math.isnan(value) and value >= threshold
+
+    points = [block["curve"][str(THRESHOLD_FA_PER_MINUTE)] for block in record["atoms"].values()]
+    return any(meets(p["recall"], RECALL_MIN) and meets(p["precision"], PRECISION_MIN) for p in points)
+
+
+def all_event_outcome(separable: dict[int, bool | None], oracle: dict[int, bool | None]) -> str:
+    """The outcome of section 10.18 from the fold verdicts of the separable arm and the oracle on plain rows."""
+    verdicts = [*separable.values(), *oracle.values()]
+    if any(v is False for v in verdicts):
+        return "close_line"
+    return "incomplete" if any(v is None for v in verdicts) else "passed"
+
+
+def all_event(args: argparse.Namespace) -> dict[str, Any]:
+    """Read the amplitude-6 dictionaries of ``args.root``, and with ``args.oracle`` the one-atom oracle, in both folds.
+
+    Runs that already hold their JSON file are skipped: ``allevent_readout_f{fold}.json`` in each arm
+    directory and ``allevent_oracle_{domain}_s{seed}_f{fold}.json`` in the root. Then applies the rule
+    of section 10.18 (``summarize_all_event``).
+    """
+    import hydra
+
+    from src.run_patient_waveform_sweep import save_json
+
+    root, seeds = args.root.resolve(), tuple(args.seeds)
+    cfg, source = _stage_1b_validation(args)
+    sfreq = float(cfg.data.target_sfreq)
+    negative = np.flatnonzero(source.plan["epilepsy"].to_numpy() == 0)
+    subjects = source.plan["subject"].astype(str).to_numpy()[negative]
+    spec = hydra.utils.instantiate(cfg.feature.spec)
+    train_spec = hydra.utils.instantiate(cfg.feature.train_spec)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader_kwargs = {"batch_size": 8, "num_workers": args.num_workers}
+    commit = _git("rev-parse", "HEAD").strip()
+    arms = [parse_arm(p.name) for p in sorted(root.iterdir()) if p.is_dir() and ARM_PATTERN.match(p.name)]
+    targets = [a for a in arms if a["stage"] == "1b" and a["amplitude"] == ALL_EVENT_AMPLITUDE and a["seed"] in seeds]
+    for fold in FOLDS:
+        calibrate = patient_halves(subjects, fold)
+
+        def views(seed: int) -> list[PlantedEvents]:
+            return [
+                PlantedEvents(source, negative[mask], planted, seed, "val", sfreq)
+                for mask, planted in ((calibrate, 0), (~calibrate, ALL_EVENT_AMPLITUDE))
+            ]
+
+        for arm in targets:
+            folder = root / arm["name"]
+            path = folder / f"allevent_readout_f{fold}.json"
+            if path.is_file():
+                continue
+            original = json.loads((folder / "synthetic_readout.json").read_text())
+            free = json.loads((root / f"1b_{arm['arm']}_a0_s{arm['seed']}" / "synthetic_readout.json").read_text())
+            model = build_model(
+                arm["arm"], replace(spec, pre_emphasis=arm_pre_emphasis(folder)), train_spec, arm["seed"], device
+            )
+            model.load_checkpoint(folder / CHECKPOINT_NAME)
+            focus_atoms = {focus: int(original[f"{focus}_atom"]) for focus in FOCI}
+            record = threshold_readout(
+                model,
+                *views(arm["seed"]),
+                focus_atoms,
+                loader_kwargs,
+                atom_foci=held_foci(original, free["rho_w"]),
+            )
+            save_json(path, json_safe({**arm, "fold": fold, "commit": commit, **record}))
+            logger.info(f"All-event {arm['name']} fold {fold}: passes {all_event_passes(json_safe(record))}")
+        if not args.oracle:
+            continue
+        for domain in ORACLE_DOMAINS:
+            model, offset = joint_oracle_model(spec, list(source.target_channels), domain, sfreq, device)
+            for seed in seeds:
+                path = root / f"allevent_oracle_{domain}_s{seed}_f{fold}.json"
+                if path.is_file():
+                    continue
+                record = threshold_readout(
+                    model,
+                    *views(seed),
+                    dict.fromkeys(FOCI, 0),
+                    loader_kwargs,
+                    offsets={0: offset},
+                    atom_foci={0: list(FOCI)},
+                )
+                header = {"domain": domain, "seed": seed, "fold": fold, "offset": offset, "commit": commit}
+                save_json(path, json_safe({**header, **record}))
+                logger.info(
+                    f"All-event oracle {domain} s{seed} fold {fold}: passes {all_event_passes(json_safe(record))}"
+                )
+    return summarize_all_event(root, seeds)
+
+
+def summarize_all_event(root: Path, seeds: tuple[int, ...] = SEEDS) -> dict[str, Any]:
+    """Apply the rule of section 10.18 to the all-event runs of ``root`` at ``seeds``.
+
+    Writes ``allevent_summary.csv`` and ``allevent_decision.json`` (with an ``_s{seed}...`` suffix at
+    other seeds). Only a random-start root decides; a patch-start root is descriptive. The audit is
+    the largest absolute difference between fold 0 and the stored per-focus re-read.
+    """
+    from src.run_patient_waveform_sweep import save_json
+
+    sources: dict[str, dict[int, dict[int, Path]]] = {}
+    for arm in ("f5", "s4ext"):
+        name = f"1b_{arm}_a{ALL_EVENT_AMPLITUDE}_s"
+        sources[arm] = {f: {s: root / f"{name}{s}" / f"allevent_readout_f{f}.json" for s in seeds} for f in FOLDS}
+    for domain in ORACLE_DOMAINS:
+        sources[f"oracle_{domain}"] = {
+            f: {s: root / f"allevent_oracle_{domain}_s{s}_f{f}.json" for s in seeds} for f in FOLDS
+        }
+    rows, audit = [], []
+    verdicts: dict[str, dict[int, bool | None]] = {}
+    for name, per_fold in sources.items():
+        verdicts[name] = {}
+        for fold, paths in per_fold.items():
+            passes: list[bool | None] = []
+            for seed, path in paths.items():
+                if not path.is_file():
+                    passes.append(None)
+                    continue
+                record = json.loads(path.read_text())
+                passes.append(all_event_passes(record))
+                for atom, block in record["atoms"].items():
+                    for rate, point in block["curve"].items():
+                        rows.append(
+                            {
+                                "name": name,
+                                "fold": fold,
+                                "seed": seed,
+                                "atom": int(atom),
+                                "foci": "+".join(block["foci"]),
+                                "fa_per_minute": float(rate),
+                                **point,
+                            }
+                        )
+                stored = path.parent / "threshold_readout.json"
+                if fold == 0 and stored.is_file():
+                    old = json.loads(stored.read_text())
+                    audit.extend(
+                        abs(record[key] - old[key])
+                        for key in (f"{focus}_{metric}" for focus in FOCI for metric in ("recall", "precision"))
+                        if record.get(key) is not None and old.get(key) is not None
+                    )
+            # Any failing seed decides at once: a missing run must not hide it.
+            verdicts[name][fold] = False if False in passes else (None if None in passes else True)
+    suffix = "" if seeds == SEEDS else "_" + "_".join(f"s{s}" for s in seeds)
+    if rows:
+        pl.DataFrame(rows, infer_schema_length=None).sort("name", "fold", "seed", "atom", "fa_per_minute").write_csv(
+            root / f"allevent_summary{suffix}.csv"
+        )
+    probe = root / f"1b_s4ext_a{ALL_EVENT_AMPLITUDE}_s{seeds[0]}" / "synthetic_provenance.json"
+    start = json.loads(probe.read_text()).get("init", "patches") if probe.is_file() else "patches"
+    outcome = all_event_outcome(verdicts["s4ext"], verdicts["oracle_none"]) if start == "random" else "descriptive"
+    decision = {
+        "rule": "protocol section 10.18 (post hoc)",
+        "seeds": list(seeds),
+        "fa_per_minute": THRESHOLD_FA_PER_MINUTE,
+        "start": start,
+        "recovers": {name: {str(f): v for f, v in folds.items()} for name, folds in verdicts.items()},
+        "outcome": outcome,
+        "next_step": ALL_EVENT_NEXT[outcome],
+        "fold_0_audit_max_abs_difference": max(audit) if audit else None,
+    }
+    save_json(root / f"allevent_decision{suffix}.json", decision)
+    logger.info(f"All-event check of {root.name}: {outcome}. {ALL_EVENT_NEXT[outcome]}")
+    return decision
+
+
 # ---------------------------------------------------------------------- figure
 
 # Categorical slots 1 and 2 of the dataviz reference palette (validated: CVD Delta E 24.7, contrast >= 3:1).
@@ -1334,7 +1574,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Command-line entry point for the six subcommands of the module docstring."""
+    """Command-line entry point for the subcommands of the module docstring."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="fit one arm; its directory name encodes stage, arm, amplitude and seed")
@@ -1365,6 +1605,14 @@ def main() -> None:
     best.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
     best.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
     best.add_argument("--num-workers", type=int, default=4)
+    every = commands.add_parser("allevent", help="post-hoc all-event re-read in both folds (section 10.18)")
+    every.add_argument("--root", type=Path, required=True, help="a root with stage-1b arms")
+    every.add_argument("--manifests", type=Path, required=True, help="the 40 s offset audit")
+    every.add_argument("--data-dir", type=Path, required=True, help="the corpus root")
+    every.add_argument("--signal-cache-dir", type=Path, required=True, help="the campaign signal cache")
+    every.add_argument("--num-workers", type=int, default=4)
+    every.add_argument("--oracle", action="store_true", help="also read the one-atom oracle")
+    every.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS), help="2 3 for step 2")
     screen = commands.add_parser("compare", help="post-hoc initialization rule: random against patch starts")
     screen.add_argument("--random-root", type=Path, required=True, help="a root of random-initialized arms")
     screen.add_argument("--patch-root", type=Path, required=True, help="a root of patch-initialized arms")
@@ -1381,6 +1629,8 @@ def main() -> None:
         reread(args)
     elif args.command == "oracle":
         oracle(args)
+    elif args.command == "allevent":
+        all_event(args)
     elif args.command == "compare":
         compare_initializations(args.random_root.resolve(), args.patch_root.resolve(), args.stage, tuple(args.seeds))
     elif args.command == "plot":

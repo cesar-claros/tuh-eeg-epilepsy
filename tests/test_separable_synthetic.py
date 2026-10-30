@@ -8,8 +8,9 @@ dictionary that holds the planted template, the recovery rules and stage outcome
 section 4.3 under both matching rules, the input figure, the threshold re-read of section 10.6 (its
 helpers and an exact template), the oracle matched filter of section 10.9 (its template, model,
 detection and rule), the readouts on differenced rows of section 10.11, the initialization rule of
-section 10.12, the stage-1b configuration with its refusal of reseeding, and small stage-1a runs
-with their summary, also on differenced rows from a random start.
+section 10.12, the stage-1b configuration with its refusal of reseeding, the all-event check of
+section 10.18 (folds, held foci, one-atom oracle, decision), and small stage-1a runs with their
+summary, also on differenced rows from a random start.
 """
 
 from __future__ import annotations
@@ -379,6 +380,125 @@ def test_initialization_rule_of_sections_10_12_and_10_13() -> None:
         _expect_value_error(
             lambda: gate.compare_initializations(random_root, reseeding), "a reseeding patch root passed"
         )
+
+
+def test_patient_folds_partition_the_patients() -> None:
+    subjects = np.array(["b", "a", "b", "c", "d"])
+    first, second = gate.patient_halves(subjects), gate.patient_halves(subjects, fold=1)
+    assert first.tolist() == [False, True, False, True, False], "fold 0 changed the split of section 10.6"
+    assert second.tolist() == [True, False, True, False, True] and bool((first ^ second).all())
+
+
+def test_held_foci_needs_every_shape_criterion() -> None:
+    readout = {"T3_atom": 5, "C4_atom": 5, "T3_rho_w": 0.99, "C4_rho_w": 0.99, "T3_rho_u": 0.95, "C4_rho_u": 0.9}
+    assert gate.held_foci(readout, baseline=0.5) == {5: ["T3", "C4"]}, "one atom must hold both foci"
+    assert gate.held_foci({**readout, "C4_rho_u": 0.25}, baseline=0.5) == {5: ["T3"]}, "a low rho_u held a focus"
+    assert gate.held_foci(readout, baseline=0.85) == {}, "a waveform without gain over the event-free arm held a focus"
+    assert gate.held_foci({**readout, "T3_atom": 2, "T3_rho_w": 0.8}, baseline=0.5) == {5: ["C4"]}
+    assert gate.held_foci({**readout, "T3_atom": 2}, baseline=0.5) == {2: ["T3"], 5: ["C4"]}
+
+
+def test_joint_oracle_counts_all_events() -> None:
+    background = _background(4)
+    calibration = gate.PlantedEvents(background, np.arange(2), 0, seed=0, split="val", sfreq=SFREQ)
+    evaluation = gate.PlantedEvents(background, np.arange(2, 4), 6, seed=0, split="val", sfreq=SFREQ)
+    spec = WaveformSpec(n_atoms=64, atom_len=256, pool_len=512, top_r=1)
+    loader = {"batch_size": 2, "num_workers": 0}
+    for domain in gate.ORACLE_DOMAINS:
+        model, offset = gate.joint_oracle_model(spec, CHANNELS, domain, SFREQ, "cpu")
+        time, channel, _ = gate.factors(model)
+        assert time.shape == (1, 256) and channel.shape == (1, len(CHANNELS), 2) and offset == 89
+        template = gate.row_template(SFREQ, domain)
+        assert np.allclose(time[0, offset : offset + len(template)], template, atol=1e-6)
+        for f, focus in enumerate(gate.FOCI):
+            assert abs(float(channel[0, :, f] @ gate.focal_topography(CHANNELS, focus)) - 1.0) < 1e-5
+        focus_atoms = dict.fromkeys(gate.FOCI, 0)
+        offsets = {0: offset}
+        plain = gate.threshold_readout(model, calibration, evaluation, focus_atoms, loader, offsets)
+        assert "atoms" not in plain, "the re-read record changed without atom_foci"
+        record = gate.threshold_readout(
+            model, calibration, evaluation, focus_atoms, loader, offsets, atom_foci={0: list(gate.FOCI)}
+        )
+        block = record["atoms"]["0"]
+        point = block["curve"][str(gate.THRESHOLD_FA_PER_MINUTE)]
+        assert block["foci"] == list(gate.FOCI) and point["n_events"] == 8, "two segments of four events"
+        assert point["recall"] >= 0.9, f"the {domain} one-atom oracle missed its events"
+        summed = record["T3_precision"] + record["C4_precision"]
+        assert abs(point["precision"] - summed) < 1e-9, "the all-event precision is not the sum of the foci"
+        hits = round(point["precision"] * point["n_detections"])
+        assert abs(point["background_fa_per_minute"] - (point["n_detections"] - hits) / 4.0) < 1e-12
+
+
+def _all_event_record(recall: float, precision: float | None) -> dict[str, Any]:
+    point = {
+        "threshold": 1.0,
+        "recall": recall,
+        "precision": precision,
+        "n_events": 8,
+        "n_detections": 8,
+        "background_fa_per_minute": 0.5,
+    }
+    curve = {str(rate): point for rate in gate.THRESHOLD_FA_CURVE}
+    return {"T3_recall": recall, "T3_precision": 0.3, "atoms": {"7": {"foci": ["T3", "C4"], "curve": curve}}}
+
+
+def _all_event_root(root: Path, start: str | None, seeds: tuple[int, ...] = gate.SEEDS) -> None:
+    for seed in seeds:
+        folder = root / f"1b_s4ext_a6_s{seed}"
+        folder.mkdir(parents=True)
+        (folder / "synthetic_provenance.json").write_text(json.dumps({} if start is None else {"init": start}))
+        for fold in gate.FOLDS:
+            (folder / f"allevent_readout_f{fold}.json").write_text(json.dumps(_all_event_record(0.99, 0.6)))
+            for domain in gate.ORACLE_DOMAINS:
+                path = root / f"allevent_oracle_{domain}_s{seed}_f{fold}.json"
+                path.write_text(json.dumps(_all_event_record(0.99, 0.6)))
+
+
+def test_all_event_rule_closes_on_any_failure() -> None:
+    assert gate.all_event_passes(_all_event_record(0.99, 0.6))
+    assert not gate.all_event_passes(_all_event_record(0.99, 0.49)), "low precision passed"
+    assert not gate.all_event_passes(_all_event_record(0.79, 0.6)), "low recall passed"
+    assert not gate.all_event_passes(_all_event_record(0.99, None)), "an atom without detections passed"
+    assert not gate.all_event_passes({"atoms": {}}), "an arm that holds no focus passed"
+    fail = _all_event_record(0.99, 0.3)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "random"
+        _all_event_root(root, "random")
+        decision = gate.summarize_all_event(root)
+        assert decision["outcome"] == "passed" and (root / "allevent_summary.csv").is_file()
+        assert decision["recovers"]["s4ext"] == {"0": True, "1": True} and decision["recovers"]["f5"]["0"] is None
+        diff_oracle = root / "allevent_oracle_diff_s1_f1.json"
+        diff_oracle.write_text(json.dumps(fail))
+        assert gate.summarize_all_event(root)["outcome"] == "passed", "the descriptive oracle decided"
+        oracle = root / "allevent_oracle_none_s0_f1.json"
+        oracle.write_text(json.dumps(fail))
+        assert gate.summarize_all_event(root)["outcome"] == "close_line", "a failing plain oracle did not close"
+        oracle.write_text(json.dumps(_all_event_record(0.99, 0.6)))
+        arm = root / "1b_s4ext_a6_s1" / "allevent_readout_f1.json"
+        arm.write_text(json.dumps(fail))
+        assert gate.summarize_all_event(root)["outcome"] == "close_line", "one failing seed and fold did not close"
+        arm.unlink()
+        oracle.unlink()
+        assert gate.summarize_all_event(root)["outcome"] == "incomplete"
+        seed_0 = root / "1b_s4ext_a6_s0" / "allevent_readout_f1.json"
+        seed_0.write_text(json.dumps(fail))
+        assert gate.summarize_all_event(root)["outcome"] == "close_line", "a missing seed hid a failing seed"
+        seed_0.write_text(json.dumps(_all_event_record(0.99, 0.6)))
+        (root / "1b_s4ext_a6_s0" / "allevent_readout_f0.json").write_text(json.dumps(fail))
+        assert gate.summarize_all_event(root)["outcome"] == "close_line", "a missing run hid a failure"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "patches"
+        _all_event_root(root, None)
+        stored = root / "1b_s4ext_a6_s0" / "threshold_readout.json"
+        stored.write_text(json.dumps({"T3_recall": 0.98, "T3_precision": 0.3}))
+        decision = gate.summarize_all_event(root)
+        assert decision["outcome"] == "descriptive", "a patch-start root decided"
+        assert abs(decision["fold_0_audit_max_abs_difference"] - 0.01) < 1e-12
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "random"
+        _all_event_root(root, "random", seeds=(2, 3))
+        assert gate.summarize_all_event(root, (2, 3))["outcome"] == "passed"
+        assert (root / "allevent_decision_s2_s3.json").is_file(), "step 2 overwrote the decision of step 1"
 
 
 def test_stage_1b_config_and_reseeding_refusal() -> None:
