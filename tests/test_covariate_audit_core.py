@@ -243,6 +243,11 @@ def test_medication_read_takes_the_first_eligible_group() -> None:
     assert flat["result"] == "unresolved", flat
 
 
+def test_is_flagged_reads_only_yes() -> None:
+    assert core.is_flagged("Y") and core.is_flagged(" y ")
+    assert not core.is_flagged("N") and not core.is_flagged(float("nan")) and not core.is_flagged(None)
+
+
 def test_tokens_read_the_forms_a_sheet_may_use() -> None:
     subjects = {"aaaaaanr", "aaaaaebo"}
     for cell in ("aaaaaanr", "AAAAAANR", "aaaaaanr_s001_t000", "/x/aaaaaanr/y"):

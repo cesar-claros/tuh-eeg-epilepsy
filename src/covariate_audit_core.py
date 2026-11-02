@@ -437,6 +437,11 @@ def is_missing(value: Any) -> bool:
     return value is None or value != value or (isinstance(value, str) and not value.strip())
 
 
+def is_flagged(value: Any) -> bool:
+    """Whether a yes-or-no cell of the spreadsheet says yes."""
+    return not is_missing(value) and str(value).strip().upper() == "Y"
+
+
 def subject_token(value: Any, subjects: set[str]) -> str | None:
     """The first of ``subjects`` that the cell names, as a whole token of eight letters."""
     if is_missing(value):

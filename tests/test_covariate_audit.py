@@ -33,6 +33,9 @@ MAPPING = {
     "antiseizure_terms": ["keppra", "valproate"],
     "empty_means": "unknown",
     "empty_terms": ["not listed"],
+    "narrow_terms": ["valproate"],
+    "flag_columns": ["Stroke", "Flagged"],
+    "comorbidity_columns": ["Stroke"],
 }
 
 
@@ -142,6 +145,8 @@ def _spreadsheet(path: Path, labels: dict[str, int]) -> None:
                     "Age": 40 + i % 30,
                     "Epilepsy": labels[subject],
                     "Medications": "Keppra 500 mg" if labels[subject] and i % 3 else "aspirin",
+                    "Stroke": "Y" if i % 10 == 0 else "N",
+                    "Flagged": "Y" if labels[subject] else "N",
                 }
             )
     rows.append({"Subject": "lockedpt", "Session": "s001", "Age": 33, "Epilepsy": 1, "Medications": "secretdrug"})
@@ -245,6 +250,30 @@ def test_medication_status_uses_the_read_sessions() -> None:
         )
 
 
+def test_flags_count_only_the_read_sessions() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "metadata.xlsx"
+        pd.DataFrame(
+            [
+                {"Subject": "aaaaaaaa", "Session": "s001", "Medications": "x", "Stroke": "Y"},
+                {"Subject": "aaaaaaaa", "Session": "s002", "Medications": "x", "Stroke": "N"},
+                {"Subject": "bbbbbbbb", "Session": "s001", "Medications": "x", "Stroke": "N"},
+                {"Subject": "lockedpt", "Session": "s001", "Medications": "x", "Stroke": "Y"},
+            ]
+        ).to_excel(path, index=False)
+        mapping = {**MAPPING, "flag_columns": ["Stroke"]}
+        sessions = {"aaaaaaaa": ["s002"], "bbbbbbbb": ["s001"], "cccccccc": ["s001"]}
+        flags = driver.flags_by_patient(path, mapping, sessions)
+        assert flags == {"Stroke": {"aaaaaaaa": False, "bbbbbbbb": False, "cccccccc": False}}, flags
+        flags = driver.flags_by_patient(path, mapping, {"aaaaaaaa": ["s001", "s002"]})
+        assert flags == {"Stroke": {"aaaaaaaa": True}}, "any read session counts"
+        assert driver.flags_by_patient(path, {**mapping, "flag_columns": []}, sessions) == {}
+        _expect_value_error(
+            lambda: driver.flags_by_patient(path, {**mapping, "flag_columns": ["Nope"]}, sessions),
+            "a column that does not exist",
+        )
+
+
 def test_a_failed_gate_blocks_before_any_eeg_score_is_opened() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root, readout, metadata, _ = _prepared(Path(tmp), year_drift=9)
@@ -265,9 +294,12 @@ def test_a_score_with_its_own_signal_holds_end_to_end() -> None:
         assert decision["controls"]["passed"] and decision["gates"]["header_coverage"] == 1.0
         assert decision["primary"]["low"] > 0.5 and decision["primary"]["patients_epilepsy"] >= 30
         assert decision["medication_table"]["epilepsy"]["on"] > 0
+        assert decision["flag_table"]["Flagged"] == {"epilepsy": 79, "non_epilepsy": 0}, decision["flag_table"]
+        assert decision["medication_table_narrow"]["epilepsy"]["on"] == 0, "the narrow list holds no term of this sheet"
+        assert decision["medication_narrow"]["group"] == "off"
         summary = pl.read_csv(root / "audit_summary.csv")
         reads = set(summary["read"].to_list())
-        expected = {"matched", "matched_difference", "alone", "added_value", "sensitivity", "band_power"}
+        expected = {"matched", "matched_difference", "alone", "added_value", "sensitivity", "band_power", "comorbidity"}
         assert expected <= reads, reads
         assert (root / "refit_scores.csv").is_file() and (root / "medication.csv").is_file()
         groups = set(summary.filter(pl.col("read") == "sensitivity")["group"].to_list())

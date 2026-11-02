@@ -50,6 +50,7 @@ from src.covariate_audit_core import (  # noqa: E402
     group_pairs,
     header_gates,
     inventory_sheet,
+    is_flagged,
     is_missing,
     matched_difference,
     matched_read,
@@ -318,10 +319,12 @@ def load_mapping(path: Path | None) -> dict[str, Any]:
     return mapping
 
 
-def medication_by_patient(metadata: Path, mapping: dict[str, Any], sessions: dict[str, list[str]]) -> dict[str, str]:
-    """The status of each patient from the read sessions and the mapping (section 8).
+def _metadata_rows(
+    metadata: Path, mapping: dict[str, Any], subjects: set[str], wanted: list[str]
+) -> tuple[dict[str, list[Any]], list[tuple[str, str | None, int]]]:
+    """The columns of the mapping's sheet, and ``(patient, session, row)`` of the rows of ``subjects``.
 
-    Other patients are dropped while the rows are read. ``empty_terms`` of the mapping are cells that count as empty.
+    Other patients are dropped here, before any cell is read.
 
     Raises
     ------
@@ -333,29 +336,57 @@ def medication_by_patient(metadata: Path, mapping: dict[str, Any], sessions: dic
     if sheet not in sheets:
         raise ValueError(f"the spreadsheet has no sheet {sheet}")
     columns = sheets[sheet]
-    wanted = [mapping["subject_column"], mapping["session_column"], *mapping["medication_columns"]]
-    absent = [name for name in wanted if name not in columns]
+    absent = [name for name in [mapping["subject_column"], mapping["session_column"], *wanted] if name not in columns]
     if absent:
         raise ValueError(f"the spreadsheet has no columns {absent}")
-    subjects = set(sessions)
-    empty_terms = {str(t).strip().lower() for t in mapping.get("empty_terms", [])}
-    texts: dict[tuple[str, str | None], list[str]] = {}
+    rows = []
     for row, cell in enumerate(columns[mapping["subject_column"]]):
         owner = subject_token(cell, subjects)
-        if owner is None:
-            continue
-        session = session_token(columns[mapping["session_column"]][row])
+        if owner is not None:
+            rows.append((owner, session_token(columns[mapping["session_column"]][row]), row))
+    return columns, rows
+
+
+def medication_by_patient(
+    metadata: Path, mapping: dict[str, Any], sessions: dict[str, list[str]], terms: list[str] | None = None
+) -> dict[str, str]:
+    """The status of each patient from the read sessions and the mapping (section 8).
+
+    ``terms`` replaces the deciding list of the mapping, for the narrow read. ``empty_terms`` of the mapping are cells
+    that count as empty.
+    """
+    columns, rows = _metadata_rows(metadata, mapping, set(sessions), mapping["medication_columns"])
+    empty_terms = {str(t).strip().lower() for t in mapping.get("empty_terms", [])}
+    texts: dict[tuple[str, str | None], list[str]] = {}
+    for owner, session, row in rows:
         cells = [columns[name][row] for name in mapping["medication_columns"]]
         listed = [str(c) for c in cells if not is_missing(c) and str(c).strip().lower() not in empty_terms]
         texts.setdefault((owner, session), []).extend(listed)
     return {
         subject: medication_status(
             [" ; ".join(texts.get((subject, session), [])) for session in values],
-            mapping["antiseizure_terms"],
+            mapping["antiseizure_terms"] if terms is None else terms,
             mapping["empty_means"],
         )
         for subject, values in sessions.items()
     }
+
+
+def flags_by_patient(
+    metadata: Path, mapping: dict[str, Any], sessions: dict[str, list[str]]
+) -> dict[str, dict[str, bool]]:
+    """For each column of ``flag_columns``, the patients with a ``Y`` at any read session (sections 4 and 10).
+
+    A column derived from the label is counted and never adjusted for. A session without a row counts as no flag.
+    """
+    wanted = list(mapping.get("flag_columns", []))
+    columns, rows = _metadata_rows(metadata, mapping, set(sessions), wanted)
+    flags = {name: dict.fromkeys(sessions, False) for name in wanted}
+    for owner, session, row in rows:
+        if session in sessions[owner]:
+            for name in wanted:
+                flags[name][owner] = flags[name][owner] or is_flagged(columns[name][row])
+    return flags
 
 
 def aligned_scores(path: Path, subject: np.ndarray) -> np.ndarray:
@@ -443,6 +474,17 @@ def medication_table(patients: Patients, status: np.ndarray) -> dict[str, dict[s
         counts = Counter(status[patients.label == label].tolist())
         table[name] = {group: counts[group] for group in ("on", "off", "unknown")}
     return table
+
+
+def flag_table(patients: Patients, flags: dict[str, dict[str, bool]]) -> dict[str, dict[str, int]]:
+    """Patients with each flag, by class (sections 4 and 10)."""
+    return {
+        name: {
+            group: int(sum(values[s] for s in patients.subject[patients.label == label]))
+            for label, group in ((1, "epilepsy"), (0, "non_epilepsy"))
+        }
+        for name, values in flags.items()
+    }
 
 
 def _added_value(patients: Patients, score: np.ndarray, n_boot: int) -> tuple[float, float, float]:
@@ -533,6 +575,13 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
     status = np.array([status_by_patient[s] for s in patients.subject])
     pl.DataFrame({"subject": patients.subject.tolist(), "status": status.tolist()}).write_csv(root / "medication.csv")
     decision["medication_table"] = medication_table(patients, status)
+    narrow = None
+    if mapping.get("narrow_terms"):
+        by_narrow = medication_by_patient(metadata, mapping, read_sessions(root), mapping["narrow_terms"])
+        narrow = np.array([by_narrow[s] for s in patients.subject])
+        decision["medication_table_narrow"] = medication_table(patients, narrow)
+    flags = flags_by_patient(metadata, mapping, read_sessions(root))
+    decision["flag_table"] = flag_table(patients, flags)
     outcome = audit_outcome(True, *counts.values())
     if outcome == "too_few":
         return finish(outcome)
@@ -558,6 +607,8 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
         f"excludes_above_{EXCLUSION_BOUND}": excludes_above_bound(primary),
     }
     decision["medication"] = medication_read(scores[PRIMARY], label, fold, mask, status, n_boot=n_boot)
+    if narrow is not None:
+        decision["medication_narrow"] = medication_read(scores[PRIMARY], label, fold, mask, narrow, n_boot=n_boot)
     known = status != "unknown"
     on = (status == "on").astype(float)
     rows.append(
@@ -610,6 +661,15 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
         rows.append(_value_row("added_value", name, "M1 minus M0", *_added_value(patients, scores[name], n_boot)))
     rows += _sensitivity_rows(patients, {name: scores[name] for name in (PRIMARY, COMPARISON)}, n_boot)
     rows += _band_rows(readout, patients, mask, n_boot)
+    listed = mapping.get("comorbidity_columns", [])
+    if listed:
+        comorbid = np.array([any(flags[name][s] for name in listed) for s in patients.subject])
+        alone = matched_read(comorbid.astype(float), label, fold, all_pairs(label), False, n_boot)
+        rows.append(_row("alone", "listed comorbidity", "more in epilepsy above 0.5", alone))
+        without = mask & all_pairs(label, ~comorbid)
+        for name in (PRIMARY, COMPARISON):
+            read = matched_read(scores[name], label, fold, without, n_boot=n_boot)
+            rows.append(_row("comorbidity", name, "matched, none of the listed", read))
     files = patients.files_per_session
     rows.append(
         _row(
