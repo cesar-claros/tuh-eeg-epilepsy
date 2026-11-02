@@ -61,9 +61,11 @@ from src.encoder_check_core import (  # noqa: E402
     patient_rows,
     random_windows,
     rotate_rows,
+    rotated_linear_scores,
     scale_level,
     segment_starts,
     split_spread,
+    spread_is_consistent,
     tiled_length,
     zscore_channels,
 )
@@ -433,17 +435,21 @@ def run_step0(root: Path, readout: Path, audit: Path, n_splits: int = N_SPLITS) 
         data = np.load(readout / "features" / f"{name}.npz")
         x = patient_rows(data["features"], data["subject"].astype(str), cohort.subject).astype(np.float64)
         x = StandardScaler().fit_transform(x)
-        rotated = rotate_rows(x)
         saved = saved_scores(readout / "scores" / f"{name}.csv", cohort)
-        mlp = fold_scores(rotated, cohort.label, cohort.fold, mlp_scores, plan["seed"])
+        mlp = fold_scores(x, cohort.label, cohort.fold, mlp_scores, plan["seed"])
         arm = ArmScores(cohort.subject, cohort.fold, cohort.label, mlp)
+        folds = alone_interval(saved)
+        spread = split_spread(rotate_rows(x), cohort.label, rotated_linear_scores, n_splits, plan["seed"])
         report[name] = {
-            "linear_folds": alone_interval(saved),
+            "linear_folds": folds,
             "mlp_folds": alone_interval(arm),
             "mlp_minus_linear": paired_interval(arm, saved),
-            "linear_splits": split_spread(rotated, cohort.label, linear_scores, n_splits, plan["seed"]),
+            "linear_splits": spread,
+            "splits_agree_with_folds": spread_is_consistent(folds[0], spread["mean"]),
         }
         logger.info(f"Step 0, {name}: {report[name]}")
+        if not report[name]["splits_agree_with_folds"]:
+            logger.error(f"Step 0, {name}: the splits and the folds disagree; do not read this as a result")
     _save_json(root / "step0.json", report)
     return report
 

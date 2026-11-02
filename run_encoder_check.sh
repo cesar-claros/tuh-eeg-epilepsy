@@ -72,6 +72,9 @@ step() {
 
 case "$STAGE" in
   step0)
+    if [[ -f "$ROOT/step0.json" ]]; then
+      cp -- "$ROOT/step0.json" "$ROOT/step0_before_$STAMP.json"  # keep the record of an earlier read
+    fi
     step step0 "${ROOTS[@]}" --splits "$SPLITS"
     cat "$ROOT/step0.json"
     ;;

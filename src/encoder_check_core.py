@@ -37,6 +37,7 @@ EMBED_DIM = 512
 # Reads (section 5).
 N_PROBE_WINDOWS = 60
 N_SPLITS = 1000
+STEP0_MARGIN = 0.10
 TEST_SHARE, MLP_VAL_SHARE = 0.25, 0.15
 MLP_HIDDEN = 256
 MLP_ALPHAS = (1e-4, 1e-2, 1.0)
@@ -201,11 +202,18 @@ def linear_scores(
     seed: int = 0,
     grid: Sequence[float] = C_GRID,
     val_share: float = MLP_VAL_SHARE,
+    standardize: bool = True,
 ) -> np.ndarray:
-    """L2 logistic regression with ``C`` chosen on a held-out share of the training rows; rows are patients."""
+    """L2 logistic regression with ``C`` chosen on a held-out share of the training rows; rows are patients.
+
+    Pass ``standardize=False`` for rows from ``rotate_rows``, which a second scale would whiten.
+    """
     held = stratified_split(y_train, val_share, np.random.default_rng(seed))
-    scaler = StandardScaler().fit(x_train)
-    a, b = scaler.transform(x_train), scaler.transform(x_test)
+    if standardize:
+        scaler = StandardScaler().fit(x_train)
+        a, b = scaler.transform(x_train), scaler.transform(x_test)
+    else:
+        a, b = x_train, x_test
     best_c, best = grid[0], -math.inf
     for c in grid:
         model = LogisticRegression(C=c, max_iter=2000).fit(a[~held], y_train[~held])
@@ -310,9 +318,23 @@ def split_spread(
 
 
 def rotate_rows(x: np.ndarray) -> np.ndarray:
-    """Rows in the basis of their own span: an L2 logistic head on rows that are few and wide gives the same scores."""
+    """Rows in the basis of their own span: an L2 logistic head on rows that are few and wide gives the same scores.
+
+    The new columns are principal components, so they must not be standardized again: that would whiten them, give
+    noise directions the weight of the signal, and bring a held-out AUROC to chance. Scale before this call only.
+    """
     u, s, _ = np.linalg.svd(x, full_matrices=False)
     return u * s
+
+
+def rotated_linear_scores(x_train: np.ndarray, y_train: np.ndarray, x_test: np.ndarray, seed: int = 0) -> np.ndarray:
+    """``linear_scores`` for rows from ``rotate_rows``, with no second scale."""
+    return linear_scores(x_train, y_train, x_test, seed=seed, standardize=False)
+
+
+def spread_is_consistent(fold_value: float, spread_mean: float, margin: float = STEP0_MARGIN) -> bool:
+    """Whether a read over random splits agrees with the same head family over folds; a large gap means a fault."""
+    return bool(abs(fold_value - spread_mean) <= margin)
 
 
 def age_correlation(x: np.ndarray, subject: np.ndarray, age: Mapping[str, float], fold: Mapping[str, int]) -> float:

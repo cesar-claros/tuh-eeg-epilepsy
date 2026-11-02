@@ -174,6 +174,28 @@ def test_rotation_keeps_the_l2_head_on_wide_rows() -> None:
     assert np.corrcoef(direct, other)[0, 1] > 0.9999 and abs(direct - other).max() < 1e-2, "the same scores"
 
 
+def _correlated_signal(seed: int = 0, n: int = 156, p: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Wide rows whose class signal sits in a shared factor, as in correlated band power."""
+    rng = np.random.default_rng(seed)
+    y = (np.arange(n) < n // 2).astype(int)
+    factors = rng.standard_normal((n, 8))
+    factors[:, 0] += y
+    x = factors @ rng.standard_normal((8, p)) + 0.3 * rng.standard_normal((n, p))
+    return (x - x.mean(axis=0)) / x.std(axis=0), y
+
+
+def test_rotated_rows_read_as_the_rows_do_and_a_second_scale_would_break_them() -> None:
+    """The fault of the first step 0: a second scale whitened the rotated rows and read near chance."""
+    x, y = _correlated_signal()
+    rotated = core.rotate_rows(x)
+    direct = core.split_spread(x, y, core.linear_scores, n_splits=60)["mean"]
+    fixed = core.split_spread(rotated, y, core.rotated_linear_scores, n_splits=60)["mean"]
+    broken = core.split_spread(rotated, y, core.linear_scores, n_splits=60)["mean"]
+    assert direct > 0.65 and abs(direct - fixed) < 0.04, (direct, fixed)
+    assert broken < fixed - 0.1, (broken, fixed)
+    assert core.spread_is_consistent(direct, fixed) and not core.spread_is_consistent(direct, broken)
+
+
 def test_age_correlation_reads_age_and_rejects_noise() -> None:
     rng = np.random.default_rng(2)
     subjects = np.array([f"p{i:03d}" for i in range(156)])

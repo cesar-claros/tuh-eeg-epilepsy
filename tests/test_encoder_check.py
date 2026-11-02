@@ -164,6 +164,27 @@ def test_step0_writes_a_report_that_decides_nothing() -> None:
             assert len(report[name]["mlp_folds"]) == 3 and len(report[name]["mlp_minus_linear"]) == 3
 
 
+def test_step0_reads_a_signal_in_correlated_features() -> None:
+    """A read of a real signal must not fall to chance; the first run did, through a second scale of rotated rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fix = _fixture(Path(tmp))
+        rng = np.random.default_rng(SEED + 5)
+        factors = rng.standard_normal((N_PATIENTS, 8))
+        factors[:, 0] += 1.5 * fix["y"]
+        features = factors @ rng.standard_normal((8, 300)) + 0.3 * rng.standard_normal((N_PATIENTS, 300))
+        for name in ("Spectral-all", "HYDRA-all"):
+            np.savez(
+                fix["readout"] / "features" / f"{name}.npz",
+                subject=np.array(fix["subjects"]),
+                label=fix["y"],
+                features=features.astype(np.float32),
+            )
+        report = driver.run_step0(Path(tmp) / "check", fix["readout"], fix["audit"], n_splits=40)
+        for name in ("Spectral-all", "HYDRA-all"):
+            assert report[name]["linear_splits"]["mean"] > 0.7, report[name]
+            assert report[name]["mlp_folds"][0] > 0.7, report[name]
+
+
 def test_gates_pass_or_block_on_written_features() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         fix = _fixture(Path(tmp))
