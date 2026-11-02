@@ -65,13 +65,52 @@ def test_age_validity_compares_age_and_year_differences() -> None:
     assert pairs == 0 and math.isnan(share), "a missing age makes no pair"
 
 
+def test_a_patient_with_many_sessions_cannot_decide_the_validity_gate() -> None:
+    wrong = [(2000.0 + i, 40.0 + i) for i in range(9)] + [(2009.0, 70.0)]
+    sessions = {"heavy": wrong} | {f"p{i}": [(2010.0, 40.0), (2012.0, 42.0)] for i in range(9)}
+    by_pairs, pairs = core.age_validity(sessions)
+    by_patient, patients = core.patient_age_validity(sessions)
+    assert pairs == 54 and abs(by_pairs - 45 / 54) < 1e-12 and by_pairs < core.AGE_VALIDITY_MIN, by_pairs
+    assert patients == 10 and abs(by_patient - (36 / 45 + 9) / 10) < 1e-12, by_patient
+    assert by_patient >= core.AGE_VALIDITY_MIN, "this cohort is what the changed gate must pass"
+    single, count = core.patient_age_validity({"a": [(2010.0, 40.0)]})
+    assert math.isnan(single) and count == 0, "a patient without a pair does not count"
+    failing, _ = core.patient_age_validity({f"p{i}": [(2010.0, 40.0), (2012.0, 50.0)] for i in range(5)})
+    assert failing == 0.0, "errors in every patient must still fail"
+
+
+def test_the_repaired_age_uses_the_median_birth_year() -> None:
+    sessions = {"a": [(2010.0, 40.0), (2011.0, 41.0), (2012.0, 70.0)], "b": [(2010.0, 30.0)], "c": []}
+    assert core.median_birth_year(sessions["a"]) == 1970.0, "one wrong session must not move the median"
+    assert math.isnan(core.median_birth_year(sessions["c"]))
+    subjects = np.array(["a", "b", "c"])
+    repaired = core.repaired_ages(subjects, np.array([2012.0, 2010.0, 2010.0]), sessions)
+    assert repaired[0] == 42.0 and repaired[1] == 30.0 and math.isnan(repaired[2]), repaired
+
+
+def test_the_read_age_fit_counts_only_checkable_patients() -> None:
+    sessions = {"a": [(2010.0, 40.0), (2012.0, 42.0)], "b": [(2010.0, 30.0)], "c": [(2010.0, 50.0), (2012.0, 52.0)]}
+    subjects = np.array(["a", "b", "c"])
+    repaired = np.array([41.0, 30.0, 51.0])
+    fit, patients = core.read_age_fit(subjects, np.array([46.0, 99.0, 57.0]), repaired, sessions)
+    assert patients == 2 and fit == 0.5, "b has one session, a is exactly at the caliper, and c is beyond it"
+    empty, none = core.read_age_fit(np.array(["b"]), np.array([30.0]), np.array([30.0]), sessions)
+    assert math.isnan(empty) and none == 0
+
+
 def test_header_gates_apply_their_thresholds() -> None:
     age = np.array([40.0] * 9 + [math.nan])
     sex = np.array(["F"] * 10)
-    assert core.header_gates(age, sex, 0.95)["header_coverage_ok"], "90% is enough"
-    assert not core.header_gates(np.array([40.0] * 8 + [math.nan] * 2), sex, 0.95)["header_coverage_ok"]
-    assert not core.header_gates(age, sex, 0.5)["age_validity_ok"]
-    assert not core.header_gates(age, sex, math.nan)["age_validity_ok"], "no session pair cannot pass"
+    good = core.header_gates(age, sex, 0.95, 0.95)
+    assert good["header_coverage_ok"], "90% is enough"
+    assert core.gates_pass(good)
+    assert not core.header_gates(np.array([40.0] * 8 + [math.nan] * 2), sex, 0.95, 0.95)["header_coverage_ok"]
+    low_validity = core.header_gates(age, sex, 0.5, 0.95)
+    assert not low_validity["age_validity_ok"] and not core.gates_pass(low_validity)
+    assert not core.header_gates(age, sex, math.nan, 0.95)["age_validity_ok"], "no session pair cannot pass"
+    low_fit = core.header_gates(age, sex, 0.95, 0.5)
+    assert not low_fit["age_read_fit_ok"] and not core.gates_pass(low_fit)
+    assert not core.header_gates(age, sex, 0.95, math.nan)["age_read_fit_ok"], "no checkable patient cannot pass"
 
 
 def test_pair_mask_needs_same_sex_and_close_age() -> None:
@@ -197,17 +236,20 @@ def _read(low: float, high: float = 0.9) -> core.MatchedRead:
 
 def test_rule_gives_each_outcome() -> None:
     good, flat = _read(0.55), _read(0.45)
-    assert core.audit_outcome(False, 60, 60, good, good, good) == "blocked"
-    assert core.audit_outcome(True, 29, 60, good, good, good) == "too_few"
+    assert core.audit_outcome(False, 60, 60, good, good, good, good) == "blocked"
+    assert core.audit_outcome(True, 29, 60, good, good, good, good) == "too_few"
     assert core.audit_outcome(True, 60, 29) == "too_few"
     assert core.audit_outcome(True, 60, 60) == "incomplete"
-    assert core.audit_outcome(True, 60, 60, good) == "holds", "only the primary read decides holds"
-    assert core.audit_outcome(True, 60, 60, good, flat, flat) == "holds"
-    assert core.audit_outcome(True, 60, 60, flat, good, flat) == "review", "the refit read can only give review"
-    assert core.audit_outcome(True, 60, 60, flat, flat, good) == "review", "HYDRA can only give review"
-    assert core.audit_outcome(True, 60, 60, flat, flat, flat) == "not_resolved"
-    assert core.audit_outcome(True, 60, 60, flat) == "incomplete", "not_resolved needs the other two reads"
-    assert core.audit_outcome(True, 30, 30, flat, flat, flat) == "not_resolved", "30 per class is enough"
+    assert core.audit_outcome(True, 60, 60, good) == "incomplete", "holds needs the repaired read"
+    assert core.audit_outcome(True, 60, 60, good, repaired=good) == "holds", "only the primary read decides holds"
+    assert core.audit_outcome(True, 60, 60, good, flat, flat, good) == "holds"
+    assert core.audit_outcome(True, 60, 60, good, good, good, flat) == "review", "a repaired read that disagrees"
+    assert core.audit_outcome(True, 60, 60, flat, flat, flat, good) == "review", "a repaired read that disagrees"
+    assert core.audit_outcome(True, 60, 60, flat, good, flat, flat) == "review", "the refit read can only give review"
+    assert core.audit_outcome(True, 60, 60, flat, flat, good, flat) == "review", "HYDRA can only give review"
+    assert core.audit_outcome(True, 60, 60, flat, flat, flat, flat) == "not_resolved"
+    assert core.audit_outcome(True, 60, 60, flat, repaired=flat) == "incomplete", "not_resolved needs the other reads"
+    assert core.audit_outcome(True, 30, 30, flat, flat, flat, flat) == "not_resolved", "30 per class is enough"
 
 
 def test_the_exclusion_needs_an_upper_bound_below_its_limit() -> None:

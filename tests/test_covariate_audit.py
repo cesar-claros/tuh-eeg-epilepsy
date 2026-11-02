@@ -282,8 +282,26 @@ def test_a_failed_gate_blocks_before_any_eeg_score_is_opened() -> None:
         (readout / "features" / "Spectral.npz").unlink()
         decision = driver.audit(root, readout, metadata, MAPPING, n_boot=N_BOOT)
         assert decision["outcome"] == "blocked", decision
-        assert not decision["gates"]["age_validity_ok"]
+        assert not decision["gates"]["age_validity_ok"], "an error in every patient must still fail the gate"
         assert "demographics" not in decision and "primary" not in decision
+
+
+def test_a_few_patients_with_wrong_sessions_do_not_block_the_read() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, readout, metadata, _ = _prepared(Path(tmp))
+        frame = pl.read_csv(root / "session_ages.csv", schema_overrides={"subject": pl.Utf8})
+        wrong = frame["subject"].unique().sort().to_list()[:10]
+        frame = frame.with_columns(
+            pl.when(pl.col("subject").is_in(wrong) & (pl.col("session") == "s002"))
+            .then(pl.col("age") + 30.0)
+            .otherwise(pl.col("age"))
+            .alias("age")
+        )
+        frame.write_csv(root / "session_ages.csv")
+        decision = driver.audit(root, readout, metadata, MAPPING, n_boot=N_BOOT)
+        gates = decision["gates"]
+        assert gates["age_validity_ok"] and gates["age_validity"] == (N_PATIENTS - 10) / N_PATIENTS, gates
+        assert decision["outcome"] in ("holds", "review"), decision
 
 
 def test_a_score_with_its_own_signal_holds_end_to_end() -> None:
@@ -292,6 +310,8 @@ def test_a_score_with_its_own_signal_holds_end_to_end() -> None:
         decision = driver.audit(root, readout, metadata, MAPPING, n_boot=N_BOOT)
         assert decision["outcome"] == "holds", decision
         assert decision["controls"]["passed"] and decision["gates"]["header_coverage"] == 1.0
+        assert decision["gates"]["age_validity"] == 1.0 and decision["gates"]["age_read_fit"] == 1.0
+        assert decision["repaired"]["low"] > 0.5, decision["repaired"]
         assert decision["primary"]["low"] > 0.5 and decision["primary"]["patients_epilepsy"] >= 30
         assert decision["medication_table"]["epilepsy"]["on"] > 0
         assert decision["flag_table"]["Flagged"] == {"epilepsy": 79, "non_epilepsy": 0}, decision["flag_table"]

@@ -77,6 +77,9 @@ if [[ "$STAGE" == inventory ]]; then
     --num-workers "$NUM_WORKERS" --header-row "$HEADER_ROW" "${extra[@]}"
   echo "Inventory: $ROOT/inventory.json. It holds no label, no score and no value of age or sex."
 else
+  if [[ -f "$ROOT/audit_decision.json" ]]; then
+    cp -- "$ROOT/audit_decision.json" "$ROOT/audit_decision_before_$STAMP.json"  # keep the record of an earlier read
+  fi
   step extract --root "$ROOT"
   step read --root "$ROOT" --readout-root "$READOUT_ROOT" --data-dir "$DATA_DIR" --metadata "$METADATA" --mapping "$MAPPING"
   cat "$ROOT/audit_decision.json"

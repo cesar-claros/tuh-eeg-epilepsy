@@ -32,6 +32,8 @@ MIN_MATCHED_PER_CLASS = 30
 HEADER_COVERAGE_MIN = 0.9
 AGE_VALIDITY_MIN = 0.9
 AGE_TOLERANCE_YEARS = 1.0
+AGE_FIT_MIN = 0.9  # section 15: the second age gate, on the read age that the match uses
+AGE_FIT_YEARS = CALIPER_YEARS
 MAX_AGE = 120.0
 MISSING_SEX = ""
 # Medication (section 8).
@@ -106,15 +108,65 @@ def age_validity(sessions: Mapping[str, Sequence[tuple[float, float]]]) -> tuple
     return (within / total if total else math.nan), total
 
 
-def header_gates(age: np.ndarray, sex: np.ndarray, validity: float) -> dict[str, Any]:
-    """The header coverage and age validity gates of section 7."""
+def patient_age_validity(sessions: Mapping[str, Sequence[tuple[float, float]]]) -> tuple[float, int]:
+    """The mean over patients of each patient's share from ``age_validity``, and how many patients have a pair.
+
+    Each patient counts once, so that a patient with many sessions cannot decide the gate (section 15). The value is
+    NaN without any pair.
+    """
+    shares = []
+    for subject, items in sessions.items():
+        share, pairs = age_validity({subject: items})
+        if pairs:
+            shares.append(share)
+    return (float(np.mean(shares)) if shares else math.nan), len(shares)
+
+
+def median_birth_year(items: Sequence[tuple[float, float]]) -> float:
+    """The median over a patient's usable sessions of year minus age; NaN if none is usable."""
+    births = [year - age for year, age in items if math.isfinite(age)]
+    return float(np.median(births)) if births else math.nan
+
+
+def repaired_ages(
+    subjects: np.ndarray, read_year: np.ndarray, sessions: Mapping[str, Sequence[tuple[float, float]]]
+) -> np.ndarray:
+    """Read year minus median birth year, the age of the repaired read (section 15)."""
+    return read_year - np.array([median_birth_year(sessions.get(s, [])) for s in subjects])
+
+
+def read_age_fit(
+    subjects: np.ndarray,
+    age: np.ndarray,
+    repaired: np.ndarray,
+    sessions: Mapping[str, Sequence[tuple[float, float]]],
+) -> tuple[float, int]:
+    """Share of checkable patients whose read age lies within the caliper of the repaired age, and their count.
+
+    A patient is checkable with at least two usable sessions. The value is NaN without such a patient.
+    """
+    checkable = np.array([sum(math.isfinite(a) for _, a in sessions.get(s, [])) >= 2 for s in subjects])
+    if not checkable.any():
+        return math.nan, 0
+    return float(np.mean(np.abs(age[checkable] - repaired[checkable]) <= AGE_FIT_YEARS)), int(checkable.sum())
+
+
+def header_gates(age: np.ndarray, sex: np.ndarray, validity: float, fit: float) -> dict[str, Any]:
+    """The header coverage gate of section 7 and the two age gates of section 15."""
     coverage = float(np.mean(np.isfinite(age) & (sex != MISSING_SEX)))
     return {
         "header_coverage": coverage,
         "header_coverage_ok": coverage >= HEADER_COVERAGE_MIN,
         "age_validity": validity,
         "age_validity_ok": bool(validity >= AGE_VALIDITY_MIN),
+        "age_read_fit": fit,
+        "age_read_fit_ok": bool(fit >= AGE_FIT_MIN),
     }
+
+
+def gates_pass(gates: Mapping[str, Any]) -> bool:
+    """Whether every gate holds."""
+    return bool(gates["header_coverage_ok"] and gates["age_validity_ok"] and gates["age_read_fit_ok"])
 
 
 # ---------------------------------------------------------------------- matched pairs
@@ -357,17 +409,21 @@ def audit_outcome(
     primary: MatchedRead | None = None,
     refit: MatchedRead | None = None,
     hydra: MatchedRead | None = None,
+    repaired: MatchedRead | None = None,
 ) -> str:
     """The outcome of section 7: ``blocked``, ``too_few``, ``holds``, ``review``, ``not_resolved`` or ``incomplete``.
 
-    Only ``primary`` can give ``holds``. ``refit`` and ``hydra`` can only prevent ``not_resolved``.
+    Only ``primary`` can give ``holds``. ``refit`` and ``hydra`` can only prevent ``not_resolved``. If ``repaired``
+    disagrees with ``primary`` on ``holds``, the outcome is ``review`` (section 15).
     """
     if not gates_ok:
         return "blocked"
     if min(patients_epilepsy, patients_non_epilepsy) < MIN_MATCHED_PER_CLASS:
         return "too_few"
-    if primary is None:
+    if primary is None or repaired is None:
         return "incomplete"
+    if (primary.low > CHANCE) != (repaired.low > CHANCE):
+        return "review"
     if primary.low > CHANCE:
         return "holds"
     if refit is None or hydra is None:

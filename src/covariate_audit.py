@@ -47,6 +47,7 @@ from src.covariate_audit_core import (  # noqa: E402
     clean_sex,
     control_reads,
     excludes_above_bound,
+    gates_pass,
     group_pairs,
     header_gates,
     inventory_sheet,
@@ -58,8 +59,11 @@ from src.covariate_audit_core import (  # noqa: E402
     medication_status,
     pair_mask,
     patient_age,
+    patient_age_validity,
     patient_sex,
     ratio_pairs,
+    read_age_fit,
+    repaired_ages,
     residualize,
     second_level_scores,
     session_of,
@@ -266,6 +270,7 @@ class Patients:
     segments: np.ndarray
     rate: np.ndarray
     files_per_session: np.ndarray
+    read_year: np.ndarray
 
     @property
     def complete(self) -> np.ndarray:
@@ -299,6 +304,7 @@ def load_patients(root: Path, readout: Path, plan: dict[str, Any]) -> Patients:
         patients["segments"].cast(pl.Float64).to_numpy(),
         patients["native_rate"].cast(pl.Float64).to_numpy(),
         covariates["files_per_read_session"].cast(pl.Float64).to_numpy(),
+        covariates["read_year"].cast(pl.Float64).to_numpy(),
     )
 
 
@@ -551,8 +557,16 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
     ages: dict[str, list[tuple[float, float]]] = {}
     for subject, year, value in zip(frame["subject"].to_list(), frame["year"].to_list(), frame["age"].to_list()):
         ages.setdefault(subject, []).append((float(year), float("nan") if value is None else float(value)))
-    validity, session_pairs = age_validity(ages)
-    gates = header_gates(age, sex, validity) | {"age_session_pairs": session_pairs}
+    by_pairs, session_pairs = age_validity(ages)
+    validity, valid_patients = patient_age_validity(ages)
+    repaired_age = repaired_ages(patients.subject, patients.read_year, ages)
+    fit, fit_patients = read_age_fit(patients.subject, age, repaired_age, ages)
+    gates = header_gates(age, sex, validity, fit) | {
+        "age_validity_patients": valid_patients,
+        "age_validity_by_pairs": by_pairs,
+        "age_session_pairs": session_pairs,
+        "age_read_fit_patients": fit_patients,
+    }
     mask = pair_mask(label, age, sex)
     counts = {"epilepsy": int(mask.any(axis=1).sum()), "non_epilepsy": int(mask.any(axis=0).sum())}
     decision: dict[str, Any] = {"rule": "protocol section 7", "gates": gates, "matched_patients": counts}
@@ -566,7 +580,7 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
         logger.info(f"Covariate audit: {outcome}")
         return decision
 
-    if not (gates["header_coverage_ok"] and gates["age_validity_ok"]):
+    if not gates_pass(gates):
         logger.error("A header gate failed: no result is read")
         return finish(audit_outcome(False, *counts.values()))
 
@@ -600,10 +614,13 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
     primary = matched_read(scores[PRIMARY], label, fold, mask, n_boot=n_boot)
     refit_read = matched_read(refit, label, fold, mask, n_boot=n_boot)
     comparison = matched_read(scores[COMPARISON], label, fold, mask, n_boot=n_boot)
+    repaired_mask = pair_mask(label, repaired_age, sex)
+    repaired_read = matched_read(scores[PRIMARY], label, fold, repaired_mask, n_boot=n_boot)
     decision |= {
         "primary": primary.as_dict(),
         "refit": refit_read.as_dict(),
         "hydra": comparison.as_dict(),
+        "repaired": repaired_read.as_dict(),
         f"excludes_above_{EXCLUSION_BOUND}": excludes_above_bound(primary),
     }
     decision["medication"] = medication_read(scores[PRIMARY], label, fold, mask, status, n_boot=n_boot)
@@ -624,6 +641,9 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
         _row("matched", name, "5 years, same sex", read)
         for name, read in ((PRIMARY, primary), (REFIT, refit_read), (COMPARISON, comparison))
     ]
+    rows.append(_row("matched", PRIMARY, "repaired age", repaired_read))
+    read = matched_read(scores[COMPARISON], label, fold, repaired_mask, n_boot=n_boot)
+    rows.append(_row("matched", COMPARISON, "repaired age", read))
     for name in DESCRIPTIVE_ARMS:
         scores[name] = aligned_scores(readout / "scores" / f"{name}.csv", patients.subject)
         rows.append(
@@ -682,7 +702,7 @@ def audit(root: Path, readout: Path, metadata: Path, mapping: dict[str, Any], n_
     for value, group in ((1, "epilepsy"), (0, "non_epilepsy")):
         rows.append(_value_row("files_per_read_session", "median", group, np.median(files[label == value])))
 
-    final = audit_outcome(True, *counts.values(), primary, refit_read, comparison)
+    final = audit_outcome(True, *counts.values(), primary, refit_read, comparison, repaired_read)
     return finish(final)
 
 
