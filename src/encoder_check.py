@@ -44,6 +44,7 @@ from src.encoder_check_core import (  # noqa: E402
     SEGMENT_SAMPLES,
     SEGMENT_SECONDS,
     SFREQ,
+    WINDOW_SAMPLES,
     age_correlation,
     alone_interval,
     common_average,
@@ -67,6 +68,7 @@ from src.encoder_check_core import (  # noqa: E402
     split_spread,
     spread_is_consistent,
     tiled_length,
+    unloaded_tensors,
     zscore_channels,
 )
 from src.frozen_readout_core import (  # noqa: E402
@@ -107,9 +109,24 @@ class ReveEncoder:
         import torch
         from braindecode.models import REVE
 
+        names = list(names)
+
+        def load(seed: int) -> Any:
+            torch.manual_seed(seed)
+            # The checkpoint's configuration leaves these open. The head that they size is never used.
+            return REVE.from_pretrained(
+                checkpoint, n_outputs=2, n_chans=len(names), n_times=WINDOW_SAMPLES, sfreq=SFREQ
+            )
+
         self.torch, self.device = torch, device
-        self.model = REVE.from_pretrained(checkpoint).to(device).eval()
-        self.positions = self.model.get_positions(list(names)).to(device)
+        first, second = load(1), load(2)
+        states = [{k: v.detach().cpu().numpy() for k, v in m.state_dict().items()} for m in (first, second)]
+        missing = unloaded_tensors(states[0], states[1])
+        if missing:
+            raise ValueError(f"the checkpoint did not fill {len(missing)} encoder tensors, such as {missing[:3]}")
+        logger.info(f"Loaded {checkpoint}: every encoder tensor comes from the file ({len(states[0])} tensors checked)")
+        self.model = first.to(device).eval()
+        self.positions = self.model.get_positions(names).to(device)
 
     def __call__(self, windows: np.ndarray) -> np.ndarray:
         """The mean over each window's tokens, in batches."""

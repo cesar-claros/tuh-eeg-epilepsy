@@ -138,6 +138,46 @@ def _write_encoder(root: Path, fix: dict, per_patient: np.ndarray) -> None:
     (root / "repeat.json").write_text(json.dumps({"max_difference": 0.0}))
 
 
+def _saved_reve(folder: Path, rename: bool = False) -> None:
+    """A small REVE saved as the Hub gives it: no ``n_outputs`` in the configuration and no head in the weights."""
+    from braindecode.models import REVE
+    from safetensors.torch import load_file, save_file
+
+    REVE(n_outputs=2, n_chans=17, n_times=2000, sfreq=200, depth=2).save_pretrained(folder)
+    config = json.loads((folder / "config.json").read_text())
+    for key in ("n_outputs", "n_chans", "n_times", "sfreq", "chs_info", "input_window_seconds"):
+        config.pop(key, None)
+    (folder / "config.json").write_text(json.dumps(config))
+    weights = load_file(folder / "model.safetensors")
+    kept = {
+        ("renamed." if rename else "") + k: v.clone() for k, v in weights.items() if not k.startswith("final_layer")
+    }
+    save_file(kept, folder / "model.safetensors")
+
+
+def test_the_encoder_loads_on_the_installed_braindecode_and_refuses_empty_weights() -> None:
+    """Uses a small model with random weights, not the gated checkpoint; it checks the call and the guard."""
+    try:
+        import braindecode.models  # noqa: F401
+        import safetensors.torch  # noqa: F401
+    except ImportError:
+        return  # a local run without braindecode
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp) / "good"
+        folder.mkdir()
+        _saved_reve(folder)
+        encode = driver.ReveEncoder("cpu", checkpoint=str(folder))
+        windows = np.random.default_rng(0).standard_normal((3, 17, 2000)).astype(np.float32)
+        out = encode(windows)
+        assert out.shape == (3, 512) and np.isfinite(out).all(), out.shape
+        assert np.array_equal(out, encode(windows)), "a repeat must give the same values"
+        assert encode(windows[:, :, :920]).shape == (3, 512), "the 5 s windows of read H must run"
+        broken = Path(tmp) / "broken"
+        broken.mkdir()
+        _saved_reve(broken, rename=True)
+        _expect_value_error(lambda: driver.ReveEncoder("cpu", checkpoint=str(broken)), "weights that fill nothing")
+
+
 def test_cohort_reads_the_files_of_both_roots() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         fix = _fixture(Path(tmp))

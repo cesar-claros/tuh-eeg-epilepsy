@@ -158,6 +158,18 @@ def extra_recordings(
     return chosen
 
 
+def unloaded_tensors(
+    first: Mapping[str, np.ndarray], second: Mapping[str, np.ndarray], head_prefix: str = "final_layer."
+) -> list[str]:
+    """Encoder tensors that differ between two loads of a checkpoint under different random seeds.
+
+    A tensor read from the file is equal in both loads. A tensor that the file did not fill keeps its random start,
+    so it differs. The loader does not raise for a missing weight, and a random encoder would read like a real one.
+    The classification head is not used, so it is not checked. The check does not depend on how weights are named.
+    """
+    return sorted(k for k in first if not k.startswith(head_prefix) and not np.array_equal(first[k], second[k]))
+
+
 def segment_starts(duration: float) -> list[float]:
     """The 2-minute grid of the campaign on one recording, after the skipped start."""
     count = max(0, int((duration - SKIP_START_SECONDS) // SEGMENT_SECONDS))

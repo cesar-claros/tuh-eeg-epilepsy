@@ -116,6 +116,14 @@ def test_extra_recordings_choose_and_refuse() -> None:
     _expect_value_error(lambda: core.extra_recordings(rows, {"lockedpt"}, set(), {"lockedpt"}), "a locked patient")
 
 
+def test_unloaded_tensors_finds_what_the_file_did_not_fill() -> None:
+    same = np.arange(4.0)
+    first = {"encoder.a": same, "encoder.b": np.zeros(3), "final_layer.2.weight": np.zeros(2)}
+    second = {"encoder.a": same.copy(), "encoder.b": np.ones(3), "final_layer.2.weight": np.ones(2)}
+    assert core.unloaded_tensors(first, second) == ["encoder.b"], "the head is not used, so it does not count"
+    assert core.unloaded_tensors(first, first) == []
+
+
 def test_segment_starts_follow_the_campaign_grid() -> None:
     assert core.segment_starts(40 + 2 * 120 + 5) == [40.0, 160.0]
     assert core.segment_starts(100.0) == []
