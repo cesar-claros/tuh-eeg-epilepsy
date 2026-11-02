@@ -267,10 +267,12 @@ def fit_sparse_head(
     held_out: np.ndarray,
     scaler_factory: Callable[[], Any],
     max_templates: int = SPARSE_TEMPLATES,
+    seed: int = 0,
 ) -> tuple[HeadResult, np.ndarray]:
     """An L1 head with at most ``max_templates`` nonzero weights: the largest ``C`` of a path that keeps to the limit.
 
-    Returns the result and the kept templates. With no usable ``C``, all scores are 0 and no template is kept.
+    ``seed`` fixes the coordinate order of the liblinear solver, without which refits differ slightly. Returns
+    the result and the kept templates. With no usable ``C``, all scores are 0 and no template is kept.
     """
     train = ~held_out
     scaler = scaler_factory()
@@ -278,7 +280,7 @@ def fit_sparse_head(
     scaled_train, scaled_test = scaler.transform(x[train]), scaler.transform(x[held_out])
     best_c, best_coef, best_scores = 0.0, np.zeros(x.shape[1]), np.zeros(int(held_out.sum()))
     for c in np.geomspace(1e-3, 1.0, 20):
-        clf = LogisticRegression(penalty="l1", solver="liblinear", C=float(c), max_iter=2000)
+        clf = LogisticRegression(l1_ratio=1.0, solver="liblinear", C=float(c), max_iter=2000, random_state=seed)
         clf.fit(scaled_train, y[train])
         n_kept = int(np.count_nonzero(clf.coef_[0]))
         if n_kept > max_templates:

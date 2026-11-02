@@ -10,6 +10,7 @@ rate guard, the bag-size link and the positive-control and training checks.
 from __future__ import annotations
 
 import inspect
+import warnings
 
 import rootutils
 
@@ -172,8 +173,12 @@ def test_scaler_mask_selects_the_rows_that_fit_the_scaler() -> None:
 def test_sparse_head_keeps_to_its_limit() -> None:
     x, labels, subjects = _rows()
     held = np.isin(subjects, np.unique(subjects)[:8])
-    result, kept = core.fit_sparse_head(x, labels, subjects, held, StandardScaler, max_templates=3)
-    assert 0 < len(kept) <= 3 and 0 in kept.tolist(), "the informative feature must be kept"
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*penalty.*")  # removed in scikit-learn 1.10
+        result, kept = core.fit_sparse_head(x, labels, subjects, held, StandardScaler, max_templates=3, seed=7)
+    again, _ = core.fit_sparse_head(x, labels, subjects, held, StandardScaler, max_templates=3, seed=7)
+    assert np.array_equal(result.coef, again.coef), "the sparse head is not reproducible"
+    assert 0 < len(kept) <= 3 and 0 in kept.tolist(), "the head is not sparse, or lost the informative feature"
     assert core.auroc(result.label, result.score) >= 0.8
 
 

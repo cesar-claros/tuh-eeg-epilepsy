@@ -773,7 +773,9 @@ def _run_sparse(root: Path, plan: dict[str, Any]) -> None:
         data = np.load(feature_file)
         subject, label, x = data["subject"].astype(str), data["label"], data["features"]
         held = np.array([plan["folds"][s] == fold for s in subject])
-        result, templates = fit_sparse_head(x, label, subject, held, SCALERS["sparse"], SPARSE_TEMPLATES)
+        result, templates = fit_sparse_head(
+            x, label, subject, held, SCALERS["sparse"], SPARSE_TEMPLATES, seed=plan["seed"] + fold
+        )
         rows += _score_rows("S4-sparse", fold, result)
         kept[str(fold)] = templates.tolist()
     pl.DataFrame(rows).write_csv(path)
