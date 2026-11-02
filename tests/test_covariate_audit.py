@@ -39,6 +39,15 @@ MAPPING = {
 }
 
 
+DRUG_MAPPING = {**MAPPING, "narrow_terms": ["keppra", "dilantin", "seizure medication"]}
+DRUG_CLASSES = {
+    "older": {"phenytoin": ["dilantin"]},
+    "newer": {"levetiracetam": ["keppra"]},
+    "unnamed": ["seizure medication"],
+    "control_terms": ["aspirin"],
+}
+
+
 def _expect_value_error(function, message: str) -> None:
     try:
         function()
@@ -133,6 +142,13 @@ def _readout(base: Path, keys: dict, labels: dict[str, int], age: np.ndarray, sp
     return root
 
 
+def _medication(label: int, i: int) -> str:
+    """Epilepsy patients: a newer drug, an older drug, both, or none; non-epilepsy patients: none."""
+    if not label:
+        return "aspirin"
+    return ("aspirin", "Keppra 500 mg", "dilantin, aspirin", "keppra, dilantin")[i % 4]
+
+
 def _spreadsheet(path: Path, labels: dict[str, int]) -> None:
     """One row per session, plus one locked patient."""
     rows = []
@@ -144,7 +160,7 @@ def _spreadsheet(path: Path, labels: dict[str, int]) -> None:
                     "Session": session,
                     "Age": 40 + i % 30,
                     "Epilepsy": labels[subject],
-                    "Medications": "Keppra 500 mg" if labels[subject] and i % 3 else "aspirin",
+                    "Medications": _medication(labels[subject], i),
                     "Stroke": "Y" if i % 10 == 0 else "N",
                     "Flagged": "Y" if labels[subject] else "N",
                 }
@@ -284,6 +300,67 @@ def test_a_failed_gate_blocks_before_any_eeg_score_is_opened() -> None:
         assert decision["outcome"] == "blocked", decision
         assert not decision["gates"]["age_validity_ok"], "an error in every patient must still fail the gate"
         assert "demographics" not in decision and "primary" not in decision
+
+
+def _rewrite_score(readout: Path, name: str, score: np.ndarray) -> None:
+    frame = pl.read_csv(readout / "scores" / f"{name}.csv", schema_overrides={"subject": pl.Utf8}).sort("subject")
+    frame.with_columns(pl.Series("score", score)).write_csv(readout / "scores" / f"{name}.csv")
+
+
+def test_the_drug_classes_must_cover_the_narrow_list() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "classes.json"
+        path.write_text(json.dumps(DRUG_CLASSES))
+        assert driver.load_drug_classes(path, DRUG_MAPPING)["unnamed"] == ["seizure medication"]
+        short = {**DRUG_MAPPING, "narrow_terms": ["keppra"]}
+        _expect_value_error(lambda: driver.load_drug_classes(path, short), "a list that differs")
+        path.write_text(json.dumps({**DRUG_CLASSES, "control_terms": []}))
+        _expect_value_error(lambda: driver.load_drug_classes(path, DRUG_MAPPING), "an empty key")
+        shared = {**DRUG_CLASSES, "newer": {"phenytoin": ["dilantin"], "levetiracetam": ["keppra"]}}
+        path.write_text(json.dumps(shared))
+        _expect_value_error(lambda: driver.load_drug_classes(path, DRUG_MAPPING), "one spelling in two classes")
+
+
+def test_the_real_drug_classes_cover_the_real_narrow_list() -> None:
+    base = Path(__file__).resolve().parents[1] / "configs" / "covariate_audit"
+    mapping = json.loads((base / "medication_mapping.json").read_text())
+    classes = driver.load_drug_classes(base / "drug_classes.json", mapping)
+    assert not set(classes["older"]) & set(classes["newer"]), "a drug in two classes"
+
+
+def test_the_drug_read_follows_a_planted_drug_effect_and_ignores_noise() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, readout, metadata, y = _prepared(Path(tmp))
+        first = driver.audit(root, readout, metadata, DRUG_MAPPING, n_boot=N_BOOT)
+        assert first["medication_table_narrow"]["epilepsy"]["off"] > 10, first["medication_table_narrow"]
+        rng = np.random.default_rng(SEED + 3)
+        subjects = sorted(pl.read_csv(readout / "patients.csv", schema_overrides={"subject": pl.Utf8})["subject"])
+        on = np.array([y[i] == 1 and i % 4 != 0 for i in range(len(subjects))])
+        _rewrite_score(readout, "Spectral", 3.0 * on + rng.standard_normal(len(subjects)))
+        decision = driver.drug_read(root, readout, metadata, DRUG_MAPPING, DRUG_CLASSES, n_boot=N_BOOT)
+        assert decision["outcome"] == "tracks", decision
+        assert decision["on_off"]["low"] > 0.5 and decision["patients_per_drug"]["levetiracetam"] > 10
+        summary = pl.read_csv(root / "drug_read_summary.csv", infer_schema_length=None)
+        reads = set(summary["read"].to_list())
+        assert {"deciding", "plain", "matched age and sex", "band", "one drug against the others"} <= reads, reads
+        _rewrite_score(readout, "Spectral", rng.standard_normal(len(subjects)))
+        flat = driver.drug_read(root, readout, metadata, DRUG_MAPPING, DRUG_CLASSES, n_boot=N_BOOT)
+        assert flat["outcome"] == "no_measured_tracking", flat
+        exposure = pl.read_csv(root / "drug_exposure.csv", schema_overrides={"subject": pl.Utf8})
+        assert exposure.height == N_PATIENTS and exposure.filter(pl.col("status") == "on").height > 0
+
+
+def test_the_drug_read_must_reproduce_the_audit_table() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, readout, metadata, _ = _prepared(Path(tmp))
+        driver.audit(root, readout, metadata, DRUG_MAPPING, n_boot=N_BOOT)
+        recorded = json.loads((root / "audit_decision.json").read_text())
+        recorded["medication_table_narrow"]["epilepsy"]["on"] += 1
+        (root / "audit_decision.json").write_text(json.dumps(recorded))
+        _expect_value_error(
+            lambda: driver.drug_read(root, readout, metadata, DRUG_MAPPING, DRUG_CLASSES, n_boot=N_BOOT),
+            "a table that differs",
+        )
 
 
 def test_a_few_patients_with_wrong_sessions_do_not_block_the_read() -> None:

@@ -1,0 +1,29 @@
+{
+  "older": {
+    "phenytoin": ["dilantin", "dilatin", "phenytoin"],
+    "phenobarbital": ["phenobarbital"],
+    "primidone": ["primidone", "mysoline"],
+    "carbamazepine": ["tegretol", "carbamazepine"],
+    "valproate": ["depakote", "valproic"]
+  },
+  "newer": {
+    "levetiracetam": ["keppra", "keppr", "levetiracetam"],
+    "topiramate": ["topamax", "topiramate", "tpm"],
+    "lacosamide": ["vimpat"],
+    "lamotrigine": ["lamictal", "lamotrigine"],
+    "felbamate": ["felbamate", "felbatol"],
+    "oxcarbazepine": ["trileptal", "oxcarbazepine"],
+    "zonisamide": ["zonisamide", "zonegran"],
+    "clobazam": ["onfi"]
+  },
+  "unnamed": ["seizure medication"],
+  "control_terms": [
+    "asa", "aspirin", "plavix",
+    "metoprolol", "lopressor", "toprol",
+    "lisinopril", "prinivil", "zestril",
+    "norvasc", "amlodipine", "amiodipine",
+    "zocor", "simvastatin", "lipitor", "atorvastatin", "pravastatin",
+    "hctz", "hydrochlorothiazide", "diovan", "coreg", "carvedilol",
+    "metformin", "insulin", "glipizide"
+  ]
+}

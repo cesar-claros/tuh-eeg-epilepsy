@@ -9,6 +9,8 @@ Subcommands, in order:
 - ``extract`` reads age and sex from the EDF headers and writes ``covariates.csv``. It reports only counts.
 - ``read`` (steps 1 and 2) applies the gates and the controls, then the rule, the medication read and the descriptive
   reads. It needs the mapping of the addendum, and it opens no EEG score before the gates and the controls pass.
+- ``drug-read`` (section 16) asks whether the saved score follows the maintenance drug inside the epilepsy class. It
+  runs after ``read``, on its files, and it must reproduce the medication table of that read.
 
 The 39 test patients stay locked: every patient outside the readout's folds is dropped before any statistic.
 """
@@ -36,9 +38,12 @@ ROOT = rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pyth
 from src.covariate_audit_core import (  # noqa: E402
     AGE_BANDS,
     CHANCE,
+    DRUG_FAMILY_CONFIDENCE,
     EXCLUSION_BOUND,
+    MIN_DRUG_GROUP,
     MISSING_SEX,
     SENSITIVITY_CALIPERS,
+    GroupRead,
     MatchedRead,
     age_validity,
     all_pairs,
@@ -46,9 +51,12 @@ from src.covariate_audit_core import (  # noqa: E402
     clean_age,
     clean_sex,
     control_reads,
+    drug_exposure,
+    drug_outcome,
     excludes_above_bound,
     gates_pass,
     group_pairs,
+    group_read,
     header_gates,
     inventory_sheet,
     is_flagged,
@@ -57,10 +65,13 @@ from src.covariate_audit_core import (  # noqa: E402
     matched_read,
     medication_read,
     medication_status,
+    names_any,
     pair_mask,
+    partial_rank,
     patient_age,
     patient_age_validity,
     patient_sex,
+    rank_read,
     ratio_pairs,
     read_age_fit,
     repaired_ages,
@@ -353,6 +364,20 @@ def _metadata_rows(
     return columns, rows
 
 
+def listed_text(
+    metadata: Path, mapping: dict[str, Any], sessions: dict[str, list[str]]
+) -> dict[tuple[str, str | None], str]:
+    """The medication text of each session of these patients; ``empty_terms`` of the mapping count as empty."""
+    columns, rows = _metadata_rows(metadata, mapping, set(sessions), mapping["medication_columns"])
+    empty_terms = {str(t).strip().lower() for t in mapping.get("empty_terms", [])}
+    texts: dict[tuple[str, str | None], list[str]] = {}
+    for owner, session, row in rows:
+        cells = [columns[name][row] for name in mapping["medication_columns"]]
+        listed = [str(c) for c in cells if not is_missing(c) and str(c).strip().lower() not in empty_terms]
+        texts.setdefault((owner, session), []).extend(listed)
+    return {key: " ; ".join(values) for key, values in texts.items()}
+
+
 def medication_by_patient(
     metadata: Path, mapping: dict[str, Any], sessions: dict[str, list[str]], terms: list[str] | None = None
 ) -> dict[str, str]:
@@ -361,16 +386,10 @@ def medication_by_patient(
     ``terms`` replaces the deciding list of the mapping, for the narrow read. ``empty_terms`` of the mapping are cells
     that count as empty.
     """
-    columns, rows = _metadata_rows(metadata, mapping, set(sessions), mapping["medication_columns"])
-    empty_terms = {str(t).strip().lower() for t in mapping.get("empty_terms", [])}
-    texts: dict[tuple[str, str | None], list[str]] = {}
-    for owner, session, row in rows:
-        cells = [columns[name][row] for name in mapping["medication_columns"]]
-        listed = [str(c) for c in cells if not is_missing(c) and str(c).strip().lower() not in empty_terms]
-        texts.setdefault((owner, session), []).extend(listed)
+    texts = listed_text(metadata, mapping, sessions)
     return {
         subject: medication_status(
-            [" ; ".join(texts.get((subject, session), [])) for session in values],
+            [texts.get((subject, session), "") for session in values],
             mapping["antiseizure_terms"] if terms is None else terms,
             mapping["empty_means"],
         )
@@ -511,24 +530,30 @@ def _m0_read(patients: Patients, n_boot: int) -> tuple[float, float, float]:
     return mean_fold_auroc(m0), low + CHANCE, high + CHANCE
 
 
-def _band_rows(readout: Path, patients: Patients, mask: np.ndarray, n_boot: int) -> list[dict[str, Any]]:
-    """The band-power table on matched pairs, and each band's rank correlation with age inside each class."""
+def band_values(readout: Path, patients: Patients) -> dict[str, np.ndarray]:
+    """Each patient's mean over segments and channels of each band feature of ``Spectral``."""
     data = np.load(readout / "features" / f"{PRIMARY}.npz")
     subject, x = data["subject"].astype(str), data["features"]
     per_channel = 2 * len(SPECTRAL_BANDS)
     means = np.stack([x[subject == s].mean(axis=0) for s in patients.subject])
     means = means.reshape(len(patients.subject), SPECTRAL_CHANNELS, per_channel).mean(axis=1)
+    return {
+        f"{kind} {band} Hz": means[:, k * len(SPECTRAL_BANDS) + b]
+        for k, kind in enumerate(SPECTRAL_KINDS)
+        for b, band in enumerate(SPECTRAL_BANDS)
+    }
+
+
+def _band_rows(readout: Path, patients: Patients, mask: np.ndarray, n_boot: int) -> list[dict[str, Any]]:
+    """The band-power table on matched pairs, and each band's rank correlation with age inside each class."""
     rows = []
-    for k, kind in enumerate(SPECTRAL_KINDS):
-        for b, band in enumerate(SPECTRAL_BANDS):
-            value = means[:, k * len(SPECTRAL_BANDS) + b]
-            name = f"{kind} {band} Hz"
-            read = matched_read(value, patients.label, patients.fold, mask, standardize=False, n_boot=n_boot)
-            rows.append(_row("band_power", name, "matched", read))
-            for label, group in ((1, "epilepsy"), (0, "non_epilepsy")):
-                where = (patients.label == label) & np.isfinite(patients.age)
-                rho = spearmanr(value[where], patients.age[where]).statistic
-                rows.append(_value_row("band_age_rank", name, group, rho))
+    for name, value in band_values(readout, patients).items():
+        read = matched_read(value, patients.label, patients.fold, mask, standardize=False, n_boot=n_boot)
+        rows.append(_row("band_power", name, "matched", read))
+        for label, group in ((1, "epilepsy"), (0, "non_epilepsy")):
+            where = (patients.label == label) & np.isfinite(patients.age)
+            rho = spearmanr(value[where], patients.age[where]).statistic
+            rows.append(_value_row("band_age_rank", name, group, rho))
     return rows
 
 
@@ -714,6 +739,205 @@ def run_read(args: argparse.Namespace) -> None:
     audit(root, args.readout_root.resolve(), metadata_path(args), mapping)
 
 
+# ---------------------------------------------------------------------- drug read
+
+
+def load_drug_classes(path: Path, mapping: dict[str, Any]) -> dict[str, Any]:
+    """The drug classes of section 16, which must cover the narrow list of the mapping exactly.
+
+    Raises
+    ------
+    ValueError
+        If a key is missing, or the classes and the narrow list differ.
+    """
+    classes = json.loads(path.read_text())
+    missing = [key for key in ("older", "newer", "unnamed", "control_terms") if not classes.get(key)]
+    if missing:
+        raise ValueError(f"the drug classes lack {missing}")
+    spellings = [t for group in ("older", "newer") for terms in classes[group].values() for t in terms]
+    spellings += classes["unnamed"]
+    if len(spellings) != len(set(spellings)) or set(spellings) != set(mapping.get("narrow_terms", [])):
+        raise ValueError("the drug classes do not cover the narrow list of the mapping exactly")
+    return classes
+
+
+def _group_row(read: str, arm: str, group: str, result: GroupRead, confidence: float) -> dict[str, Any]:
+    return {"read": read, "arm": arm, "group": group, **result.as_dict(), "confidence": confidence}
+
+
+def _rank_row(
+    read: str, arm: str, group: str, result: tuple[float, float | None, float | None], n: int, confidence: float
+) -> dict[str, Any]:
+    value, low, high = result
+    return {
+        "read": read,
+        "arm": arm,
+        "group": group,
+        "value": value,
+        "low": low,
+        "high": high,
+        "first": n,
+        "second": None,
+        "confidence": confidence,
+    }
+
+
+def _eligible(first: np.ndarray, second: np.ndarray) -> bool:
+    return min(int(first.sum()), int(second.sum())) >= MIN_DRUG_GROUP
+
+
+def drug_read(
+    root: Path,
+    readout: Path,
+    metadata: Path,
+    mapping: dict[str, Any],
+    classes: dict[str, Any],
+    n_boot: int = N_BOOTSTRAP,
+) -> dict[str, Any]:
+    """The read of section 16. Writes ``drug_exposure.csv``, ``drug_read_summary.csv`` and ``drug_read_decision.json``.
+
+    Raises
+    ------
+    ValueError
+        If the medication table of the audit's read is not reproduced.
+    """
+    plan = load_plan(readout)
+    patients = load_patients(root, readout, plan)
+    label, fold, subject = patients.label, patients.fold, patients.subject
+    sessions = read_sessions(root)
+    by_narrow = medication_by_patient(metadata, mapping, sessions, mapping["narrow_terms"])
+    status = np.array([by_narrow[s] for s in subject])
+    table = medication_table(patients, status)
+    recorded = json.loads((root / "audit_decision.json").read_text()).get("medication_table_narrow")
+    if table != recorded:
+        raise ValueError(f"the medication table {table} differs from the audit's read {recorded}")
+    texts = listed_text(metadata, mapping, sessions)
+    entries = {s: [texts.get((s, session), "") for session in sessions[s]] for s in subject}
+    exposure = {s: drug_exposure(entries[s], classes["older"], classes["newer"], classes["unnamed"]) for s in subject}
+    listed_control = np.array([any(names_any(e, classes["control_terms"]) for e in entries[s]) for s in subject])
+    count = np.array([exposure[s].drugs_per_session for s in subject])
+    older = np.array([exposure[s].older for s in subject])
+    newer_only = np.array([exposure[s].newer_only for s in subject])
+    pl.DataFrame(
+        {
+            "subject": subject.tolist(),
+            "status": status.tolist(),
+            "drugs_per_session": count.tolist(),
+            "older": older.tolist(),
+            "newer_only": newer_only.tolist(),
+            "listed_control": listed_control.tolist(),
+        }
+    ).write_csv(root / "drug_exposure.csv")
+
+    epilepsy = label == 1
+    on, off = epilepsy & (status == "on"), epilepsy & (status == "off")
+    known = on | off
+    older_group, newer_group = epilepsy & older, epilepsy & newer_only
+    with_control, without_control = known & listed_control, known & ~listed_control
+    scores = {
+        name: standardize_within_fold(aligned_scores(readout / "scores" / f"{name}.csv", subject), fold)
+        for name in (PRIMARY, COMPARISON)
+    }
+
+    family = DRUG_FAMILY_CONFIDENCE
+    z = scores[PRIMARY]
+    on_off = group_read(z, on, off, fold, n_boot, confidence=family) if _eligible(on, off) else None
+    count_read = rank_read(count[known], z[known], fold[known], n_boot, confidence=family)
+    eligible_class = _eligible(older_group, newer_group)
+    drug_class = group_read(z, older_group, newer_group, fold, n_boot, confidence=family) if eligible_class else None
+    eligible_control = _eligible(with_control, without_control)
+    control = group_read(z, with_control, without_control, fold, n_boot) if eligible_control else None
+    outcome = drug_outcome(on_off, count_read, drug_class, control)
+
+    per_drug = Counter(drug for s in subject[epilepsy] for drug in exposure[s].named)
+    rows: list[dict[str, Any]] = []
+    if on_off is not None:
+        rows.append(_group_row("deciding", PRIMARY, "on above off", on_off, family))
+    rows.append(_rank_row("deciding", PRIMARY, "drugs per session", count_read, int(known.sum()), family))
+    if drug_class is not None:
+        rows.append(_group_row("deciding", PRIMARY, "older above newer only", drug_class, family))
+    if control is not None:
+        rows.append(_group_row("control", PRIMARY, "cardio-metabolic drug listed", control, 0.95))
+
+    for name, score in scores.items():
+        rows.append(_group_row("plain", name, "on above off", group_read(score, on, off, fold, n_boot), 0.95))
+        read = rank_read(count[known], score[known], fold[known], n_boot)
+        rows.append(_rank_row("plain", name, "drugs per session", read, int(known.sum()), 0.95))
+        read = group_read(score, older_group, newer_group, fold, n_boot)
+        rows.append(_group_row("plain", name, "older above newer only", read, 0.95))
+        read = group_read(score, with_control, without_control, fold, n_boot)
+        rows.append(_group_row("plain", name, "cardio-metabolic drug listed", read, 0.95))
+        for group, first, second in (
+            ("on above off", on, off),
+            ("older above newer only", older_group, newer_group),
+        ):
+            tags = np.full(len(subject), -1)
+            tags[first], tags[second] = 1, 0
+            mask = pair_mask(tags, patients.age, patients.sex)
+            read = matched_read(score, tags, fold, mask, standardize=False, n_boot=n_boot)
+            matched = GroupRead(read.value, read.low, read.high, read.patients_epilepsy, read.patients_non_epilepsy)
+            rows.append(_group_row("matched age and sex", name, group, matched, 0.95))
+        log_segments = np.log(patients.segments[known])
+        partial = partial_rank(count[known], score[known], log_segments)
+        rows.append(
+            _rank_row("partial, log segments", name, "drugs per session", (partial, None, None), int(known.sum()), 0.95)
+        )
+        link = spearmanr(score[known], log_segments).statistic
+        rows.append(
+            _rank_row("rank with log segments", name, "score", (float(link), None, None), int(known.sum()), 0.95)
+        )
+        for drug, _ in per_drug.most_common():
+            taking = known & np.array([drug in exposure[s].named for s in subject])
+            if _eligible(taking, known & ~taking):
+                read = group_read(score, taking, known & ~taking, fold, n_boot)
+                rows.append(_group_row("one drug against the others", name, drug, read, 0.95))
+    log_segments = np.log(patients.segments[known])
+    link = spearmanr(count[known], log_segments).statistic
+    rows.append(
+        _rank_row(
+            "rank with log segments", "drugs per session", "count", (float(link), None, None), int(known.sum()), 0.95
+        )
+    )
+    for band, value in band_values(readout, patients).items():
+        rows.append(_group_row("band", band, "on above off", group_read(value, on, off, fold, n_boot), 0.95))
+        read = group_read(value, older_group, newer_group, fold, n_boot)
+        rows.append(_group_row("band", band, "older above newer only", read, 0.95))
+    pl.DataFrame(rows, infer_schema_length=None).write_csv(root / "drug_read_summary.csv")
+
+    groups = {"on": on, "off": off, "older": older_group, "newer_only": newer_group, "cardio_metabolic": with_control}
+    decision = {
+        "rule": "protocol section 16",
+        "outcome": outcome,
+        "family_confidence": family,
+        "on_off": None if on_off is None else on_off.as_dict(),
+        "count": {"value": count_read[0], "low": count_read[1], "high": count_read[2], "patients": int(known.sum())},
+        "drug_class": None if drug_class is None else drug_class.as_dict(),
+        "control": None if control is None else control.as_dict(),
+        "groups": {
+            name: {
+                "patients": int(where.sum()),
+                "median_age": float(np.median(patients.age[where])) if where.any() else None,
+                "median_segments": float(np.median(patients.segments[where])) if where.any() else None,
+            }
+            for name, where in groups.items()
+        },
+        "patients_per_drug": dict(per_drug.most_common()),
+        "medication_table_narrow": table,
+    }
+    _save_json(root / "drug_read_decision.json", decision)
+    logger.info(f"Drug read: {outcome}")
+    return decision
+
+
+def run_drug_read(args: argparse.Namespace) -> None:
+    """Section 16, on the files of the audit's read."""
+    mapping = load_mapping(args.mapping)
+    classes = load_drug_classes(args.drug_classes, mapping)
+    root = args.root.resolve()
+    (root / "drug_classes.json").write_text(json.dumps(classes, indent=2) + "\n")
+    drug_read(root, args.readout_root.resolve(), metadata_path(args), mapping, classes)
+
+
 # ---------------------------------------------------------------------- command line
 
 
@@ -744,11 +968,17 @@ def main() -> None:
     read = command("read", "apply the gates, the controls, the rule and the descriptive reads")
     corpus(read)
     read.add_argument("--mapping", type=Path, default=None, help="the medication mapping of the addendum")
+    drug = command("drug-read", "does the saved score follow the maintenance drug inside the epilepsy class?")
+    corpus(drug)
+    drug.add_argument("--mapping", type=Path, default=None, help="the medication mapping of the addendum")
+    drug.add_argument("--drug-classes", type=Path, required=True, help="the drug classes of section 16")
     args = parser.parse_args()
     if args.command == "inventory":
         run_inventory(args)
     elif args.command == "extract":
         run_extract(args)
+    elif args.command == "drug-read":
+        run_drug_read(args)
     else:
         run_read(args)
 

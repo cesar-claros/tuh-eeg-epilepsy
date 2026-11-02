@@ -17,6 +17,7 @@ from statistics import NormalDist
 from typing import Any
 
 import numpy as np
+from scipy.stats import rankdata, spearmanr
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -44,6 +45,9 @@ N_CONTROL_DRAWS = 20
 CONTROL_MARGIN = 0.03
 CONTROL_AUROC = 0.70
 CONTROL_RECOVERY = 0.05
+# Drug read (section 16): three deciding reads share the error rate, and the control keeps the plain interval.
+DRUG_FAMILY_CONFIDENCE = 1 - (1 - CONFIDENCE) / 3
+MIN_DRUG_GROUP = MIN_STRATUM_PER_CLASS
 # Descriptive reads (section 10).
 SENSITIVITY_CALIPERS = (2.5, 10.0)
 BAG_RATIO = 1.5
@@ -452,8 +456,7 @@ def medication_status(entries: Sequence[str], terms: Sequence[str], empty_means:
     """
     if not terms or empty_means not in ("off", "unknown"):
         raise ValueError("the mapping needs terms, and empty_means of off or unknown")
-    pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b", re.IGNORECASE)
-    if any(pattern.search(entry) for entry in entries):
+    if any(names_any(entry, terms) for entry in entries):
         return "on"
     if not entries or (empty_means == "unknown" and any(not entry.strip() for entry in entries)):
         return "unknown"
@@ -483,6 +486,148 @@ def medication_read(
             result = "survives" if read.low > CHANCE else "unresolved"
             return {"result": result, "group": group, "read": read.as_dict()}
     return {"result": "inseparable", "group": None, "read": None}
+
+
+# ---------------------------------------------------------------------- drug read
+
+
+def _pattern(terms: Sequence[str]) -> re.Pattern[str]:
+    return re.compile(r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b", re.IGNORECASE)
+
+
+def names_any(text: str, terms: Sequence[str]) -> bool:
+    """Whether the text names any of the terms, as whole words."""
+    return bool(terms) and _pattern(terms).search(text) is not None
+
+
+def drugs_named(text: str, drugs: Mapping[str, Sequence[str]]) -> set[str]:
+    """The drugs whose spellings the text names; two spellings of one drug count once."""
+    return {drug for drug, spellings in drugs.items() if names_any(text, spellings)}
+
+
+@dataclass
+class DrugExposure:
+    """A patient's maintenance drugs at the read sessions (section 16)."""
+
+    drugs_per_session: float
+    older: bool
+    newer_only: bool
+    named: set[str]
+
+
+def drug_exposure(
+    entries: Sequence[str],
+    older: Mapping[str, Sequence[str]],
+    newer: Mapping[str, Sequence[str]],
+    unnamed: Sequence[str],
+) -> DrugExposure:
+    """The exposure from one text per read session; a session that lists nothing does not count.
+
+    The count is a mean per listing session, so that more sessions do not raise it. Bag size predicts the label, and
+    a count of distinct drugs over all sessions would carry it. A drug named only as ``seizure medication`` counts as
+    one drug and enters neither class.
+    """
+    counts, named_older, named_newer = [], set(), set()
+    for entry in (e for e in entries if e.strip()):
+        found_older, found_newer = drugs_named(entry, older), drugs_named(entry, newer)
+        counts.append(len(found_older) + len(found_newer) + int(names_any(entry, unnamed)))
+        named_older |= found_older
+        named_newer |= found_newer
+    return DrugExposure(
+        float(np.mean(counts)) if counts else math.nan,
+        bool(named_older),
+        bool(named_newer) and not named_older,
+        named_older | named_newer,
+    )
+
+
+@dataclass
+class GroupRead:
+    """The AUROC of a first group of patients above a second, with its interval and the group sizes."""
+
+    value: float
+    low: float
+    high: float
+    first: int
+    second: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """The read as plain values."""
+        return asdict(self)
+
+
+def group_read(
+    score: np.ndarray,
+    first: np.ndarray,
+    second: np.ndarray,
+    fold: np.ndarray,
+    n_boot: int = N_BOOTSTRAP,
+    seed: int = 0,
+    confidence: float = CONFIDENCE,
+) -> GroupRead:
+    """AUROC of ``first`` above ``second``, ties at one half; patients are resampled within fold and group."""
+    n_first, n_second = int(first.sum()), int(second.sum())
+    if n_first == 0 or n_second == 0:
+        return GroupRead(math.nan, math.nan, math.nan, n_first, n_second)
+    wins = _wins(score[first], score[second])
+    low, high = pair_bootstrap(wins, np.ones_like(wins, bool), fold[first], fold[second], n_boot, seed, confidence)
+    return GroupRead(float(wins.mean()), low, high, n_first, n_second)
+
+
+def rank_read(
+    x: np.ndarray,
+    y: np.ndarray,
+    fold: np.ndarray,
+    n_boot: int = N_BOOTSTRAP,
+    seed: int = 0,
+    confidence: float = CONFIDENCE,
+) -> tuple[float, float, float]:
+    """Spearman correlation with a percentile interval, from a patient bootstrap within fold."""
+    rng = np.random.default_rng(seed)
+    index = np.empty((n_boot, len(x)), dtype=int)
+    for f in np.unique(fold):
+        where = np.flatnonzero(fold == f)
+        index[:, where] = rng.choice(where, size=(n_boot, len(where)))
+    a, b = rankdata(x[index], axis=1), rankdata(y[index], axis=1)
+    a, b = a - a.mean(axis=1, keepdims=True), b - b.mean(axis=1, keepdims=True)
+    scale = np.sqrt((a**2).sum(axis=1) * (b**2).sum(axis=1))
+    draws = (a * b).sum(axis=1)[scale > 0] / scale[scale > 0]
+    tail = 100 * (1 - confidence) / 2
+    return float(spearmanr(x, y).statistic), float(np.percentile(draws, tail)), float(np.percentile(draws, 100 - tail))
+
+
+def partial_rank(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> float:
+    """The correlation of the ranks of ``x`` and ``y`` after a line on the ranks of ``z`` is taken out of each."""
+    design = np.column_stack([np.ones(len(z)), rankdata(z)])
+
+    def residual(values: np.ndarray) -> np.ndarray:
+        ranks = rankdata(values)
+        return ranks - design @ np.linalg.lstsq(design, ranks, rcond=None)[0]
+
+    return float(np.corrcoef(residual(x), residual(y))[0, 1])
+
+
+def drug_outcome(
+    on_off: GroupRead | None,
+    count: tuple[float, float, float] | None,
+    drug_class: GroupRead | None,
+    control: GroupRead | None,
+) -> str:
+    """The outcome of section 16: ``tracks``, ``nonspecific``, ``no_measured_tracking`` or ``incomplete``.
+
+    On against off must lie above 0.5 and the count correlation above 0, because more drug can only raise the score
+    if the score reads the drug. The two classes can differ in either direction. A read that is ``None`` had a group
+    too small to read. If a drug class passes and listing a cardio-metabolic drug also raises the score, the read is
+    ``nonspecific``: it follows drug listing or illness, not antiseizure treatment.
+    """
+    if count is None:
+        return "incomplete"
+    passed = count[1] > 0
+    passed = passed or (on_off is not None and on_off.low > CHANCE)
+    passed = passed or (drug_class is not None and (drug_class.low > CHANCE or drug_class.high < CHANCE))
+    if not passed:
+        return "no_measured_tracking"
+    return "nonspecific" if control is not None and control.low > CHANCE else "tracks"
 
 
 # ---------------------------------------------------------------------- spreadsheet inventory

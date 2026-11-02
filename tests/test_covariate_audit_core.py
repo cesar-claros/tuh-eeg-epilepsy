@@ -285,6 +285,87 @@ def test_medication_read_takes_the_first_eligible_group() -> None:
     assert flat["result"] == "unresolved", flat
 
 
+OLDER = {"phenytoin": ["dilantin", "phenytoin"], "valproate": ["depakote"]}
+NEWER = {"levetiracetam": ["keppra", "keppr"], "topiramate": ["topamax", "tpm"]}
+UNNAMED = ["seizure medication"]
+
+
+def test_drugs_named_counts_a_drug_once_and_whole_words_only() -> None:
+    assert core.drugs_named("Dilantin, phenytoin and depakote", OLDER) == {"phenytoin", "valproate"}
+    assert core.drugs_named("dilantine", OLDER) == set(), "a term must match a whole word"
+    assert core.names_any("aspirin 81", ["asa", "aspirin"]) and not core.names_any("casa", ["asa"])
+    assert not core.names_any("anything", []), "no terms name nothing"
+
+
+def test_drug_exposure_is_a_mean_per_listing_session() -> None:
+    both = core.drug_exposure(["keppra, dilantin", "keppra", ""], OLDER, NEWER, UNNAMED)
+    assert both.drugs_per_session == 1.5, "an empty session must not count"
+    assert both.older and not both.newer_only and both.named == {"levetiracetam", "phenytoin"}
+    many = core.drug_exposure(["keppra"] * 6, OLDER, NEWER, UNNAMED)
+    assert many.drugs_per_session == 1.0, "more sessions must not raise the count"
+    assert many.newer_only and not many.older
+    off = core.drug_exposure(["aspirin"], OLDER, NEWER, UNNAMED)
+    assert off.drugs_per_session == 0.0 and not off.older and not off.newer_only
+    unnamed = core.drug_exposure(["seizure medication"], OLDER, NEWER, UNNAMED)
+    assert unnamed.drugs_per_session == 1.0 and not unnamed.older and not unnamed.newer_only, "it enters neither class"
+    assert math.isnan(core.drug_exposure(["", ""], OLDER, NEWER, UNNAMED).drugs_per_session)
+
+
+def test_group_read_reads_two_groups_and_handles_an_empty_one() -> None:
+    fold = np.array([0, 0, 1, 1, 0, 1])
+    score = np.array([3.0, 2.0, 2.0, 5.0, 2.0, 1.0])
+    first, second = np.array([1, 1, 1, 1, 0, 0], bool), np.array([0, 0, 0, 0, 1, 1], bool)
+    read = core.group_read(score, first, second, fold, n_boot=50)
+    assert abs(read.value - (2 + 1.5 + 1.5 + 2) / 8) < 1e-12 and (read.first, read.second) == (4, 2), read
+    wider = core.group_read(score, first, second, fold, n_boot=400, confidence=0.99)
+    narrower = core.group_read(score, first, second, fold, n_boot=400, confidence=0.5)
+    assert wider.high - wider.low > narrower.high - narrower.low, "a higher confidence must be wider"
+    empty = core.group_read(score, first, np.zeros(6, bool), fold, n_boot=50)
+    assert math.isnan(empty.value) and empty.second == 0
+
+
+def test_rank_read_recovers_a_correlation_and_its_absence() -> None:
+    rng = np.random.default_rng(6)
+    fold = np.arange(76) % 5
+    x = rng.standard_normal(76)
+    strong = core.rank_read(x, x + 0.2 * rng.standard_normal(76), fold, n_boot=500)
+    assert strong[0] > 0.9 and strong[1] > 0.8, strong
+    noise = core.rank_read(x, rng.standard_normal(76), fold, n_boot=500)
+    assert noise[1] < noise[0] < noise[2] and noise[1] < 0 < noise[2], noise
+    ties = core.rank_read(
+        np.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0] * 10), rng.standard_normal(60), np.arange(60) % 5, 200
+    )
+    assert np.isfinite(ties[1]) and np.isfinite(ties[2]), "ties must not break the interval"
+
+
+def test_partial_rank_removes_a_shared_cause() -> None:
+    rng = np.random.default_rng(8)
+    cause = rng.standard_normal(400)
+    x, y = cause + 0.3 * rng.standard_normal(400), cause + 0.3 * rng.standard_normal(400)
+    assert np.corrcoef(x, y)[0, 1] > 0.8
+    assert abs(core.partial_rank(x, y, cause)) < 0.15, "the shared cause must be gone"
+
+
+def test_drug_rule_gives_each_outcome() -> None:
+    up = core.GroupRead(0.8, 0.6, 0.9, 66, 10)
+    flat = core.GroupRead(0.55, 0.4, 0.7, 66, 10)
+    down = core.GroupRead(0.3, 0.1, 0.45, 35, 30)
+    no_count, up_count = (0.1, -0.1, 0.3), (0.4, 0.1, 0.6)
+    assert core.drug_outcome(flat, no_count, flat, flat) == "no_measured_tracking"
+    assert core.drug_outcome(None, no_count, None, None) == "no_measured_tracking", "small groups cannot pass"
+    assert core.drug_outcome(up, no_count, flat, flat) == "tracks"
+    assert core.drug_outcome(flat, up_count, flat, flat) == "tracks"
+    assert core.drug_outcome(flat, no_count, up, flat) == "tracks"
+    assert core.drug_outcome(flat, no_count, down, flat) == "tracks", "two classes can differ in either direction"
+    assert core.drug_outcome(down, no_count, flat, flat) == "no_measured_tracking", "less score on drug is not tracking"
+    assert core.drug_outcome(flat, (-0.4, -0.6, -0.1), flat, flat) == "no_measured_tracking", "the same for the count"
+    assert core.drug_outcome(up, no_count, flat, up) == "nonspecific", "a control that also rises"
+    assert core.drug_outcome(up, no_count, flat, None) == "tracks", "a control too small to read"
+    assert core.drug_outcome(flat, no_count, flat, up) == "no_measured_tracking", "a control alone decides nothing"
+    assert core.drug_outcome(up, None, up, up) == "incomplete"
+    assert abs(core.DRUG_FAMILY_CONFIDENCE - (1 - 0.05 / 3)) < 1e-12
+
+
 def test_is_flagged_reads_only_yes() -> None:
     assert core.is_flagged("Y") and core.is_flagged(" y ")
     assert not core.is_flagged("N") and not core.is_flagged(float("nan")) and not core.is_flagged(None)

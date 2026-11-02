@@ -7,14 +7,15 @@
 #* Run inside the HPC container from code/:
 #*   STAGE=inventory READOUT_ROOT=<pass 1 root> M=<40 s audit> SMOKE_DIR=<its cache_smoke_P512_* dir> bash run_covariate_audit.sh
 #*   STAGE=read ROOT=<the same root> READOUT_ROOT=<pass 1 root> MAPPING=<mapping json> bash run_covariate_audit.sh
-#* Environment: ROOT, READOUT_ROOT, STAGE=inventory|read, MAPPING, M, SMOKE_DIR or SIGNAL_CACHE_DIR, DATA_DIR,
+#*   STAGE=drug ROOT=<the same root> READOUT_ROOT=<pass 1 root> MAPPING=<mapping json> bash run_covariate_audit.sh
+#* Environment: ROOT, READOUT_ROOT, STAGE=inventory|read|drug, MAPPING, DRUG_CLASSES, M, SMOKE_DIR or SIGNAL_CACHE_DIR, DATA_DIR,
 #* METADATA (default <DATA_DIR>/v3.0.0/DOCS/metadata_v00r.xlsx), NUM_WORKERS=4, HEADER_ROW=0, SUBJECT_COLUMN,
 #* SESSION_COLUMN (the last three only if the first inventory could not find the join).
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  sed -n '3,12p' "$0" | sed 's/^#\* \{0,1\}//'
+  sed -n '3,13p' "$0" | sed 's/^#\* \{0,1\}//'
   exit 0
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -24,7 +25,7 @@ HEADER_ROW="${HEADER_ROW:-0}"
 ROOT="${ROOT:-$SCRIPT_DIR/logs/covariate_audit/audit_$(date +%Y%m%d_%H%M%S)}"
 READOUT_ROOT="${READOUT_ROOT:?Set READOUT_ROOT to the root of frozen readout pass 1}"
 DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data}"
-[[ "$STAGE" == inventory || "$STAGE" == read ]] || { echo "ERROR: STAGE must be inventory or read" >&2; exit 2; }
+[[ "$STAGE" == inventory || "$STAGE" == read || "$STAGE" == drug ]] || { echo "ERROR: STAGE must be inventory, read or drug" >&2; exit 2; }
 [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || { echo "ERROR: bad NUM_WORKERS" >&2; exit 2; }
 [[ "$HEADER_ROW" =~ ^[0-9]+$ ]] || { echo "ERROR: bad HEADER_ROW" >&2; exit 2; }
 for dir in "$READOUT_ROOT" "$DATA_DIR"; do
@@ -46,6 +47,12 @@ else
   [[ -f "$MAPPING" ]] || { echo "ERROR: mapping not found: $MAPPING" >&2; exit 2; }
   MAPPING=$(cd -- "$(dirname -- "$MAPPING")" && pwd)/$(basename -- "$MAPPING")
   [[ -f "$ROOT/read_segments.csv" ]] || { echo "ERROR: run STAGE=inventory on this root first: $ROOT" >&2; exit 2; }
+fi
+if [[ "$STAGE" == drug ]]; then
+  [[ -f "$ROOT/audit_decision.json" ]] || { echo "ERROR: run STAGE=read on this root first: $ROOT" >&2; exit 2; }
+  DRUG_CLASSES="${DRUG_CLASSES:-$SCRIPT_DIR/configs/covariate_audit/drug_classes.json}"
+  [[ -f "$DRUG_CLASSES" ]] || { echo "ERROR: drug classes not found: $DRUG_CLASSES" >&2; exit 2; }
+  DRUG_CLASSES=$(cd -- "$(dirname -- "$DRUG_CLASSES")" && pwd)/$(basename -- "$DRUG_CLASSES")
 fi
 READOUT_ROOT=$(cd -- "$READOUT_ROOT" && pwd)
 DATA_DIR=$(cd -- "$DATA_DIR" && pwd)
@@ -76,6 +83,10 @@ if [[ "$STAGE" == inventory ]]; then
     --manifests "$(cd -- "$M" && pwd)" --signal-cache-dir "$(cd -- "$SIGNAL_CACHE_DIR" && pwd)" \
     --num-workers "$NUM_WORKERS" --header-row "$HEADER_ROW" "${extra[@]}"
   echo "Inventory: $ROOT/inventory.json. It holds no label, no score and no value of age or sex."
+elif [[ "$STAGE" == drug ]]; then
+  step drug-read --root "$ROOT" --readout-root "$READOUT_ROOT" --data-dir "$DATA_DIR" --metadata "$METADATA" \
+    --mapping "$MAPPING" --drug-classes "$DRUG_CLASSES"
+  cat "$ROOT/drug_read_decision.json"
 else
   if [[ -f "$ROOT/audit_decision.json" ]]; then
     cp -- "$ROOT/audit_decision.json" "$ROOT/audit_decision_before_$STAMP.json"  # keep the record of an earlier read
