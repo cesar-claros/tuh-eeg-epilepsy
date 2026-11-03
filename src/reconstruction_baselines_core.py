@@ -207,7 +207,8 @@ def band_weights(n_times: int, sfreq: float = SFREQ, bands: Sequence[tuple[float
 
 def band_energy(x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Energy per segment and band ``(B, n_bands)`` of rows ``(B, C, T)``, summed over channels, in float64."""
-    power = torch.fft.rfft(x.double(), dim=-1).abs().pow(2).sum(dim=1)
+    # MKL, the FFT of the HPC build, refuses views with zero strides (an expanded tensor), so copy first.
+    power = torch.fft.rfft(x.double().contiguous(), dim=-1).abs().pow(2).sum(dim=1)
     return power @ weights.to(power).T
 
 
