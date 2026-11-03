@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -168,6 +168,11 @@ def unloaded_tensors(
     The classification head is not used, so it is not checked. The check does not depend on how weights are named.
     """
     return sorted(k for k in first if not k.startswith(head_prefix) and not np.array_equal(first[k], second[k]))
+
+
+def text_array(values: Iterable[Any]) -> np.ndarray:
+    """A numpy array of plain strings; a pandas column gives an object array, which ``np.load`` refuses to read."""
+    return np.array([str(v) for v in values])
 
 
 def segment_starts(duration: float) -> list[float]:

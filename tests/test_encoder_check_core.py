@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import math
 import re
+import tempfile
 from pathlib import Path
 
 import rootutils
@@ -18,6 +19,7 @@ import rootutils
 rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 from sklearn.linear_model import LogisticRegression  # noqa: E402
 
 import src.encoder_check_core as core  # noqa: E402
@@ -122,6 +124,18 @@ def test_unloaded_tensors_finds_what_the_file_did_not_fill() -> None:
     second = {"encoder.a": same.copy(), "encoder.b": np.ones(3), "final_layer.2.weight": np.ones(2)}
     assert core.unloaded_tensors(first, second) == ["encoder.b"], "the head is not used, so it does not count"
     assert core.unloaded_tensors(first, first) == []
+
+
+def test_text_array_saves_and_loads_without_pickle() -> None:
+    """The first extra read saved a pandas column as an object array, and the read could not load it."""
+    column = pd.Series(["aaaaaaaa", "aaaaaaab"], dtype=object)
+    assert column.astype(str).to_numpy().dtype == object, "this is the form that np.load refuses"
+    values = core.text_array(column)
+    assert values.dtype.kind == "U"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "rows.npz"
+        np.savez(path, subject=values)
+        assert np.load(path)["subject"].tolist() == ["aaaaaaaa", "aaaaaaab"]
 
 
 def test_segment_starts_follow_the_campaign_grid() -> None:

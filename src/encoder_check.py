@@ -67,6 +67,7 @@ from src.encoder_check_core import (  # noqa: E402
     segment_starts,
     split_spread,
     spread_is_consistent,
+    text_array,
     tiled_length,
     unloaded_tensors,
     zscore_channels,
@@ -348,7 +349,7 @@ def extract_extra(
         embeddings[index] = embed_segment(zscore_channels(common_average(raw)), encode)
         if index % 500 == 0:
             logger.info(f"Extra segment {index} of {len(frame)}")
-    subject = frame["subject"].astype(str).to_numpy()
+    subject = text_array(frame["subject"])
     np.savez(
         path,
         subject=subject,
