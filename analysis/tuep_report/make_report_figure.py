@@ -35,6 +35,7 @@ rows = [
     ("Segments per patient", 0.761, 0.680, 0.833, NO_EEG, False),
     ("Spectral", 0.693, 0.608, 0.776, EEG, True),
     ("HYDRA", 0.670, 0.582, 0.752, EEG, True),
+    ("REVE, frozen encoder", 0.680, 0.593, 0.766, EEG, True),
     ("Spectral, matched age and sex", 0.680, 0.564, 0.788, EEG, False),
     ("HYDRA, matched age and sex", 0.659, 0.547, 0.764, EEG, False),
     ("S4-R1 (R=1 code)", 0.619, 0.530, 0.707, EEG, False),

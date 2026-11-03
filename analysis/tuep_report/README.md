@@ -11,6 +11,7 @@ These scripts produce the post-hoc numbers and Figure 1 of `documentation/tuep_m
 | `read_drug_cells.py` | audit root, readout root | Scores by class and wide-list status (section 15.6) |
 | `read_narrow_cells.py` | audit root, readout root | Scores by class and maintenance-drug status, with bag matching (section 16.8) |
 | `read_report_numbers.py` | audit root, readout root, output json | Drug baseline, EEG added to the drug, cell means |
+| `read_encoder_matched.py` | code folder, check root, audit root, readout root | Age-matched read of the encoder check (its protocol, section 13) |
 | `make_report_figure.py` | numbers json, output png | Figure 1 |
 | `audit_power.py`, `drug_power.py` | none | Rough power by simulation, with no project data (sections 11 and 16.5) |
 
