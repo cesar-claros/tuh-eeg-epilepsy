@@ -118,8 +118,22 @@ def _save_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(_plain(value), indent=2) + "\n")
 
 
+def _text_array(values: Iterable[Any]) -> np.ndarray:
+    """A numpy array of plain strings; a pandas column gives an object array, which ``np.load`` refuses."""
+    return np.array([str(v) for v in values], dtype=str)
+
+
 def _save_npz(path: Path, **arrays: np.ndarray) -> None:
-    """Write through a temporary file, so a finished file means a finished stage."""
+    """Write through a temporary file, so a finished file means a finished stage.
+
+    Raises
+    ------
+    ValueError
+        If an array has dtype object: ``np.load`` would refuse it without pickle, after the stage looked finished.
+    """
+    for name, array in arrays.items():
+        if np.asarray(array).dtype == object:
+            raise ValueError(f"{name} is an object array; convert it first (for text, use _text_array)")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".partial")
     with temporary.open("wb") as handle:
@@ -300,7 +314,7 @@ def score_fold(args: argparse.Namespace) -> None:
     slow = torch.as_tensor(dominant < SLOW_ATOM_HZ, device="cuda")
     basis_t = torch.as_tensor(basis, device="cuda")
     view = _segments(context, scored)
-    subjects = view.plan["subject"].astype(str).to_numpy()
+    subjects = _text_array(view.plan["subject"])
     parts: dict[str, list[np.ndarray]] = {name: [] for name in SEGMENT_FIELDS}
     violations = np.zeros(len(S4_ARMS), dtype=np.int64)
     excess = np.full(len(S4_ARMS), -np.inf)

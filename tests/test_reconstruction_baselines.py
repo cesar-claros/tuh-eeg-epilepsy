@@ -17,6 +17,7 @@ import rootutils
 rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 import polars as pl  # noqa: E402
 
 import src.reconstruction_baselines as driver  # noqa: E402
@@ -117,6 +118,14 @@ def test_json_and_atomic_writes() -> None:
         assert path.is_file() and not list(path.parent.glob("*.partial")), "a partial file was left behind"
         with np.load(path) as data:
             assert data["values"].tolist() == [0, 1, 2]
+        column = pd.DataFrame({"subject": ["p001", "p002"]})["subject"].astype(str)
+        assert column.to_numpy().dtype == object, "the case this guards against: a pandas text column"
+        other = Path(tmp) / "scores" / "fold1.npz"
+        _expect_value_error(lambda: driver._save_npz(other, subject=column.to_numpy()), "an object array was saved")
+        assert not other.exists() and not list(other.parent.glob("*.partial")), "a refused write left a file"
+        driver._save_npz(other, subject=driver._text_array(column))
+        with np.load(other) as data:
+            assert data["subject"].tolist() == ["p001", "p002"]
 
 
 def test_read_gives_slow_only_when_fast_content_is_missing() -> None:
