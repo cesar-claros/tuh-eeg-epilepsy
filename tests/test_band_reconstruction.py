@@ -8,6 +8,7 @@ written fold files: each outcome of the two-arm rule, and the gates that block i
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -73,6 +74,26 @@ def test_domain_record_and_refusals() -> None:
         (other / "scores").mkdir(parents=True)
         _expect_value_error(lambda: driver.check_domain(other), "a baselines root was accepted")
         _expect_value_error(lambda: driver.read(other, other), "a read without a domain record was accepted")
+
+
+def test_training_refuses_nondeterministic_cublas() -> None:
+    saved = os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    try:
+        try:
+            driver.require_deterministic_cublas()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("training without CUBLAS_WORKSPACE_CONFIG was accepted")
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        driver.require_deterministic_cublas()
+    finally:
+        if saved is None:
+            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+        else:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = saved
+    launcher = (Path(__file__).resolve().parents[1] / "run_band_reconstruction.sh").read_text()
+    assert "export CUBLAS_WORKSPACE_CONFIG=:4096:8" in launcher, "the launcher must export the cuBLAS setting"
 
 
 def test_geometry_check() -> None:

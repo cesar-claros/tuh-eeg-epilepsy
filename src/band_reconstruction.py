@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,8 @@ SECOND_AXIS = (
 )
 SEGMENT_FIELDS = (*SECOND_AXIS, "signal_bands", "signal_total", "usable_rows", "edge_energy", "interior_energy")
 COLUMNS = ("total", *BAND_NAMES, "in_band", "4_30")
+# The cuBLAS workspace settings under which deterministic algorithms run on CUDA (the CUDA reproducibility notes).
+DETERMINISTIC_CUBLAS = (":4096:8", ":16:8")
 
 
 class BandPassed(Dataset):
@@ -168,6 +171,24 @@ def check_geometry(model: Any, top_r: int) -> None:
     wanted = (N_ATOMS, ATOM_LEN, POOL_LEN, top_r, N_SPATIAL, "none")
     if found != wanted:
         raise ValueError(f"dictionary geometry {found} differs from the protocol's {wanted}")
+
+
+def require_deterministic_cublas() -> None:
+    """Refuse to train without the cuBLAS workspace setting that deterministic algorithms need on CUDA.
+
+    Training turns on ``torch.use_deterministic_algorithms``, as the readout does, and its first cuBLAS call then fails
+    unless ``CUBLAS_WORKSPACE_CONFIG`` was set. This check fails before any data are read.
+
+    Raises
+    ------
+    RuntimeError
+        If ``CUBLAS_WORKSPACE_CONFIG`` is not one of ``DETERMINISTIC_CUBLAS``; the launcher exports it.
+    """
+    if os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in DETERMINISTIC_CUBLAS:
+        raise RuntimeError(
+            "set CUBLAS_WORKSPACE_CONFIG=:4096:8 before training (run_band_reconstruction.sh exports it): "
+            "deterministic algorithms on CUDA need it"
+        )
 
 
 def _context(args: argparse.Namespace, fold: int) -> dict[str, Any]:
@@ -266,6 +287,7 @@ def fit_dictionary(args: argparse.Namespace) -> None:
     if (output / CHECKPOINT).is_file():
         logger.info(f"{output.name}: finished")
         return
+    require_deterministic_cublas()
     context = _context(args, fold)
     plan, cohort, seed = context["plan"], context["cohort"], context["seed"]
     torch.use_deterministic_algorithms(True)

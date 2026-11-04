@@ -48,6 +48,7 @@ git diff > "$ROOT/dirty_$STAMP.diff"  # empty file = clean tree
 echo "$STAMP STAGE=$STAGE READOUT_ROOT=$READOUT_ROOT NUM_WORKERS=$NUM_WORKERS ${M:+M=$M} ${SIGNAL_CACHE_DIR:+SIGNAL_CACHE_DIR=$SIGNAL_CACHE_DIR}" >> "$ROOT/settings.txt"
 
 export PYTHONHASHSEED=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8  # deterministic training on CUDA needs it, as in run_frozen_readout.sh
 export HYDRA_FULL_ERROR=1
 python -m pytest -q tests/test_band_reconstruction_core.py tests/test_band_reconstruction.py \
   tests/test_reconstruction_baselines_core.py tests/test_reconstruction_baselines.py 2>&1 | tee -a "$ROOT/tests.log"
