@@ -10,6 +10,9 @@ and the rules; the data path of ``src/band_reconstruction.py`` is reused. Subcom
 - ``score`` reconstructs the fixed segments of the fold's own patients with one setting.
 - ``select`` applies the screen gates and the selection rule on folds 0 and 1 (``selection.json``).
 - ``read`` applies the confirmation rule on folds 2 to 4 (``sweep_decision.json``).
+- ``map`` reads the exploratory map of K, R, D and L on folds 0 and 1 (``map.json``; protocol
+  ``documentation/separable_band_rkd_map_protocol.md``). It reuses the screen's cells by name and writes no file that
+  ``select`` or ``read`` reads.
 
 The 39 test patients stay locked: the readout's cohort refuses them. No label enters a fit, a score or a selection.
 """
@@ -32,6 +35,18 @@ from torch.utils.data import DataLoader
 
 ROOT = rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=True)
 
+from src.band_map_core import (  # noqa: E402
+    CONVERGENCE,
+    RS,
+    best_healthy,
+    effect_weights,
+    front,
+    grid,
+    intervals,
+    map_settings,
+    same_at,
+    shift_read,
+)
 from src.band_reconstruction import (  # noqa: E402
     CHECKPOINT,
     DOMAIN,
@@ -131,6 +146,8 @@ def stage_settings(stage: str, root: Path | None = None) -> list[Setting]:
         return screen_settings()
     if stage == "screen-score":
         return [BASE, *screen_settings()]
+    if stage == "map":
+        return map_settings()
     if root is None:
         raise ValueError("the confirmation stages need the sweep root")
     selected = json.loads((root / "selection.json").read_text())["selected"]
@@ -590,6 +607,101 @@ def read(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]:
     return record
 
 
+# ---------------------------------------------------------------------- the exploratory map
+
+
+def map_stage(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]:
+    """The pre-stated read and the descriptive reads of the map protocol (sections 7 and 8), on folds 0 and 1."""
+    plan = json.loads((readout_root / "folds.json").read_text())
+    cells = grid()
+    names = [c.name for c in cells]
+    scores = {c.name: Scores(root, c, SCREEN_FOLDS) for c in cells}
+    convergence = Scores(root, CONVERGENCE, SCREEN_FOLDS)
+    gates, details = _gates(root, band_root, {**scores, CONVERGENCE.name: convergence}, SCREEN_FOLDS, plan)
+    first = scores[names[0]]
+    counts = bootstrap_counts(np.array([plan["folds"][p] for p in first.patients]))
+    weights = effect_weights(cells)
+    effects, ev = {}, {}
+    for column in ("4_30", "13_30", "total"):
+        values = np.array([scores[n].ev(column) for n in names])
+        draws = np.stack(
+            [pooled_ev(scores[n].residual[column], scores[n].signal[column], counts) for n in names], axis=-1
+        )
+        effects[column] = {e: _interval_record(i) for e, i in intervals(values, draws, weights).items()}
+        ev[column] = dict(zip(names, values.tolist()))
+    health = {n: healthy(scores[n].wins()) for n in names}
+    best = {r: best_healthy(ev["4_30"], health, cells, r) for r in RS}
+    signal = first.signal["4_30"]
+    reads = {}
+    for r_high in (8, 16):
+        low, high = best[4], best[r_high]
+        counterpart = same_at(low, r_high) if low else None
+        versus = None
+        if low and high and high != counterpart:
+            versus = paired_interval(
+                scores[high].residual["4_30"], scores[counterpart].residual["4_30"], signal, counts
+            )
+        reads[f"R{r_high}_vs_R4"] = {
+            "answer": shift_read(low, high, versus, r_high),
+            "best_R4": low,
+            f"best_R{r_high}": high,
+            "counterpart": counterpart,
+            "best_minus_counterpart_4_30": _interval_record(versus) if versus else None,
+        }
+    answer = reads["R16_vs_R4"]["answer"] if all(gates.values()) else "blocked"
+    on_front = set(front({n: (parse_setting(n).bits_per_second, ev["4_30"][n]) for n in names}))
+    rows = []
+    for c in cells:
+        s = scores[c.name]
+        h = s.health()
+        row: dict[str, Any] = {
+            "setting": c.name,
+            "R": c.R,
+            "K": c.K,
+            "D": c.D,
+            "L": c.L,
+            "amplitudes_per_second": c.amplitudes_per_second,
+            "bits_per_second": c.bits_per_second,
+            "healthy": health[c.name],
+            "dead_atoms_f0": h["dead_atoms"][0],
+            "dead_atoms_f1": h["dead_atoms"][1],
+            "largest_near_copy_group": max(h["largest_near_copy_group"]),
+            "slow_share_of_wins": float(np.mean(h["slow_share_of_wins"])),
+            "on_front": c.name in on_front,
+        }
+        for column in ("total", "4_30", "13_30"):
+            i = ev_interval(s.residual[column], s.signal[column], counts)
+            row |= {f"ev_{column}": i.value, f"ev_{column}_low": i.low, f"ev_{column}_high": i.high}
+        rows.append(row)
+    pl.DataFrame(rows).write_csv(root / "map_summary.csv")
+    pl.DataFrame([{"column": c, "effect": e, **v} for c, items in effects.items() for e, v in items.items()]).write_csv(
+        root / "map_effects.csv"
+    )
+    pl.DataFrame([r for r in rows if r["on_front"]]).sort("bits_per_second").write_csv(root / "map_front.csv")
+    base_r16 = scores[same_at("K64_L128_D8_P512_R4_E30_s1", 16)]
+    record = {
+        "protocol": "documentation/separable_band_rkd_map_protocol.md, section 7",
+        "answer": answer,
+        "prediction": "shifts about 55%, with K128_L128_D8 best at R=16 (protocol section 7)",
+        "gates": gates,
+        "gate_details": details,
+        "screen_patients": len(first.patients),
+        "best_healthy": {f"R{r}": best[r] for r in RS},
+        "reads": reads,
+        "effects": effects,
+        "front": sorted(on_front, key=lambda n: parse_setting(n).bits_per_second),
+        "convergence_E60_minus_E30_at_R16": {
+            c: _interval_record(
+                paired_interval(convergence.residual[c], base_r16.residual[c], base_r16.signal[c], counts)
+            )
+            for c in ("total", "4_30")
+        },
+    }
+    _save_json(root / "map.json", record)
+    logger.info(f"Map: {answer} (gates {gates}, best {record['best_healthy']})")
+    return record
+
+
 # ---------------------------------------------------------------------- entry point
 
 
@@ -599,7 +711,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="print the settings of a launcher stage")
     listing.add_argument(
-        "--stage", required=True, choices=("smoke", "screen-fit", "screen-score", "confirm-fit", "confirm-score")
+        "--stage", required=True, choices=("smoke", "screen-fit", "screen-score", "confirm-fit", "confirm-score", "map")
     )
     listing.add_argument("--root", type=Path)
     for name, description in (("fit", "train the dictionary of one setting and fold"), ("score", "score one setting")):
@@ -615,7 +727,11 @@ def main() -> None:
         command.add_argument("--setting", required=True)
         if name == "fit":
             command.add_argument("--smoke", action="store_true", help="one epoch, under smoke/, for the memory check")
-    for name, description in (("select", "screen gates and selection"), ("read", "confirmation rule")):
+    for name, description in (
+        ("select", "screen gates and selection"),
+        ("read", "confirmation rule"),
+        ("map", "the exploratory map of K, R, D and L"),
+    ):
         command = commands.add_parser(name, help=description)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--band-root", type=Path, required=True)
@@ -630,6 +746,8 @@ def main() -> None:
         score(args)
     elif args.command == "select":
         select_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
+    elif args.command == "map":
+        map_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
     else:
         read(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
 
