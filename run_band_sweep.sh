@@ -9,23 +9,27 @@
 #* confirm: fits and scores of the selected setting and the base on folds 2 to 4, then the read (sweep_decision.json).
 #* STAGE=select or STAGE=read repeats only that step, on CPU. A rerun with the same ROOT skips finished steps.
 #* STAGE=map (documentation/separable_band_rkd_map_protocol.md) runs on the sweep root (ROOT=<the screen root>): tests,
-#* the missing cells of the K, R, D and L grid on folds 0 and 1, then the map read (map.json).
-#* Environment: ROOT, BAND_ROOT, READOUT_ROOT, STAGE, M, SMOKE_DIR or SIGNAL_CACHE_DIR, DATA_DIR, NUM_WORKERS=4.
+#* the missing cells of the K, R, D and L grid on folds 0 and 1, then the map read (map.json). SEED=2 (amendment A1)
+#* runs the grid at the second seed, then its read (map_s2.json) and the two-seed read (map_seeds.json).
+#* Environment: ROOT, BAND_ROOT, READOUT_ROOT, STAGE, M, SMOKE_DIR or SIGNAL_CACHE_DIR, DATA_DIR, NUM_WORKERS=4,
+#* SEED=1 (map only).
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  sed -n '3,13p' "$0" | sed 's/^#\* \{0,1\}//'
+  sed -n '3,15p' "$0" | sed 's/^#\* \{0,1\}//'
   exit 0
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 STAGE="${STAGE:?Set STAGE to screen, confirm, select, read or map}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+SEED="${SEED:-1}"
 ROOT="${ROOT:-$SCRIPT_DIR/logs/band_sweep/sweep_$(date +%Y%m%d_%H%M%S)}"
 BAND_ROOT="${BAND_ROOT:?Set BAND_ROOT to the root of the band-limited run}"
 READOUT_ROOT="${READOUT_ROOT:?Set READOUT_ROOT to the root of frozen readout pass 1}"
 [[ "$STAGE" =~ ^(screen|confirm|select|read|map)$ ]] || { echo "ERROR: STAGE must be screen, confirm, select, read or map" >&2; exit 2; }
 [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || { echo "ERROR: bad NUM_WORKERS" >&2; exit 2; }
+[[ "$SEED" =~ ^[12]$ ]] || { echo "ERROR: SEED must be 1 or 2" >&2; exit 2; }
 [[ -f "$BAND_ROOT/band_decision.json" && -d "$BAND_ROOT/scores" ]] || { echo "ERROR: $BAND_ROOT is not a finished band-limited root" >&2; exit 2; }
 [[ -f "$READOUT_ROOT/folds.json" ]] || { echo "ERROR: $READOUT_ROOT holds no folds.json" >&2; exit 2; }
 BAND_ROOT=$(cd -- "$BAND_ROOT" && pwd)
@@ -53,7 +57,7 @@ ROOT=$(cd -- "$ROOT" && pwd)
 STAMP=$(date +%Y%m%d_%H%M%S)
 git rev-parse HEAD >> "$ROOT/sha.txt"
 git diff > "$ROOT/dirty_$STAMP.diff"  # empty file = clean tree
-echo "$STAMP STAGE=$STAGE BAND_ROOT=$BAND_ROOT READOUT_ROOT=$READOUT_ROOT NUM_WORKERS=$NUM_WORKERS ${M:+M=$M} ${SIGNAL_CACHE_DIR:+SIGNAL_CACHE_DIR=$SIGNAL_CACHE_DIR}" >> "$ROOT/settings.txt"
+echo "$STAMP STAGE=$STAGE SEED=$SEED BAND_ROOT=$BAND_ROOT READOUT_ROOT=$READOUT_ROOT NUM_WORKERS=$NUM_WORKERS ${M:+M=$M} ${SIGNAL_CACHE_DIR:+SIGNAL_CACHE_DIR=$SIGNAL_CACHE_DIR}" >> "$ROOT/settings.txt"
 
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8  # deterministic training on CUDA needs it, as in run_frozen_readout.sh
@@ -71,7 +75,7 @@ step() {
   echo "$(date '+%F %T') done  $*"
 }
 settings() {
-  python src/band_sweep.py list --stage "$1" --root "$ROOT"
+  python src/band_sweep.py list --stage "$1" --root "$ROOT" --seed "$SEED"
 }
 
 ROOTS=(--root "$ROOT" --band-root "$BAND_ROOT")
@@ -118,8 +122,13 @@ case "$STAGE" in
         step score "${ROOTS[@]}" "${CORPUS_ARGS[@]}" --fold "$fold" --setting "$name"
       done
     done
-    step map "${ROOTS[@]}" --readout-root "$READOUT_ROOT"
-    cat "$ROOT/map.json"
+    step map "${ROOTS[@]}" --readout-root "$READOUT_ROOT" --seed "$SEED"
+    if [[ "$SEED" == 1 ]]; then
+      cat "$ROOT/map.json"
+    else
+      step map-seeds "${ROOTS[@]}" --readout-root "$READOUT_ROOT" --seeds 1 "$SEED"
+      cat "$ROOT/map_seeds.json"
+    fi
     ;;
   select)
     step select "${ROOTS[@]}" --readout-root "$READOUT_ROOT"

@@ -1,8 +1,10 @@
 """Checks of the map stage of ``src/band_sweep.py`` (no corpus; CPU; seconds).
 
 Runs under pytest or as a script, which executes every ``test_*`` function and exits 1 on the first failure.
-Covered: the map list stage, and ``map_stage`` end to end on written score files: `shifts`, `stable` (no gain at
-R=16, and an unhealthy large dictionary), and `blocked` by the row gate, with the files it writes.
+Covered: the map list stage at both seeds, ``map_stage`` end to end on written score files (`shifts`, `stable` with no
+gain at R=16 or with an unhealthy large dictionary, and `blocked` by the row gate, with the files it writes), and the
+two-seed read of amendment A1 (`shifts` when both seeds agree, `stable` when the large dictionary is unhealthy at one
+seed, the seed noise and the replication of effects).
 """
 
 from __future__ import annotations
@@ -41,8 +43,16 @@ def _fast_factor(setting: sweep.Setting, k128_gain_at_16: float) -> float:
 
 
 def _write(
-    tmp: Path, k128_gain_at_16: float, *, dead_k128_at_16: bool = False, shift_rows: bool = False
+    tmp: Path,
+    k128_gain_at_16: float,
+    *,
+    dead_k128_at_16: bool = False,
+    shift_rows: bool = False,
+    seed2: dict[str, float | bool] | None = None,
 ) -> tuple[Path, Path, Path]:
+    """A readout plan, a band-limited root and a sweep root with the map cells at seed 1, and with ``seed2`` (its
+    ``k128_gain_at_16``, ``dead_k128_at_16`` and ``shift``, a constant added to the 4-30 Hz residual factor) also at
+    seed 2."""
     readout, band_root, root = tmp / "readout", tmp / "band", tmp / "sweep"
     labels = {f"p{i:03d}": int(i % 2 == 0) for i in range(20)}
     folds = {s: i % 5 for i, s in enumerate(sorted(labels))}
@@ -71,14 +81,39 @@ def _write(
             residual_total=residual.sum(axis=2),
         )
         _curve(band_root / "dictionaries" / f"B4-trained_f{fold}")
-    for setting in core.map_settings():
+    plans = [(core.map_settings(1), k128_gain_at_16, dead_k128_at_16, 0.0)]
+    if seed2 is not None:
+        plans.append(
+            (
+                core.map_settings(2),
+                float(seed2.get("k128_gain_at_16", k128_gain_at_16)),
+                bool(seed2.get("dead_k128_at_16", False)),
+                float(seed2.get("shift", 0.0)),
+            )
+        )
+    for settings, gain, dead, shift in plans:
+        _write_cells(root, band_root, signals, settings, gain, dead, shift, rng)
+    return root, band_root, readout
+
+
+def _write_cells(
+    root: Path,
+    band_root: Path,
+    signals: dict[int, tuple[np.ndarray, np.ndarray]],
+    settings: list[sweep.Setting],
+    gain: float,
+    dead: bool,
+    shift: float,
+    rng: np.random.Generator,
+) -> None:
+    for setting in settings:
         for fold in sweep.SCREEN_FOLDS:
             subject, signal = signals[fold]
             factor = np.full(len(base.BANDS), 0.7)
-            factor[list(band.FAST)] = _fast_factor(setting, k128_gain_at_16)
+            factor[list(band.FAST)] = _fast_factor(setting, gain) + shift
             residual = signal * factor
             wins = np.ones(setting.K, dtype=np.int64)
-            if dead_k128_at_16 and setting.K == 128 and setting.R == 16:
+            if dead and setting.K == 128 and setting.R == 16:
                 wins[:20] = 0
             driver._save_npz(
                 driver.score_file(root, setting, fold),
@@ -100,11 +135,12 @@ def _write(
             )
             if setting != sweep.BASE:
                 _curve(driver.dictionary_path(root, band_root, setting, fold))
-    return root, band_root, readout
 
 
 def test_map_list_stage() -> None:
     assert driver.stage_settings("map") == core.map_settings()
+    second = driver.stage_settings("map", seed=2)
+    assert len(second) == 36 and all(s.seed == 2 for s in second), "seed 2 repeats the 36 cells without convergence"
 
 
 def test_map_shifts_when_a_larger_dictionary_wins_at_r16() -> None:
@@ -135,6 +171,44 @@ def test_map_is_blocked_when_the_rows_differ() -> None:
         root, band_root, readout = _write(Path(tmp), k128_gain_at_16=0.02, shift_rows=True)
         record = driver.map_stage(root, band_root, readout)
         assert record["answer"] == "blocked" and not record["gates"]["rows_identical"]
+
+
+def test_map_at_seed_two_writes_its_own_files() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, band_root, readout = _write(Path(tmp), k128_gain_at_16=0.02, seed2={})
+        record = driver.map_stage(root, band_root, readout, seed=2)
+        assert record["seed"] == 2 and record["answer"] == "shifts" and "convergence_E60_minus_E30_at_R16" not in record
+        assert record["best_healthy"]["R16"] == "K128_L128_D8_P512_R16_E30_s2"
+        assert (root / "map_s2.json").is_file() and not (root / "map.json").exists(), "seed 1 outputs must stay apart"
+
+
+def test_two_seed_read_shifts_when_both_seeds_agree() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, band_root, readout = _write(Path(tmp), k128_gain_at_16=0.02, seed2={"shift": 0.001})
+        record = driver.map_seeds_stage(root, band_root, readout)
+        assert all(record["gates"].values()), record["gates"]
+        assert record["answer"] == "shifts" and record["answer_each_seed"] == {"s1": "shifts", "s2": "shifts"}
+        assert abs(record["seed_noise_4_30"]["median_abs"] - 0.001) < 1e-9
+        assert record["K128_minus_K64_at_R16_L128_D8_4_30"]["value"] > 0
+        rep = record["replication"]["4_30"]
+        assert rep["R16-R4:K128"]["replicates"] and rep["R4:L128"]["replicates"]
+        assert not rep["R4:K*L"]["replicates"], "a null effect must not replicate"
+        assert {"map_seeds.json", "map_seeds_summary.csv", "map_seeds_effects.csv"} <= {p.name for p in root.iterdir()}
+        assert pl.read_csv(root / "map_seeds_summary.csv").height == 36
+
+
+def test_two_seed_read_needs_health_at_both_seeds() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, band_root, readout = _write(Path(tmp), k128_gain_at_16=0.02, seed2={"dead_k128_at_16": True})
+        record = driver.map_seeds_stage(root, band_root, readout)
+        assert record["answer_each_seed"] == {"s1": "shifts", "s2": "stable"}
+        assert record["best_healthy"]["R16"] == "K64_L128_D8_P512_R16_E30_s1" and record["answer"] == "stable"
+    try:
+        driver.map_seeds_stage(Path("unused"), Path("unused"), Path("unused"), seeds=(1, 1))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("one seed twice was accepted")
 
 
 if __name__ == "__main__":

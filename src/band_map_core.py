@@ -2,18 +2,19 @@
 
 The 36 cells and the convergence arm, the effects within each budget and their interactions with the budget (as weight
 vectors over cells, so that one product gives both the point value and every bootstrap draw), the best healthy cell
-per budget, the pre-stated `shifts` read and the rate and distortion front. It reuses ``src/band_sweep_core.py``,
-which stays unchanged. No corpus; numpy only.
+per budget, the pre-stated `shifts` read, the rate and distortion front, and the seed reads of amendment A1 (section
+14). It reuses ``src/band_sweep_core.py``, which stays unchanged. No corpus; numpy only.
 """
 
 from __future__ import annotations
 
 import itertools
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import numpy as np
 
-from src.band_sweep_core import Setting
+from src.band_sweep_core import Setting, parse_setting
 from src.reconstruction_baselines_core import Interval
 
 RS = (4, 8, 16)
@@ -28,14 +29,15 @@ CONVERGENCE = Setting(K=64, L=128, D=8, P=P, R=16, epochs=60)
 PAIR_LEVELS = {"K": (64, 128), "D": (4, 8), "L": (256, 128)}  # (reference, other) for the two-factor contrasts
 
 
-def grid() -> list[Setting]:
-    """The 36 cells in a fixed order: R, then K, then D, then L."""
-    return [Setting(K=k, L=length, D=d, P=P, R=r) for r, k, d, length in itertools.product(RS, KS, DS, LS)]
+def grid(seed: int = 1) -> list[Setting]:
+    """The 36 cells at ``seed`` in a fixed order: R, then K, then D, then L."""
+    return [Setting(K=k, L=length, D=d, P=P, R=r, seed=seed) for r, k, d, length in itertools.product(RS, KS, DS, LS)]
 
 
-def map_settings() -> list[Setting]:
-    """Every setting of the map stage: the 36 cells and the convergence arm (existing cells are skipped by name)."""
-    return [*grid(), CONVERGENCE]
+def map_settings(seed: int = 1) -> list[Setting]:
+    """Every setting of the map stage at ``seed``: the 36 cells, and at seed 1 the convergence arm (amendment A1 does
+    not repeat it). Existing cells are skipped by name."""
+    return [*grid(seed), CONVERGENCE] if seed == 1 else grid(seed)
 
 
 def _weights(
@@ -97,9 +99,8 @@ def best_healthy(ev: Mapping[str, float], health: Mapping[str, bool], cells: Seq
 
 
 def same_at(name: str, r: int) -> str:
-    """The cell at budget ``r`` with the K, L and D of cell ``name``."""
-    setting = next(c for c in grid() if c.name == name)
-    return Setting(K=setting.K, L=setting.L, D=setting.D, P=P, R=r).name
+    """The cell at budget ``r`` with the K, L, D and seed of cell ``name``."""
+    return replace(parse_setting(name), R=r).name
 
 
 def shift_read(best_low: str | None, best_high: str | None, versus: Interval | None, r_high: int) -> str:
@@ -131,3 +132,16 @@ def front(points: Mapping[str, tuple[float, float]]) -> list[str]:
         if not dominated:
             keep.append(a)
     return sorted(keep, key=lambda n: points[n][0])
+
+
+def seed_noise(differences: Sequence[float]) -> dict[str, float]:
+    """The median and the largest absolute EV difference between two seeds over cells (amendment A1, read 3)."""
+    values = np.abs(np.asarray(differences, dtype=float))
+    return {"median_abs": float(np.median(values)), "largest_abs": float(values.max())}
+
+
+def replicates(first: float, second: float, both: Interval) -> bool:
+    """An effect replicates when its point values at the two seeds share a sign and its two-seed interval excludes 0
+    (amendment A1, read 4)."""
+    same_sign = (first > 0 and second > 0) or (first < 0 and second < 0)
+    return same_sign and (both.low > 0 or both.high < 0)

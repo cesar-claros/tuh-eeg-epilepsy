@@ -10,9 +10,10 @@ and the rules; the data path of ``src/band_reconstruction.py`` is reused. Subcom
 - ``score`` reconstructs the fixed segments of the fold's own patients with one setting.
 - ``select`` applies the screen gates and the selection rule on folds 0 and 1 (``selection.json``).
 - ``read`` applies the confirmation rule on folds 2 to 4 (``sweep_decision.json``).
-- ``map`` reads the exploratory map of K, R, D and L on folds 0 and 1 (``map.json``; protocol
-  ``documentation/separable_band_rkd_map_protocol.md``). It reuses the screen's cells by name and writes no file that
-  ``select`` or ``read`` reads.
+- ``map`` reads the exploratory map of K, R, D and L on folds 0 and 1 at one seed (``map.json``, or ``map_s2.json``;
+  protocol ``documentation/separable_band_rkd_map_protocol.md``). It reuses the screen's cells by name and writes no
+  file that ``select`` or ``read`` reads.
+- ``map-seeds`` reads the map over two seeds (amendment A1 of that protocol; ``map_seeds.json``).
 
 The 39 test patients stay locked: the readout's cohort refuses them. No label enters a fit, a score or a selection.
 """
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -44,7 +46,9 @@ from src.band_map_core import (  # noqa: E402
     grid,
     intervals,
     map_settings,
+    replicates,
     same_at,
+    seed_noise,
     shift_read,
 )
 from src.band_reconstruction import (  # noqa: E402
@@ -137,8 +141,9 @@ def score_file(root: Path, setting: Setting, fold: int) -> Path:
     return root / "scores" / f"{setting.name}_f{fold}.npz"
 
 
-def stage_settings(stage: str, root: Path | None = None) -> list[Setting]:
-    """The settings of a launcher stage: ``screen-fit``, ``screen-score``, ``confirm-fit`` or ``confirm-score``.
+def stage_settings(stage: str, root: Path | None = None, seed: int = 1) -> list[Setting]:
+    """The settings of a launcher stage: ``screen-fit``, ``screen-score``, ``confirm-fit``, ``confirm-score`` or ``map``
+    (at ``seed``).
 
     The confirmation stages read ``selection.json``; with no selected setting they hold no setting.
     """
@@ -147,7 +152,7 @@ def stage_settings(stage: str, root: Path | None = None) -> list[Setting]:
     if stage == "screen-score":
         return [BASE, *screen_settings()]
     if stage == "map":
-        return map_settings()
+        return map_settings(seed)
     if root is None:
         raise ValueError("the confirmation stages need the sweep root")
     selected = json.loads((root / "selection.json").read_text())["selected"]
@@ -610,37 +615,42 @@ def read(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------- the exploratory map
 
 
-def map_stage(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]:
-    """The pre-stated read and the descriptive reads of the map protocol (sections 7 and 8), on folds 0 and 1."""
-    plan = json.loads((readout_root / "folds.json").read_text())
-    cells = grid()
+class SeedMean:
+    """The per-patient residuals of one cell averaged over seeds, on the same patients and rows (amendment A1)."""
+
+    def __init__(self, parts: list[Scores]) -> None:
+        if any(not np.array_equal(p.patients, parts[0].patients) for p in parts):
+            raise ValueError("the seeds of a cell must cover the same patients")
+        self.patients = parts[0].patients
+        self.signal = parts[0].signal
+        self.residual = {c: np.mean([p.residual[c] for p in parts], axis=0) for c in parts[0].residual}
+
+    def ev(self, column: str) -> float:
+        return pooled_ev(self.residual[column], self.signal[column])
+
+
+def _map_analysis(
+    cells: list[Setting], objs: dict[str, Any], health: dict[str, bool], counts: np.ndarray
+) -> dict[str, Any]:
+    """Effects, EVs, the best healthy cell per R and the `shifts` reads of one set of per-patient residuals."""
     names = [c.name for c in cells]
-    scores = {c.name: Scores(root, c, SCREEN_FOLDS) for c in cells}
-    convergence = Scores(root, CONVERGENCE, SCREEN_FOLDS)
-    gates, details = _gates(root, band_root, {**scores, CONVERGENCE.name: convergence}, SCREEN_FOLDS, plan)
-    first = scores[names[0]]
-    counts = bootstrap_counts(np.array([plan["folds"][p] for p in first.patients]))
     weights = effect_weights(cells)
-    effects, ev = {}, {}
+    effects, ev, intervals_by_column = {}, {}, {}
     for column in ("4_30", "13_30", "total"):
-        values = np.array([scores[n].ev(column) for n in names])
-        draws = np.stack(
-            [pooled_ev(scores[n].residual[column], scores[n].signal[column], counts) for n in names], axis=-1
-        )
-        effects[column] = {e: _interval_record(i) for e, i in intervals(values, draws, weights).items()}
+        values = np.array([objs[n].ev(column) for n in names])
+        draws = np.stack([pooled_ev(objs[n].residual[column], objs[n].signal[column], counts) for n in names], axis=-1)
+        intervals_by_column[column] = intervals(values, draws, weights)
+        effects[column] = {e: _interval_record(i) for e, i in intervals_by_column[column].items()}
         ev[column] = dict(zip(names, values.tolist()))
-    health = {n: healthy(scores[n].wins()) for n in names}
     best = {r: best_healthy(ev["4_30"], health, cells, r) for r in RS}
-    signal = first.signal["4_30"]
+    signal = objs[names[0]].signal["4_30"]
     reads = {}
     for r_high in (8, 16):
         low, high = best[4], best[r_high]
         counterpart = same_at(low, r_high) if low else None
         versus = None
         if low and high and high != counterpart:
-            versus = paired_interval(
-                scores[high].residual["4_30"], scores[counterpart].residual["4_30"], signal, counts
-            )
+            versus = paired_interval(objs[high].residual["4_30"], objs[counterpart].residual["4_30"], signal, counts)
         reads[f"R{r_high}_vs_R4"] = {
             "answer": shift_read(low, high, versus, r_high),
             "best_R4": low,
@@ -648,12 +658,20 @@ def map_stage(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]
             "counterpart": counterpart,
             "best_minus_counterpart_4_30": _interval_record(versus) if versus else None,
         }
-    answer = reads["R16_vs_R4"]["answer"] if all(gates.values()) else "blocked"
-    on_front = set(front({n: (parse_setting(n).bits_per_second, ev["4_30"][n]) for n in names}))
+    return {"effects": effects, "intervals": intervals_by_column, "ev": ev, "best": best, "reads": reads}
+
+
+def _cell_rows(
+    cells: list[Setting],
+    objs: dict[str, Any],
+    health: dict[str, bool],
+    counts: np.ndarray,
+    extra: Callable[[Setting], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One table row per cell: its geometry, budget, health, ``extra`` fields and EVs with intervals."""
     rows = []
     for c in cells:
-        s = scores[c.name]
-        h = s.health()
+        o = objs[c.name]
         row: dict[str, Any] = {
             "setting": c.name,
             "R": c.R,
@@ -663,24 +681,57 @@ def map_stage(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]
             "amplitudes_per_second": c.amplitudes_per_second,
             "bits_per_second": c.bits_per_second,
             "healthy": health[c.name],
+            **extra(c),
+        }
+        for column in ("total", "4_30", "13_30"):
+            i = ev_interval(o.residual[column], o.signal[column], counts)
+            row |= {f"ev_{column}": i.value, f"ev_{column}_low": i.low, f"ev_{column}_high": i.high}
+        rows.append(row)
+    return rows
+
+
+def map_stage(root: Path, band_root: Path, readout_root: Path, seed: int = 1) -> dict[str, Any]:
+    """The pre-stated read and the descriptive reads of the map protocol (sections 7 and 8) at one seed, on folds 0
+    and 1. Seed 1 writes ``map.json`` and its tables (with the convergence arm); seed 2 writes ``map_s2.json``."""
+    plan = json.loads((readout_root / "folds.json").read_text())
+    cells = grid(seed)
+    names = [c.name for c in cells]
+    scores = {c.name: Scores(root, c, SCREEN_FOLDS) for c in cells}
+    checked = dict(scores)
+    convergence = None
+    if seed == 1:
+        convergence = Scores(root, CONVERGENCE, SCREEN_FOLDS)
+        checked[CONVERGENCE.name] = convergence
+    gates, details = _gates(root, band_root, checked, SCREEN_FOLDS, plan)
+    first = scores[names[0]]
+    counts = bootstrap_counts(np.array([plan["folds"][p] for p in first.patients]))
+    health = {n: healthy(scores[n].wins()) for n in names}
+    result = _map_analysis(cells, scores, health, counts)
+    ev, best, reads, effects = result["ev"], result["best"], result["reads"], result["effects"]
+    answer = reads["R16_vs_R4"]["answer"] if all(gates.values()) else "blocked"
+    on_front = set(front({n: (parse_setting(n).bits_per_second, ev["4_30"][n]) for n in names}))
+
+    def extra(c: Setting) -> dict[str, Any]:
+        h = scores[c.name].health()
+        return {
             "dead_atoms_f0": h["dead_atoms"][0],
             "dead_atoms_f1": h["dead_atoms"][1],
             "largest_near_copy_group": max(h["largest_near_copy_group"]),
             "slow_share_of_wins": float(np.mean(h["slow_share_of_wins"])),
             "on_front": c.name in on_front,
         }
-        for column in ("total", "4_30", "13_30"):
-            i = ev_interval(s.residual[column], s.signal[column], counts)
-            row |= {f"ev_{column}": i.value, f"ev_{column}_low": i.low, f"ev_{column}_high": i.high}
-        rows.append(row)
-    pl.DataFrame(rows).write_csv(root / "map_summary.csv")
+
+    rows = _cell_rows(cells, scores, health, counts, extra)
+    suffix = "" if seed == 1 else f"_s{seed}"
+    pl.DataFrame(rows).write_csv(root / f"map{suffix}_summary.csv")
     pl.DataFrame([{"column": c, "effect": e, **v} for c, items in effects.items() for e, v in items.items()]).write_csv(
-        root / "map_effects.csv"
+        root / f"map{suffix}_effects.csv"
     )
-    pl.DataFrame([r for r in rows if r["on_front"]]).sort("bits_per_second").write_csv(root / "map_front.csv")
-    base_r16 = scores[same_at("K64_L128_D8_P512_R4_E30_s1", 16)]
-    record = {
-        "protocol": "documentation/separable_band_rkd_map_protocol.md, section 7",
+    pl.DataFrame([r for r in rows if r["on_front"]]).sort("bits_per_second").write_csv(root / f"map{suffix}_front.csv")
+    record: dict[str, Any] = {
+        "protocol": "documentation/separable_band_rkd_map_protocol.md, section 7"
+        + ("" if seed == 1 else "; amendment A1, read 1"),
+        "seed": seed,
         "answer": answer,
         "prediction": "shifts about 55%, with K128_L128_D8 best at R=16 (protocol section 7)",
         "gates": gates,
@@ -690,15 +741,112 @@ def map_stage(root: Path, band_root: Path, readout_root: Path) -> dict[str, Any]
         "reads": reads,
         "effects": effects,
         "front": sorted(on_front, key=lambda n: parse_setting(n).bits_per_second),
-        "convergence_E60_minus_E30_at_R16": {
+    }
+    if convergence is not None:
+        base_r16 = scores[same_at("K64_L128_D8_P512_R4_E30_s1", 16)]
+        record["convergence_E60_minus_E30_at_R16"] = {
             c: _interval_record(
                 paired_interval(convergence.residual[c], base_r16.residual[c], base_r16.signal[c], counts)
             )
             for c in ("total", "4_30")
-        },
+        }
+    _save_json(root / f"map{suffix}.json", record)
+    logger.info(f"Map seed {seed}: {answer} (gates {gates}, best {record['best_healthy']})")
+    return record
+
+
+def map_seeds_stage(root: Path, band_root: Path, readout_root: Path, seeds: tuple[int, ...] = (1, 2)) -> dict[str, Any]:
+    """The two-seed reads of amendment A1 (section 14): the answer on residuals averaged over the seeds, with health at
+    every seed; the seed noise per cell; and the replication of every effect. Writes ``map_seeds.json`` and its tables.
+    """
+    if len(seeds) != 2 or seeds[0] == seeds[1]:
+        raise ValueError("the two-seed read needs two different seeds")
+    plan = json.loads((readout_root / "folds.json").read_text())
+    per_seed_cells = {s: grid(s) for s in seeds}
+    scores = {s: {c.name: Scores(root, c, SCREEN_FOLDS) for c in per_seed_cells[s]} for s in seeds}
+    gates = {}
+    for s in seeds:
+        g, _ = _gates(root, band_root, scores[s], SCREEN_FOLDS, plan)
+        gates |= {f"{k}_s{s}": v for k, v in g.items()}
+    cells = per_seed_cells[seeds[0]]  # cell identity: the names at the first seed
+    twins = {c.name: [scores[s][replace(c, seed=s).name] for s in seeds] for c in cells}
+    first = twins[cells[0].name][0]
+    counts = bootstrap_counts(np.array([plan["folds"][p] for p in first.patients]))
+    health_each = {s: {c.name: healthy(scores[s][replace(c, seed=s).name].wins()) for c in cells} for s in seeds}
+    health = {n: all(health_each[s][n] for s in seeds) for n in health_each[seeds[0]]}
+    each = {
+        s: _map_analysis(cells, {c.name: twins[c.name][i] for c in cells}, health_each[s], counts)
+        for i, s in enumerate(seeds)
     }
-    _save_json(root / "map.json", record)
-    logger.info(f"Map: {answer} (gates {gates}, best {record['best_healthy']})")
+    averaged = {c.name: SeedMean(twins[c.name]) for c in cells}
+    both = _map_analysis(cells, averaged, health, counts)
+    answer = both["reads"]["R16_vs_R4"]["answer"] if all(gates.values()) else "blocked"
+    differences = {c.name: each[seeds[1]]["ev"]["4_30"][c.name] - each[seeds[0]]["ev"]["4_30"][c.name] for c in cells}
+    k128 = (
+        paired_interval(
+            averaged["K128_L128_D8_P512_R16_E30_s1"].residual["4_30"],
+            averaged["K64_L128_D8_P512_R16_E30_s1"].residual["4_30"],
+            averaged["K64_L128_D8_P512_R16_E30_s1"].signal["4_30"],
+            counts,
+        )
+        if seeds[0] == 1
+        else None
+    )
+    replication = {
+        column: {
+            name: {
+                "seeds": [each[s]["intervals"][column][name].value for s in seeds],
+                "both": _interval_record(interval),
+                "replicates": replicates(
+                    each[seeds[0]]["intervals"][column][name].value,
+                    each[seeds[1]]["intervals"][column][name].value,
+                    interval,
+                ),
+            }
+            for name, interval in both["intervals"][column].items()
+        }
+        for column in ("4_30", "13_30", "total")
+    }
+
+    def extra(c: Setting) -> dict[str, Any]:
+        out: dict[str, Any] = {f"healthy_s{s}": health_each[s][c.name] for s in seeds}
+        out |= {f"ev_4_30_s{s}": each[s]["ev"]["4_30"][c.name] for s in seeds}
+        out["seed_difference_4_30"] = differences[c.name]
+        return out
+
+    rows = _cell_rows(cells, averaged, health, counts, extra)
+    pl.DataFrame(rows).write_csv(root / "map_seeds_summary.csv")
+    pl.DataFrame(
+        [
+            {
+                "column": column,
+                "effect": name,
+                **r["both"],
+                "seed_a": r["seeds"][0],
+                "seed_b": r["seeds"][1],
+                "replicates": r["replicates"],
+            }
+            for column, items in replication.items()
+            for name, r in items.items()
+        ]
+    ).write_csv(root / "map_seeds_effects.csv")
+    record = {
+        "protocol": "documentation/separable_band_rkd_map_protocol.md, amendment A1 (section 14)",
+        "seeds": list(seeds),
+        "answer": answer,
+        "prediction": "stable about 75% (amendment A1)",
+        "gates": gates,
+        "screen_patients": len(first.patients),
+        "best_healthy": {f"R{r}": both["best"][r] for r in RS},
+        "reads": both["reads"],
+        "answer_each_seed": {f"s{s}": each[s]["reads"]["R16_vs_R4"]["answer"] for s in seeds},
+        "best_healthy_each_seed": {f"s{s}": {f"R{r}": each[s]["best"][r] for r in RS} for s in seeds},
+        "seed_noise_4_30": seed_noise(list(differences.values())),
+        "K128_minus_K64_at_R16_L128_D8_4_30": _interval_record(k128) if k128 else None,
+        "replication": replication,
+    }
+    _save_json(root / "map_seeds.json", record)
+    logger.info(f"Map over seeds {seeds}: {answer} (best {record['best_healthy']})")
     return record
 
 
@@ -714,6 +862,7 @@ def main() -> None:
         "--stage", required=True, choices=("smoke", "screen-fit", "screen-score", "confirm-fit", "confirm-score", "map")
     )
     listing.add_argument("--root", type=Path)
+    listing.add_argument("--seed", type=int, choices=(1, 2), default=1, help="the seed of the map stage")
     for name, description in (("fit", "train the dictionary of one setting and fold"), ("score", "score one setting")):
         command = commands.add_parser(name, help=description)
         command.add_argument("--root", type=Path, required=True)
@@ -736,9 +885,16 @@ def main() -> None:
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--band-root", type=Path, required=True)
         command.add_argument("--readout-root", type=Path, required=True)
+        if name == "map":
+            command.add_argument("--seed", type=int, choices=(1, 2), default=1)
+    seeds = commands.add_parser("map-seeds", help="the two-seed reads of the map (amendment A1)")
+    seeds.add_argument("--root", type=Path, required=True)
+    seeds.add_argument("--band-root", type=Path, required=True)
+    seeds.add_argument("--readout-root", type=Path, required=True)
+    seeds.add_argument("--seeds", type=int, nargs=2, default=[1, 2])
     args = parser.parse_args()
     if args.command == "list":
-        settings = SMOKE if args.stage == "smoke" else stage_settings(args.stage, args.root)
+        settings = SMOKE if args.stage == "smoke" else stage_settings(args.stage, args.root, args.seed)
         sys.stdout.write("".join(f"{s.name}\n" for s in settings))
     elif args.command == "fit":
         fit(args)
@@ -747,7 +903,9 @@ def main() -> None:
     elif args.command == "select":
         select_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
     elif args.command == "map":
-        map_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
+        map_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve(), args.seed)
+    elif args.command == "map-seeds":
+        map_seeds_stage(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve(), tuple(args.seeds))
     else:
         read(args.root.resolve(), args.band_root.resolve(), args.readout_root.resolve())
 

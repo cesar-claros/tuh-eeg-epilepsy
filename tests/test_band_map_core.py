@@ -33,6 +33,10 @@ def test_grid_and_reuse() -> None:
     assert len(core.map_settings()) == 37 and core.map_settings()[-1] == core.CONVERGENCE
     screen = {sweep.BASE, *sweep.screen_settings()}
     assert len(screen & set(cells)) == 10, "the screen must already hold 10 cells of the grid"
+    second = core.grid(2)
+    assert [c.name.replace("_s2", "_s1") for c in second] == [c.name for c in cells]
+    assert core.map_settings(2) == second, "amendment A1 does not repeat the convergence arm"
+    assert core.same_at("K64_L128_D8_P512_R4_E30_s2", 16) == "K64_L128_D8_P512_R16_E30_s2"
 
 
 def _synthetic_ev(cells: list[sweep.Setting]) -> np.ndarray:
@@ -93,6 +97,15 @@ def test_shift_read() -> None:
     assert core.shift_read(low, core.same_at(low, 16), None, 16) == "stable"
     assert core.shift_read(None, high, up, 16) == "undefined" and core.shift_read(low, None, up, 16) == "undefined"
     _expect_value_error(lambda: core.shift_read(low, high, None, 16), "a shift without its interval was read")
+
+
+def test_seed_noise_and_replication() -> None:
+    assert core.seed_noise([0.001, -0.003, 0.002]) == {"median_abs": 0.002, "largest_abs": 0.003}
+    up, across = Interval(0.01, 0.004, 0.016), Interval(0.002, -0.001, 0.005)
+    assert core.replicates(0.012, 0.008, up)
+    assert not core.replicates(0.012, -0.001, up), "opposite signs do not replicate"
+    assert not core.replicates(0.003, 0.001, across), "an interval across 0 does not replicate"
+    assert core.replicates(-0.01, -0.02, Interval(-0.015, -0.02, -0.01))
 
 
 def test_front() -> None:
