@@ -11,6 +11,9 @@ holds the column layout, the arms, the rank-mean and the rule. Subcommands, in o
 - ``gates`` checks gates 2 to 6 of section 6 (the launcher runs the tests, gate 1) and writes ``gates.json``.
 - ``read`` applies the rule of section 7 and the reads of section 8 (``fusion_decision.json``,
   ``decomposition_summary.csv``); it stops if a gate failed.
+- ``lead`` checks the post-hoc lead of the read (``documentation/small_arm_lead_check_protocol.md``): the largest
+  untreated-cell value over all arms against labels permuted within fold, and ``Spec-chanmean`` on other fold
+  assignments (``lead_gates.json``, ``lead/``, ``lead_decision.json``).
 
 The 39 test patients stay locked: every stage refuses a patient outside the plan of pass 1. The cohort helpers
 repeat those of ``src/band_code_readout.py``, so that this module needs no torch.
@@ -45,6 +48,7 @@ from src.frozen_readout_core import (  # noqa: E402
     N_FOLDS,
     N_PERMUTATIONS,
     ArmScores,
+    assign_folds,
     auroc,
     bag_size_link,
     fit_head,
@@ -55,25 +59,40 @@ from src.frozen_readout_core import (  # noqa: E402
 )
 from src.spectral_decomposition_core import (  # noqa: E402
     AUROC_TOLERANCE,
+    CELL_TOLERANCE,
     FULL,
     FUSED,
     LAYOUT_TOLERANCE,
+    LEAD_ARM,
+    LEAD_ARMS,
+    LEAD_MEDIAN,
+    LEAD_P,
+    LEAD_SEEDS,
+    LEAD_SHARE,
+    N_LEAD_PERMUTATIONS,
     NULL_ARMS,
     PER_CHANNEL,
+    REFIT_TOLERANCE,
     SCORE_TOLERANCE,
     arm_features,
     arm_names,
+    cell_statistic,
     channel_problems,
     fusion_outcome,
     layout_gap,
+    lead_outcome,
     needs_channels,
+    permutation_p,
     rank_mean,
+    selection_null,
 )
 
 PREDICTION = "no_gain about 70%, with Fusion between 0.70 and 0.72 (protocol section 7)"
 SAVED = {"Spectral": "Spectral.csv", "HYDRA": "HYDRA.csv"}  # score files of the readout root
 ENCODER_SCORES = "D.csv"  # the REVE fixed read of the encoder check
 MATCHED = ("Fusion", "Spectral")
+LEAD_PROTOCOL = "documentation/small_arm_lead_check_protocol.md, section 5"
+LEAD_PREDICTION = "dropped about 65%, with a selection p-value between 0.05 and 0.20 (lead protocol section 5)"
 
 
 # ---------------------------------------------------------------------- files
@@ -428,6 +447,180 @@ def read(root: Path, readout_root: Path, audit_root: Path, encoder_root: Path, n
     return record
 
 
+# ---------------------------------------------------------------------- lead
+
+
+def _all_arms(root: Path, readout_root: Path, encoder_root: Path, skipped: list[str]) -> dict[str, ArmScores]:
+    """The arms of the read's summary: the saved arms, the four fusions and the decomposition arms."""
+    arms = {name: _scores(readout_root / "scores" / file) for name, file in SAVED.items()}
+    arms["REVE"] = _scores(encoder_root / "scores" / ENCODER_SCORES)
+    arms["Fusion"] = _fused(arms, FUSED)
+    for i, a in enumerate(FUSED):
+        for b in FUSED[i + 1 :]:
+            arms[f"Fusion-{a}-{b}"] = _fused(arms, (a, b))
+    return arms | {a: _scores(root / "scores" / f"{a}.csv") for a in arm_names() if a not in skipped}
+
+
+def _cell(arm: ArmScores, cohort: dict[str, Any]) -> float:
+    """The untreated-cell statistic of the read: scores standardized within fold, epilepsy above non-epilepsy."""
+    off = cohort["status"] == "off"
+    return cell_statistic(standardize_within_fold(arm.score, arm.fold)[off], cohort["label"][off])
+
+
+def _refit(
+    features: np.ndarray, label: np.ndarray, subject: np.ndarray, folds: dict[str, int], seed: int
+) -> list[dict[str, Any]]:
+    """The head of pass 1 on one fold assignment: the out-of-fold score of every patient."""
+    rows: list[dict[str, Any]] = []
+    for fold in range(N_FOLDS):
+        held = np.array([folds[s] == fold for s in subject])
+        result = fit_head(features, label, subject, held, StandardScaler, seed=seed + fold)
+        rows += [
+            {"subject": s, "fold": fold, "label": int(y), "score": float(v), "c": result.c}
+            for s, y, v in zip(result.subject, result.label, result.score, strict=True)
+        ]
+    return rows
+
+
+def _arm_of(rows: list[dict[str, Any]]) -> ArmScores:
+    frame = pl.DataFrame(rows)
+    columns = (frame[name].to_numpy() for name in ("fold", "label", "score"))
+    return ArmScores.from_rows(np.array(frame["subject"].to_list()), *columns)
+
+
+def _spread(values: list[float]) -> dict[str, float]:
+    low, q1, median, q3, high = np.percentile(values, [0, 25, 50, 75, 100])
+    return {"min": float(low), "q1": float(q1), "median": float(median), "q3": float(q3), "max": float(high)}
+
+
+def lead(
+    root: Path,
+    readout_root: Path,
+    audit_root: Path,
+    encoder_root: Path,
+    n_perm: int = N_LEAD_PERMUTATIONS,
+    seeds: tuple[int, ...] = LEAD_SEEDS,
+) -> dict[str, Any]:
+    """The two checks of the small-arm lead and their rule; writes ``lead_gates.json`` and ``lead_decision.json``.
+
+    Raises
+    ------
+    ValueError
+        If this root holds no finished read with passed gates.
+    """
+    plan = _load_json(readout_root / "folds.json")
+    read_gates = _load_json(root / "gates.json")
+    if read_gates["status"] != "pass" or not (root / "decomposition_summary.csv").is_file():
+        raise ValueError("this root holds no finished read with passed gates: there is no lead to check")
+    cohort = load_cohort(readout_root, audit_root, plan)
+    arms = _all_arms(root, readout_root, encoder_root, read_gates["skipped_arms"])
+    inputs_ok = cohort["subject"].tolist() == sorted(plan["folds"]) and all(
+        _matches_plan(arm, plan) for arm in arms.values()
+    )
+    subject, label, x = load_features(readout_root, plan)
+    features = {arm: arm_features(arm, x) for arm in (LEAD_ARM, FULL)}
+    cell_gap, refit_gap = math.inf, math.inf
+    if inputs_ok:
+        summary = pl.read_csv(root / "decomposition_summary.csv")
+        saved = dict(zip(summary["arm"].to_list(), summary["off_off"].to_list(), strict=True))
+        if set(saved) == set(arms):
+            cell_gap = max(abs(_cell(arm, cohort) - saved[name]) for name, arm in arms.items())
+        again = _arm_of(_refit(features[LEAD_ARM], label, subject, plan["folds"], plan["seed"]))
+        refit_gap = float(np.abs(again.score - arms[LEAD_ARM].score).max())
+    gate_record = {
+        "inputs_ok": bool(inputs_ok),
+        "arms": len(arms),
+        "cell_gap": cell_gap,
+        "cell_ok": cell_gap <= CELL_TOLERANCE,
+        "refit_gap": refit_gap,
+        "refit_ok": refit_gap <= REFIT_TOLERANCE,
+    }
+    gate_record["status"] = "pass" if all(gate_record[k] for k in ("inputs_ok", "cell_ok", "refit_ok")) else "fail"
+    _save_json(root / "lead_gates.json", gate_record)
+    if gate_record["status"] != "pass":
+        record = {
+            "protocol": LEAD_PROTOCOL,
+            "outcome": lead_outcome(False, False, False),
+            "prediction": LEAD_PREDICTION,
+            "gates": gate_record,
+        }
+        _save_json(root / "lead_decision.json", record)
+        logger.error("a gate of the lead check failed: no check is read")
+        return record
+    # Check 1: the largest cell statistic over all arms, against labels permuted within fold.
+    off = cohort["status"] == "off"
+    names = list(arms)
+    z_off = np.stack([standardize_within_fold(arms[n].score, arms[n].fold)[off] for n in names])
+    null = selection_null(z_off, cohort["label"][off], cohort["fold"][off], n_perm, seed=plan["seed"])
+    observed, maxima = null["observed"], null["null"].max(axis=1)
+    top = int(np.argmax(observed))
+    p_sel = permutation_p(float(observed[top]), maxima)
+    # Check 2: the lead arm, and the full arm as the reference, on other fold assignments.
+    (root / "lead").mkdir(parents=True, exist_ok=True)
+    repeats: dict[str, list[dict[str, float]]] = {arm: [] for arm in features}
+    for seed in seeds:
+        path = root / "lead" / f"scores_s{seed}.csv"
+        if not path.is_file():
+            folds = assign_folds(plan["labels"], seed)
+            rows = [
+                {"arm": arm} | row for arm in features for row in _refit(features[arm], label, subject, folds, seed)
+            ]
+            pl.DataFrame(rows).write_csv(path)
+        frame = pl.read_csv(path, schema_overrides={"subject": pl.Utf8})
+        for arm in features:
+            scores = _arm_of(frame.filter(pl.col("arm") == arm).drop("arm").to_dicts())
+            gain = drug_gain(scores.score, cohort["label"], scores.fold, cohort["status"], n_boot=10)[0]
+            repeats[arm].append(
+                {"seed": seed, "cell": _cell(scores, cohort), "gain": gain, "auroc": mean_fold_auroc(scores)}
+            )
+        logger.info(f"assignment {seed}: {LEAD_ARM} cell {repeats[LEAD_ARM][-1]['cell']:.3f}")
+    cells = [r["cell"] for r in repeats[LEAD_ARM]]
+    median = float(np.median(cells))
+    met = {"P": p_sel < LEAD_P, "M": median >= LEAD_MEDIAN}
+    outcome = lead_outcome(True, met["P"], met["M"])
+    record = {
+        "protocol": LEAD_PROTOCOL,
+        "outcome": outcome,
+        "prediction": LEAD_PREDICTION,
+        "gates": gate_record,
+        "conditions": met,
+        "deciding": {
+            "P_selection": {"p": p_sel, "largest": float(observed[top]), "arm": names[top], "permutations": n_perm},
+            "M_median_cell": {"median": median, "assignments": len(seeds), "arm": LEAD_ARM},
+        },
+        "cell": {
+            "epilepsy": int((cohort["label"][off] == 1).sum()),
+            "non_epilepsy": int((cohort["label"][off] == 0).sum()),
+        },
+        "descriptive": {
+            "null_maximum": {"median": float(np.median(maxima)), "p95": float(np.percentile(maxima, 95))},
+            "lead_arms": {
+                name: {
+                    "cell": float(observed[names.index(name)]),
+                    "p_unadjusted": permutation_p(
+                        float(observed[names.index(name)]), null["null"][:, names.index(name)]
+                    ),
+                }
+                for name in LEAD_ARMS
+                if name in names
+            },
+            "assignments": {
+                arm: {
+                    "cell": _spread([r["cell"] for r in rows]),
+                    "share_at_or_above": float(np.mean([r["cell"] >= LEAD_SHARE for r in rows])),
+                    "median_gain": float(np.median([r["gain"] for r in rows])),
+                    "median_auroc": float(np.median([r["auroc"] for r in rows])),
+                    "values": rows,
+                }
+                for arm, rows in repeats.items()
+            },
+        },
+    }
+    _save_json(root / "lead_decision.json", record)
+    logger.info(f"small-arm lead: {outcome} (p_sel {p_sel:.4f}, median cell {median:.3f})")
+    return record
+
+
 # ---------------------------------------------------------------------- entry point
 
 
@@ -439,15 +632,19 @@ def main() -> None:
         ("fit", "the input checks, the heads of the arms and the permuted-label read"),
         ("gates", "gates 2 to 6"),
         ("read", "the rule and the descriptive reads"),
+        ("lead", "the two checks of the small-arm lead"),
     ):
         command = commands.add_parser(name, help=description)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--readout-root", type=Path, required=True, help="the root of frozen readout pass 1")
         if name != "fit":
             command.add_argument("--encoder-root", type=Path, required=True, help="the root of the encoder check")
-        if name == "read":
+        if name in ("read", "lead"):
             command.add_argument("--audit-root", type=Path, required=True, help="the covariate audit root")
+        if name == "read":
             command.add_argument("--n-boot", type=int, default=10_000)
+        if name == "lead":
+            command.add_argument("--n-perm", type=int, default=N_LEAD_PERMUTATIONS)
     args = parser.parse_args()
     root, readout_root = args.root.resolve(), args.readout_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -455,8 +652,10 @@ def main() -> None:
         fit(root, readout_root)
     elif args.command == "gates":
         gates(root, readout_root, args.encoder_root.resolve())
-    else:
+    elif args.command == "read":
         read(root, readout_root, args.audit_root.resolve(), args.encoder_root.resolve(), args.n_boot)
+    else:
+        lead(root, readout_root, args.audit_root.resolve(), args.encoder_root.resolve(), args.n_perm)
 
 
 if __name__ == "__main__":

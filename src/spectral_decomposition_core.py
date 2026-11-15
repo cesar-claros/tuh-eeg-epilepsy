@@ -177,3 +177,87 @@ def fusion_outcome(gates_ok: bool, gains: bool) -> str:
     if not gates_ok:
         return "blocked"
     return "fusion_gains" if gains else "no_gain"
+
+
+# ---------------------------------------------------------------------- the small-arm lead
+# Protocol: ``documentation/small_arm_lead_check_protocol.md``. The constants are fixed before any result.
+LEAD_ARM = "Spec-chanmean"  # the arm of check 2
+LEAD_ARMS = (
+    LEAD_ARM,
+    "Spec-chain-left_temporal",
+    "Spec-chain-right_temporal",
+    "Spec-chain-left_parasagittal",
+    "Spec-chain-right_parasagittal",
+)  # the five arms of the lead (section 1)
+LEAD_SEEDS = tuple(20261115 + i for i in range(1, 21))  # the fold assignments of check 2
+N_LEAD_PERMUTATIONS = 10_000
+LEAD_P = 0.05  # condition P: the selection p-value must be below it
+LEAD_MEDIAN = 0.65  # condition M: the median cell statistic over the assignments must reach it
+LEAD_SHARE = 0.60  # descriptive: the share of assignments at or above it
+CELL_TOLERANCE = 1e-9  # gate 3: the cell statistic against the saved value of the read
+REFIT_TOLERANCE = 1e-4  # gate 3: the refit of ``LEAD_ARM`` against its saved scores
+
+
+def cell_statistic(score: np.ndarray, label: np.ndarray) -> float:
+    """The share of the pairs (label 1, label 0) in which the label-1 patient has the higher score, ties at one half.
+
+    Raises
+    ------
+    ValueError
+        If a class is empty.
+    """
+    positive, negative = score[label == 1], score[label == 0]
+    if len(positive) == 0 or len(negative) == 0:
+        raise ValueError("the cell needs patients of both classes")
+    wins = (positive[:, None] > negative[None, :]) + 0.5 * (positive[:, None] == negative[None, :])
+    return float(wins.mean())
+
+
+def permute_within_fold(label: np.ndarray, fold: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """The labels shuffled between the patients of each fold, so that every fold keeps its class counts."""
+    out = label.copy()
+    for f in np.unique(fold):
+        where = np.flatnonzero(fold == f)
+        out[where] = label[where][rng.permutation(len(where))]
+    return out
+
+
+def selection_null(
+    scores: np.ndarray, label: np.ndarray, fold: np.ndarray, n_perm: int = N_LEAD_PERMUTATIONS, seed: int = 0
+) -> dict[str, np.ndarray]:
+    """Check 1: the cell statistic of every arm, and its values under labels permuted within fold.
+
+    ``scores`` holds one row per arm over the patients of the cell. The statistic of an arm is its rank sum, so one
+    permutation costs one matrix product. Returns ``observed`` ``(arms,)`` and ``null`` ``(n_perm, arms)``.
+
+    Raises
+    ------
+    ValueError
+        If the shapes disagree or a class is empty.
+    """
+    scores = np.atleast_2d(np.asarray(scores, dtype=np.float64))
+    if scores.shape[1] != len(label) or len(label) != len(fold):
+        raise ValueError("the scores, the labels and the folds must cover the same patients")
+    n_pos, n_neg = int((label == 1).sum()), int((label == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        raise ValueError("the cell needs patients of both classes")
+    ranks = np.stack([rankdata(row, method="average") for row in scores])
+
+    def statistic(y: np.ndarray) -> np.ndarray:
+        return (ranks @ (y == 1) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+    rng = np.random.default_rng(seed)
+    null = np.stack([statistic(permute_within_fold(label, fold, rng)) for _ in range(n_perm)])
+    return {"observed": statistic(label), "null": null}
+
+
+def permutation_p(observed: float, null: np.ndarray) -> float:
+    """The share of the draws at or above ``observed``, with the observed arrangement counted as one draw."""
+    return float((1 + (null >= observed - 1e-12).sum()) / (1 + len(null)))
+
+
+def lead_outcome(gates_ok: bool, selection: bool, median: bool) -> str:
+    """The rule of section 5: ``blocked``, ``survives`` or ``dropped``."""
+    if not gates_ok:
+        return "blocked"
+    return "survives" if selection and median else "dropped"

@@ -4,7 +4,9 @@ corpus; CPU).
 Runs under pytest or as a script, which executes every ``test_*`` function and exits 1 on the first failure. Covered:
 the 26 arms and their dimensions, the columns of every arm on a known layout, the level, the channel mean and the
 asymmetry on known values, the refusal of a channel arm without a channel order, the layout gap of gate 4 on a right
-and a wrong layout, the channel checks of gate 5, the rank-mean with ties and folds, and the rule.
+and a wrong layout, the channel checks of gate 5, the rank-mean with ties and folds, and the rule. For the small-arm
+lead: the cell statistic, the permutation that keeps the class counts of every fold, the selection null on a planted
+effect and on scores without one, the permutation p-value, and the rule.
 """
 
 from __future__ import annotations
@@ -166,6 +168,71 @@ def test_rule() -> None:
     assert core.fusion_outcome(True, True) == "fusion_gains"
     assert core.fusion_outcome(True, False) == "no_gain"
     assert core.FUSED == ("Spectral", "HYDRA", "REVE")
+
+
+def _cell(seed: int, effect: float = 0.0, arms: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """An untreated cell of 68 patients in 5 folds (10 of label 1), with ``arms`` score rows; arm 0 holds the effect."""
+    rng = np.random.default_rng(seed)
+    fold = np.repeat(np.arange(5), [16, 14, 13, 13, 12])
+    label = np.zeros(68, dtype=int)
+    for f, k in enumerate((3, 1, 3, 2, 1)):
+        label[np.flatnonzero(fold == f)[:k]] = 1
+    scores = rng.standard_normal((arms, 68))
+    scores[0] += effect * label
+    return scores, label, fold
+
+
+def test_cell_statistic() -> None:
+    score, label = np.array([3.0, 1.0, 2.0, 2.0, 0.0]), np.array([1, 1, 0, 0, 0])
+    assert core.cell_statistic(score, label) == (3 + 1) / 6  # pairs won: (3;2,2,0) and (1;0)
+    assert core.cell_statistic(np.array([1.0, 1.0]), np.array([1, 0])) == 0.5  # a tie counts one half
+    _expect(ValueError, lambda: core.cell_statistic(score, np.zeros(5, dtype=int)), "an empty class must be refused")
+
+
+def test_permutation_keeps_fold_counts() -> None:
+    _, label, fold = _cell(0)
+    rng = np.random.default_rng(1)
+    changed = 0
+    for _ in range(50):
+        shuffled = core.permute_within_fold(label, fold, rng)
+        for f in np.unique(fold):
+            assert shuffled[fold == f].sum() == label[fold == f].sum()
+        changed += int(not np.array_equal(shuffled, label))
+    assert changed > 40 and label.sum() == 10  # the input is not changed, and most draws differ from it
+
+
+def test_selection_null() -> None:
+    scores, label, fold = _cell(2, effect=3.0)
+    out = core.selection_null(scores, label, fold, n_perm=2000, seed=0)
+    assert out["observed"].shape == (6,) and out["null"].shape == (2000, 6)
+    for arm in range(6):  # the rank form equals the pair form
+        assert abs(out["observed"][arm] - core.cell_statistic(scores[arm], label)) < 1e-12
+    maxima = out["null"].max(axis=1)
+    assert int(np.argmax(out["observed"])) == 0 and core.permutation_p(out["observed"].max(), maxima) < 0.01
+    # The arms without an effect have a null near one half. The planted arm does not: its high scores sit in the
+    # folds with the most label-1 patients, and the permutation keeps the folds.
+    assert abs(out["null"][:, 1:].mean() - 0.5) < 0.03 and out["null"][:, 0].mean() > 0.5
+    assert np.median(maxima) > 0.55  # the largest of six arms is biased upward
+    # Without an effect, the selection p-value is spread over the unit interval.
+    ps = []
+    for seed in range(40):
+        scores, label, fold = _cell(100 + seed)
+        out = core.selection_null(scores, label, fold, n_perm=300, seed=seed)
+        ps.append(core.permutation_p(out["observed"].max(), out["null"].max(axis=1)))
+    assert 0.3 < np.mean(ps) < 0.7 and np.mean(np.array(ps) < 0.05) < 0.2
+    _expect(ValueError, lambda: core.selection_null(scores[:, :-1], label, fold), "a wrong shape must be refused")
+    _expect(ValueError, lambda: core.selection_null(scores, np.zeros(68, dtype=int), fold), "one class must be refused")
+
+
+def test_permutation_p_and_lead_rule() -> None:
+    null = np.array([0.4, 0.5, 0.6, 0.7])
+    assert core.permutation_p(0.9, null) == 1 / 5  # the observed arrangement counts as one draw
+    assert core.permutation_p(0.6, null) == 3 / 5 and core.permutation_p(0.1, null) == 1.0
+    assert core.lead_outcome(False, True, True) == "blocked"
+    assert core.lead_outcome(True, True, True) == "survives"
+    assert core.lead_outcome(True, True, False) == "dropped" and core.lead_outcome(True, False, True) == "dropped"
+    assert len(core.LEAD_SEEDS) == 20 and len(set(core.LEAD_SEEDS)) == 20 and core.LEAD_ARM == "Spec-chanmean"
+    assert set(core.LEAD_ARMS) <= set(core.arm_names()) and core.LEAD_P == 0.05 and core.LEAD_MEDIAN == 0.65
 
 
 if __name__ == "__main__":

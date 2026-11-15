@@ -5,6 +5,8 @@ the input checks (patients, segments, column layout, channel order) and the refu
 gates and the read end to end in a ``fusion_gains`` case (two other arms with independent signal) and a ``no_gain``
 case (the other arms repeat ``Spectral``), with the files the read writes; a wrong column layout and a changed saved
 score, which block the read; and a root without a channel record, which skips the channel arms and still reads.
+For the small-arm lead: the stage end to end on a finished read, its files, a rerun that keeps the refits, and a
+changed summary, which blocks it.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from src.frozen_readout_core import fit_head  # noqa: E402
 
 N_PATIENTS, N_SEGMENTS, N_BOOT = 100, 2, 200
 CHANNELS = sorted(c for chain in core.CHAINS.values() for c in chain)
+LEAD_TEST_SEEDS = (11, 12)
 _CACHE: dict[str, dict] = {}
 
 
@@ -150,6 +153,12 @@ def _read(roots: dict) -> dict:
     return driver.read(roots["root"], roots["readout"], roots["audit"], roots["encoder"], n_boot=N_BOOT)
 
 
+def _lead(roots: dict) -> dict:
+    return driver.lead(
+        roots["root"], roots["readout"], roots["audit"], roots["encoder"], n_perm=300, seeds=LEAD_TEST_SEEDS
+    )
+
+
 def test_inputs_and_locked_patient() -> None:
     roots = _base()
     inputs = json.loads((roots["root"] / "inputs.json").read_text())
@@ -262,6 +271,57 @@ def test_missing_channel_record_skips_arms() -> None:
         folder.mkdir(parents=True)
         (folder / "sae_channels.txt").write_text("\n".join(order) + "\n")
     assert driver.channel_order(roots["readout"])[0] is None
+
+
+def test_lead_stage() -> None:
+    roots = _copy(_base())
+    driver.gates(roots["root"], roots["readout"], roots["encoder"])
+    _expect(ValueError, lambda: _lead(roots), "a root without a read must be refused")  # no summary yet
+    _read(roots)
+    record = _lead(roots)
+    gates = json.loads((roots["root"] / "lead_gates.json").read_text())
+    assert gates["status"] == "pass" and gates["arms"] == 33 and gates["cell_gap"] < 1e-12 and gates["refit_gap"] < 1e-8
+    assert record["outcome"] in ("survives", "dropped") and set(record["conditions"]) == {"P", "M"}
+    selection, median = record["deciding"]["P_selection"], record["deciding"]["M_median_cell"]
+    assert 0 < selection["p"] <= 1 and selection["permutations"] == 300
+    assert selection["arm"] in set(core.arm_names()) | {"Spectral", "HYDRA", "REVE"} or selection["arm"].startswith(
+        "Fusion"
+    )
+    assert 0.5 <= selection["largest"] <= 1.0  # the largest of 33 arms is never below one half here
+    assert record["conditions"]["P"] == (selection["p"] < core.LEAD_P)
+    assert record["conditions"]["M"] == (median["median"] >= core.LEAD_MEDIAN) and median["assignments"] == 2
+    cell = record["cell"]
+    assert cell["epilepsy"] > 0 and cell["non_epilepsy"] > 0
+    described = record["descriptive"]
+    assert set(described["lead_arms"]) == set(core.LEAD_ARMS)
+    assert described["null_maximum"]["p95"] >= described["null_maximum"]["median"] > 0.5
+    assert set(described["assignments"]) == {core.LEAD_ARM, core.FULL}
+    for arm in described["assignments"].values():
+        assert len(arm["values"]) == 2 and arm["cell"]["min"] <= arm["cell"]["median"] <= arm["cell"]["max"]
+    files = sorted(p.name for p in (roots["root"] / "lead").glob("*.csv"))
+    assert files == [f"scores_s{s}.csv" for s in LEAD_TEST_SEEDS]
+    frame = pl.read_csv(roots["root"] / "lead" / files[0], schema_overrides={"subject": pl.Utf8})
+    assert frame.height == 2 * N_PATIENTS and set(frame["arm"].to_list()) == {core.LEAD_ARM, core.FULL}
+    # The new assignment differs from the plan's, and it keeps every fold stratified.
+    moved = sum(row["fold"] != roots["plan"]["folds"][row["subject"]] for row in frame.to_dicts()) / frame.height
+    assert moved > 0.5
+    stamp = (roots["root"] / "lead" / files[0]).stat().st_mtime_ns
+    again = _lead(roots)  # a rerun keeps the refits and gives the same record
+    assert (roots["root"] / "lead" / files[0]).stat().st_mtime_ns == stamp
+    assert again["deciding"] == record["deciding"]
+
+
+def test_lead_blocks_on_a_changed_summary() -> None:
+    roots = _copy(_base())
+    driver.gates(roots["root"], roots["readout"], roots["encoder"])
+    _read(roots)
+    path = roots["root"] / "decomposition_summary.csv"
+    pl.read_csv(path).with_columns(pl.col("off_off") + 0.01).write_csv(path)
+    record = _lead(roots)
+    assert record["outcome"] == "blocked" and "deciding" not in record
+    gates = json.loads((roots["root"] / "lead_gates.json").read_text())
+    assert gates["status"] == "fail" and not gates["cell_ok"] and gates["refit_ok"]
+    assert not (roots["root"] / "lead").exists()  # no refit on other assignments after a failed gate
 
 
 if __name__ == "__main__":

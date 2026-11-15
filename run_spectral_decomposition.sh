@@ -8,13 +8,14 @@
 #*     bash run_spectral_decomposition.sh
 #* It runs the tests (gate 1), checks the saved features and fits the head of pass 1 on the 26 arms, checks gates 2-6
 #* (gates.json) and stops if one fails, then reads the rule (fusion_decision.json, decomposition_summary.csv). A rerun
-#* with the same ROOT skips finished arms. STAGE=read repeats only the read.
-#* Environment: ROOT, READOUT_ROOT, AUDIT_ROOT, ENCODER_ROOT, STAGE=all|read, N_BOOT=10000.
+#* with the same ROOT skips finished arms. STAGE=read repeats only the read. STAGE=lead (same ROOT, after the read)
+#* checks the post-hoc lead of the read (documentation/small_arm_lead_check_protocol.md): lead_decision.json.
+#* Environment: ROOT, READOUT_ROOT, AUDIT_ROOT, ENCODER_ROOT, STAGE=all|read|lead, N_BOOT=10000.
 #*----------------------------------------------------------------------------*
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  sed -n '3,12p' "$0" | sed 's/^#\* \{0,1\}//'
+  sed -n '3,13p' "$0" | sed 's/^#\* \{0,1\}//'
   exit 0
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -24,7 +25,11 @@ ROOT="${ROOT:-$SCRIPT_DIR/logs/spectral_decomposition/read_$(date +%Y%m%d_%H%M%S
 READOUT_ROOT="${READOUT_ROOT:?Set READOUT_ROOT to the root of frozen readout pass 1}"
 AUDIT_ROOT="${AUDIT_ROOT:?Set AUDIT_ROOT to the covariate audit root}"
 ENCODER_ROOT="${ENCODER_ROOT:?Set ENCODER_ROOT to the root of the encoder check}"
-[[ "$STAGE" =~ ^(all|read)$ ]] || { echo "ERROR: STAGE must be all or read" >&2; exit 2; }
+[[ "$STAGE" =~ ^(all|read|lead)$ ]] || { echo "ERROR: STAGE must be all, read or lead" >&2; exit 2; }
+if [[ "$STAGE" == lead ]]; then
+  [[ -n ${ROOT:-} && -f "$ROOT/decomposition_summary.csv" ]] || {
+    echo "ERROR: STAGE=lead needs the ROOT of a finished read" >&2; exit 2; }
+fi
 [[ "$N_BOOT" =~ ^[0-9]+$ ]] || { echo "ERROR: bad N_BOOT" >&2; exit 2; }
 [[ -f "$READOUT_ROOT/folds.json" && -f "$READOUT_ROOT/patients.csv" ]] || {
   echo "ERROR: $READOUT_ROOT holds no folds.json and patients.csv" >&2; exit 2; }
@@ -65,6 +70,11 @@ if [[ "$STAGE" == all ]]; then
     cat "$ROOT/gates.json"
     exit 1
   fi
+fi
+if [[ "$STAGE" == lead ]]; then
+  step lead --root "$ROOT" --readout-root "$READOUT_ROOT" --audit-root "$AUDIT_ROOT" --encoder-root "$ENCODER_ROOT"
+  cat "$ROOT/lead_decision.json"
+  exit 0
 fi
 step read --root "$ROOT" --readout-root "$READOUT_ROOT" --audit-root "$AUDIT_ROOT" --encoder-root "$ENCODER_ROOT" \
   --n-boot "$N_BOOT"
