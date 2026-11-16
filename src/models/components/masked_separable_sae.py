@@ -26,10 +26,19 @@ import torch.nn.functional as F
 from src.models.components.separable_sae import SeparableSAE, SeparableSpec
 from src.models.components.waveform_sae import WaveformTrainSpec
 
-__all__ = ["CHECKPOINT_FORMAT", "MODEL_TAG", "MaskedSeparableSAE", "MaskedSeparableSpec"]
+__all__ = [
+    "CHECKPOINT_FORMAT",
+    "MODEL_TAG",
+    "SLOW_MODEL_TAG",
+    "MaskedSeparableSAE",
+    "MaskedSeparableSpec",
+    "SlowHingeSAE",
+    "SlowHingeSpec",
+]
 
 _EPS = 1e-8
 MODEL_TAG = "masked_separable_sae"
+SLOW_MODEL_TAG = "slow_hinge_separable_sae"
 CHECKPOINT_FORMAT = 1
 
 
@@ -189,3 +198,150 @@ class MaskedSeparableSAE(SeparableSAE):
             self._epoch_sums["leak"] += float(leak[negative].sum())
             self._epoch_sums["windows"] += float(negative.sum()) * values.shape[-1]
         return hinge
+
+
+@dataclass(frozen=True)
+class SlowHingeSpec(MaskedSeparableSpec):
+    """The masked geometry with the hinge of the redesign (``documentation/masked_hinge_redesign_protocol.md``).
+
+    Parameters
+    ----------
+    hinge_strength : float
+        The strength ``eta`` of the slow hinge step, in Adam steps for an atom that leaks in every label-0 window.
+    hinge_start_epoch : int
+        The first epoch (1-based) with a hinge step; the epochs before it train with the mask alone.
+    hinge_ramp_epochs : int
+        The hinge reaches its full strength in this many epochs, linearly; 0 gives full strength at once.
+
+    ``hinge_weight`` is not used: the hinge is not a term of the loss.
+    """
+
+    hinge_strength: float = 1.0
+    hinge_start_epoch: int = 11
+    hinge_ramp_epochs: int = 5
+
+
+class SlowHingeSAE(MaskedSeparableSAE):
+    """A masked dictionary whose hinge acts through a step of its own (section 3 of the redesign protocol).
+
+    The reconstruction loss keeps its Adam step, without a hinge term. During the chunks of a batch the model
+    collects the gradient of the hinge (summed over the label-0 segments, without the patient weights of the
+    reconstruction loss) and how often each epilepsy-only atom leaks. After the optimizer step,
+    ``after_optimizer_step`` moves each such atom against its hinge gradient by
+    ``eta * ramp * lr * sqrt(n) * leak fraction``, where ``n`` is the number of stored entries of an atom. The loop
+    then applies the unit-norm projection, as after every step.
+
+    Raises
+    ------
+    TypeError
+        If ``spec`` is not a ``SlowHingeSpec``.
+    ValueError
+        As ``MaskedSeparableSAE``, and if the strength or the ramp is negative or the start epoch is below 1.
+    """
+
+    spec: SlowHingeSpec
+    model_tag = SLOW_MODEL_TAG
+    checkpoint_format = CHECKPOINT_FORMAT
+
+    def __init__(
+        self,
+        spec: SlowHingeSpec | None = None,
+        train_spec: WaveformTrainSpec | None = None,
+        random_state: int = 42,
+        device: str | None = "auto",
+        pretrained: str | Path | None = None,
+        chunk_windows: int = 8,
+    ) -> None:
+        super().__init__(spec, train_spec, random_state, device, pretrained, chunk_windows)
+        self._epoch = 1
+        self._hinge_grad: torch.Tensor | None = None
+        self._leak_count: torch.Tensor | None = None
+        self._leak_windows = 0.0
+        self._step_sums = dict.fromkeys(("steps", "moved", "norm"), 0.0)
+
+    def _check_specs(self) -> None:
+        """Also check the fields of the slow hinge."""
+        super()._check_specs()
+        spec = self.spec
+        if not isinstance(spec, SlowHingeSpec):
+            raise TypeError(f"SlowHingeSAE needs a SlowHingeSpec, got {type(spec).__name__}")
+        if spec.hinge_strength < 0 or spec.hinge_ramp_epochs < 0 or spec.hinge_start_epoch < 1:
+            raise ValueError("the slow hinge needs strength >= 0, ramp epochs >= 0 and a start epoch >= 1")
+
+    def ramp(self, epoch: int | None = None) -> float:
+        """The share of the full hinge strength in an epoch (1-based): 0 before the start, then a linear rise."""
+        spec = self.spec
+        done = (self._epoch if epoch is None else epoch) - (spec.hinge_start_epoch - 1)
+        if done <= 0:
+            return 0.0
+        return 1.0 if spec.hinge_ramp_epochs == 0 else min(1.0, done / spec.hinge_ramp_epochs)
+
+    def selectable_epoch(self, epoch: int) -> bool:
+        """Whether the state after an epoch (1-based) can be the selected dictionary: only at full hinge strength.
+
+        The loop selects the epoch with the smallest validation loss. Without this floor it could select an epoch
+        before the hinge acts.
+        """
+        return self.ramp(epoch) >= 1.0
+
+    def _reset_step(self) -> None:
+        self._hinge_grad, self._leak_count, self._leak_windows = None, None, 0.0
+
+    def begin_epoch(self, epoch: int) -> None:
+        """Set the epoch (1-based) of the next training steps and drop what earlier passes collected."""
+        self._epoch = epoch
+        self._reset_step()
+
+    def _hinge(self, values: torch.Tensor, negative: torch.Tensor) -> torch.Tensor:
+        """Also count, per epilepsy-only atom, the label-0 windows in which it would be selected without the mask."""
+        hinge = super()._hinge(values, negative)
+        shared, top_r = self.spec.n_shared, self.spec.top_r
+        with torch.no_grad():
+            theta = values[:, :shared].topk(top_r, dim=1).values[:, -1]
+            leaks = (values[:, shared:] > theta.unsqueeze(1)) & negative[:, None, None]
+            count = leaks.sum((0, 2)).double()
+            self._leak_count = count if self._leak_count is None else self._leak_count + count
+            self._leak_windows += float(negative.sum()) * values.shape[-1]
+        return hinge
+
+    def batch_penalty(self) -> float:
+        """No term of the loss. While the hinge is on, collect the gradient of the hinge of the last masked pass."""
+        penalty = self._penalty
+        if penalty is not None and penalty.requires_grad and self.ramp() > 0 and self.spec.hinge_strength > 0:
+            gradient = torch.autograd.grad(penalty.sum(), self.atoms, retain_graph=True, allow_unused=True)[0]
+            if gradient is not None:
+                self._hinge_grad = gradient if self._hinge_grad is None else self._hinge_grad + gradient
+        return 0.0
+
+    @torch.no_grad()
+    def after_optimizer_step(self, lr: float) -> None:
+        """The slow hinge step of the batch; the caller applies the unit-norm projection afterwards."""
+        gradient, count, windows = self._hinge_grad, self._leak_count, self._leak_windows
+        self._reset_step()
+        scale = self.spec.hinge_strength * self.ramp() * lr
+        if gradient is None or count is None or windows == 0 or scale == 0:
+            return
+        shared = self.spec.n_shared
+        rows = gradient[shared:]
+        norms = rows.norm(dim=1)
+        fraction = (count / windows).to(rows.dtype)
+        size = scale * rows.shape[1] ** 0.5 * fraction  # the length of each atom's step
+        move = (norms > 0) & (fraction > 0)
+        step = torch.zeros_like(rows)
+        step[move] = rows[move] / norms[move, None] * size[move, None]
+        self.atoms[shared:] -= step
+        self._step_sums["steps"] += 1.0
+        self._step_sums["moved"] += float(move.sum())
+        self._step_sums["norm"] += float(size[move].sum())
+
+    def epoch_extras(self) -> dict[str, float]:
+        """The records of ``MaskedSeparableSAE``, with the ramp and the slow steps of the epoch: the mean number of
+        atoms moved per step and the mean length of their steps."""
+        sums = self._step_sums
+        record = super().epoch_extras() | {
+            "hinge_ramp": self.ramp(),
+            "hinge_atoms_moved": sums["moved"] / max(sums["steps"], 1.0),
+            "hinge_step_norm": sums["norm"] / max(sums["moved"], 1.0),
+        }
+        self._step_sums = dict.fromkeys(sums, 0.0)
+        return record

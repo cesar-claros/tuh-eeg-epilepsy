@@ -65,13 +65,23 @@ def _roots(tmp: Path, spectral: float = 0.0) -> dict:
     return roots | {"plan": plan}
 
 
-def _write_fold_files(roots: dict, case: str, *, violations: float | None = 0.0, rows_gap: float = 0.0) -> None:
+def _write_fold_files(
+    roots: dict,
+    case: str,
+    *,
+    violations: float | None = 0.0,
+    rows_gap: float = 0.0,
+    names: list[str] | None = None,
+    root: Path | None = None,
+) -> None:
     """The splits, the dictionary folders with their training tables, and a count file per fold for ``case``:
-    ``signal`` (the epilepsy-only atoms of ``sup`` win more in epilepsy patients), ``null`` or ``inverted``."""
+    ``signal`` (the epilepsy-only atoms of the supervised arms win more in epilepsy patients), ``null`` or
+    ``inverted``. ``names`` (default: the 7 dictionaries of this read) and ``root`` serve the tests of the hinge
+    redesign."""
     rng = np.random.default_rng(1)
-    plan, root = roots["plan"], roots["root"]
+    plan, root = roots["plan"], roots["root"] if root is None else root
     driver.split(root, roots["sweep"], roots["readout"])
-    names = core.dictionary_names()
+    names = core.dictionary_names() if names is None else names
     rate = {"signal": (0.05, 0.25), "null": (0.1, 0.1), "inverted": (0.25, 0.05)}[case]
     slots = 4 * N_WINDOWS
     for fold in range(5):
@@ -81,14 +91,14 @@ def _write_fold_files(roots: dict, case: str, *, violations: float | None = 0.0,
             (folder / "sae_state.pt").write_bytes(b"")
             table = {"epoch": [1, 2], "val_residual_frac": [0.9, 0.8]}
             if violations is not None:
-                table["mask_violations"] = [0.0, violations if name == "sup_s2" else 0.0]
+                table["mask_violations"] = [0.0, violations if name == names[1] else 0.0]
             pl.DataFrame(table).write_csv(folder / "sae_training.csv")
         held = sorted(s for s, f in plan["folds"].items() if f == fold)
         subject = np.repeat(held, N_SEGMENTS)
         label = np.array([plan["labels"][s] for s in subject])
         arrays: dict[str, list[np.ndarray]] = {key: [] for key in (*driver.PER_SEGMENT, "atom_wins")}
         for name in names:
-            informed = core.parse_name(name)[0] in ("sup", "strong")
+            informed = name.split("_")[0] in ("sup", "strong", "sup2")
             share = np.where(label == 1, rate[1], rate[0]) if informed else np.full(len(label), 0.1)
             epilepsy = rng.binomial(slots, share)
             arrays["wins_epilepsy"].append(epilepsy)

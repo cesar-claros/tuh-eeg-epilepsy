@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -175,27 +176,32 @@ def _model(context: dict[str, Any], chosen: Setting, arm: str) -> Any:
     return model
 
 
-def fit(args: argparse.Namespace) -> None:
-    """Train one dictionary of one fold; a finished dictionary is skipped.
+def train_dictionary(
+    args: argparse.Namespace,
+    name: str,
+    chosen: Setting,
+    build: Callable[[dict[str, Any], Setting], Any],
+    permuted: bool,
+    described: dict[str, Any],
+) -> None:
+    """Train the dictionary ``name`` of one fold with the model of ``build``; a finished dictionary is skipped.
 
     It mirrors ``class_dictionary.fit``: the seeds, loaders and training settings of the sweep, with all dictionary
-    patients, at most ``SEGMENT_CAP`` distinct segments per patient, and the arm's hinge weight. The control arm
-    trains on the permuted labels of the split.
+    patients and at most ``SEGMENT_CAP`` distinct segments per patient. With ``permuted``, the model trains on the
+    permuted labels of the split. ``described`` joins the provenance record of the fit.
     """
     import lightning
 
     from src.utils import split_provenance
 
-    root, fold, name = args.root.resolve(), args.fold, f"{args.arm}_s{args.seed}"
+    root, fold = args.root.resolve(), args.fold
     check_root(root, args.sweep_root, args.readout_root)
-    arm, _ = parse_name(name)
     output = dictionary_dir(root, name, fold)
     if (output / CHECKPOINT).is_file():
         logger.info(f"{output.name}: finished")
         return
     record = _load_json(split_file(root, fold))
     require_deterministic_cublas()
-    chosen = setting(name)
     context = _seeded(args, chosen, fold)
     cohort, seed = context["cohort"], context["seed"]
     torch.use_deterministic_algorithms(True)
@@ -212,8 +218,8 @@ def fit(args: argparse.Namespace) -> None:
         for part in ("train", "val")
     ]
     lightning.seed_everything(seed, workers=True)
-    model = _model(context, chosen, arm)
-    if arm == "perm":
+    model = build(context, chosen)
+    if permuted:
         model.label_override = dict(record["permuted_labels"])
     output.mkdir(parents=True, exist_ok=True)
     _save_json(
@@ -224,8 +230,8 @@ def fit(args: argparse.Namespace) -> None:
             "setting": chosen.name,
             "seed": seed,
             "n_shared": N_SHARED,
-            "hinge_weight": HINGE[arm],
-            "labels": "permuted" if arm == "perm" else "true",
+            **described,
+            "labels": "permuted" if permuted else "true",
             "train_patients": len(train),
             "train_segments": len(rows),
             "val_patients": len(record["monitor_patients"]),
@@ -238,6 +244,21 @@ def fit(args: argparse.Namespace) -> None:
     model.save_artifacts(output)
 
 
+def fit(args: argparse.Namespace) -> None:
+    """Train one dictionary of one fold (arm, seed) with the arm's hinge weight; the control arm trains on the
+    permuted labels of the split."""
+    name = f"{args.arm}_s{args.seed}"
+    arm, _ = parse_name(name)
+    train_dictionary(
+        args,
+        name,
+        setting(name),
+        lambda context, chosen: _model(context, chosen, arm),
+        arm == "perm",
+        {"hinge_weight": HINGE[arm]},
+    )
+
+
 @torch.no_grad()
 def _segment_counts(model: Any, rows: torch.Tensor, valid: torch.Tensor) -> dict[str, np.ndarray]:
     """What each atom group wins on one batch, coded without a mask, with the residual energy per segment."""
@@ -247,9 +268,23 @@ def _segment_counts(model: Any, rows: torch.Tensor, valid: torch.Tensor) -> dict
     return counts | {"residual_total": residual.double().pow(2).sum(dim=(1, 2)).cpu().numpy()}
 
 
+def _loaded(context: dict[str, Any], root: Path, name: str, fold: int) -> Any:
+    """A dictionary of this read, loaded from its checkpoint."""
+    model = _model(context, setting(name), parse_name(name)[0])
+    model.load_checkpoint(dictionary_dir(root, name, fold) / CHECKPOINT)
+    return model
+
+
 def score(args: argparse.Namespace) -> None:
-    """The counts of one fold's held-out segments under its 7 dictionaries, with the rows gap against the sweep
-    (gate 3), a repeat of the first batches (gate 6) and the failed loads (gate 7).
+    """The counts of one fold's held-out segments under its 7 dictionaries (``score_fold``)."""
+    root = args.root.resolve()
+    score_fold(args, dictionary_names(), lambda context, name: _loaded(context, root, name, args.fold))
+
+
+def score_fold(args: argparse.Namespace, names: Sequence[str], load: Callable[[dict[str, Any], str], Any]) -> None:
+    """The counts of one fold's held-out segments under the dictionaries ``names``, with the rows gap against the
+    sweep (gate 3), a repeat of the first batches (gate 6) and the failed loads (gate 7). ``load`` gives the loaded
+    model of a name.
 
     Raises
     ------
@@ -265,15 +300,12 @@ def score(args: argparse.Namespace) -> None:
     if path.is_file():
         logger.info(f"{path.name}: finished")
         return
-    names = dictionary_names()
+    names = list(names)
     missing = [n for n in names if not (dictionary_dir(root, n, fold) / CHECKPOINT).is_file()]
     if missing:
         raise FileNotFoundError(f"fold {fold} misses the dictionaries {missing}: fit them first")
     context = _seeded(args, ADOPTED, fold)
-    models = {}
-    for name in names:
-        models[name] = _model(context, setting(name), parse_name(name)[0])
-        models[name].load_checkpoint(dictionary_dir(root, name, fold) / CHECKPOINT)
+    models = {name: load(context, name) for name in names}
     scored = sorted(s for s, f in context["plan"]["folds"].items() if f == fold)
     view = _fixed_view(context, scored)
     subjects = _text_array(view.plan["subject"])
@@ -338,9 +370,10 @@ def _violations(folder: Path) -> float | None:
     return float(table["mask_violations"].sum()) if "mask_violations" in table.columns else None
 
 
-def gates(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
-    """Gates 2 to 7 of section 6 on the split and count files and the training tables."""
-    names = dictionary_names()
+def gates(root: Path, plan: dict[str, Any], names: Sequence[str] | None = None) -> dict[str, Any]:
+    """Gates 2 to 7 of section 6 on the split and count files and the training tables of the dictionaries ``names``
+    (default: the 7 of this read)."""
+    names = dictionary_names() if names is None else list(names)
     splits = [_load_json(split_file(root, f)) for f in range(N_FOLDS)]
     split_checks = [check_split(s, plan["labels"], plan["folds"]) for s in splits]
     files = [_load_npz(count_file(root, f)) for f in range(N_FOLDS)]
@@ -412,14 +445,16 @@ def _arm(counts: dict[str, Any], shares: dict[str, np.ndarray], arm: str, seeds:
     return ArmScores(cohort["subject"], cohort["fold"], cohort["label"], values)
 
 
-def _per_arm(counts: dict[str, Any], root: Path) -> dict[str, dict[str, float]]:
+def _per_arm(
+    counts: dict[str, Any], root: Path, arm_of: Callable[[str], str] = lambda name: parse_name(name)[0]
+) -> dict[str, dict[str, float]]:
     """Section 8 per arm, as means over its dictionaries: the leak on the held-out non-epilepsy segments, the share
     of the epilepsy-only atoms that win no window on the held-out epilepsy segments, the residual share on the
-    held-out segments, and the last validation residual of training."""
+    held-out segments, and the last validation residual of training. ``arm_of`` gives the arm of a name."""
     negative, positive = counts["label"] == 0, counts["label"] == 1
     out: dict[str, dict[str, list[float]]] = {}
     for name in counts["names"]:
-        arm = parse_name(name)[0]
+        arm = arm_of(name)
         record = out.setdefault(arm, {"leak_rate": [], "unused_epilepsy_atoms": [], "residual_share": [], "val": []})
         record["leak_rate"].append(
             float(counts["leak_windows"][name][negative].sum() / counts["windows"][negative].sum())

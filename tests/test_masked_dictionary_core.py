@@ -3,6 +3,8 @@
 Runs under pytest. Covered: the dictionary names, the permuted labels (class counts kept, never the true labels,
 fixed by the fold), the split of a fold and the checks of gate 2 on good and broken splits, the group counts of a
 known code, the shares and their seed mean, the patient scores, the training check, and the rule with its outcomes.
+For the hinge redesign: the names of the pilot and of stage 2, the reads of the pilot on known counts, the first-fit
+gate, the pilot rule with its bounds, and the outcome rule with ``collapsed``.
 """
 
 from __future__ import annotations
@@ -126,3 +128,67 @@ def test_rule() -> None:
         for c in (True, False)
     }
     assert reached == set(core.OUTCOMES)
+
+
+# ---------------------------------------------------------------------- hinge redesign
+
+
+def test_redesign_names() -> None:
+    names = core.pilot_names()
+    assert names[0] == "sup_e1_s1"  # the dictionary of the first-fit gate
+    assert names == [f"{arm}_e{eta}_s1" for eta in (1, 10, 100, 1000) for arm in ("sup", "perm")]
+    assert core.pilot_name("perm", 1000.0) == "perm_e1000_s1" and core.eta_label(10.0) == "10"
+    for arm, eta in (("mask", 1.0), ("sup", 5.0)):
+        with pytest.raises(ValueError):
+            core.pilot_name(arm, eta)
+    assert core.stage2_names() == ["sup2_s1", "sup2_s2", "perm2_s1", "perm2_s2"]
+    assert core.parse_stage2("perm2_s2") == ("perm2", 2)
+    for bad in ("sup_s1", "sup2_s3", "mask2_s1"):
+        with pytest.raises(ValueError):
+            core.parse_stage2(bad)
+    assert not set(core.stage2_names()) & set(core.dictionary_names())  # no name of the first run is reused
+    assert (core.WARM_EPOCHS, core.RAMP_EPOCHS, core.MIN_USED, core.LEAK_FACTOR) == (10, 5, 8, 0.5)
+    assert (core.PILOT_FOLD, core.PILOT_SEED, core.REFERENCE) == (0, 1, "mask_s1")
+    assert {arm for arm, _ in core.SCORES2.values()} == set(core.SEEDS2)
+
+
+def test_pilot_reads() -> None:
+    wins = np.zeros((4, 80), dtype=np.int64)
+    wins[:, :64] = 5
+    wins[0, 64], wins[1, 65], wins[1, 66] = 3, 1, 2  # group 1 (segments 0 and 1): three atoms in use
+    wins[2, 70] = 9  # group 0: an atom that wins only there does not count as in use
+    assert core.used_atoms(wins) == 4 and core.used_atoms(wins[:2]) == 3
+    reads = core.pilot_reads(wins, np.array([9, 9, 4, 0]), np.array([10, 10, 10, 10]), np.array([1, 1, 0, 0]))
+    assert reads == {"use": 3, "leak": 0.2}  # 4 of the 20 windows of group 0
+    with pytest.raises(ValueError, match="both groups"):
+        core.pilot_reads(wins, np.zeros(4), np.full(4, 10), np.ones(4, dtype=int))
+
+
+def test_first_fit_check() -> None:
+    assert core.first_fit_check(0.1, [1.0] * 8 + [0.0] * 8) == {"leaks": True, "atoms_in_use": True}
+    assert core.first_fit_check(0.0, [1.0] * 16) == {"leaks": False, "atoms_in_use": True}
+    assert core.first_fit_check(0.1, [1.0] * 7 + [0.0] * 9) == {"leaks": True, "atoms_in_use": False}
+
+
+def test_pilot_rule() -> None:
+    reads = {
+        1.0: {"use": 16, "leak": 0.15},  # in use, but the leak is above half of the reference's
+        10.0: {"use": 12, "leak": 0.10},  # works, at the bound of the leak
+        100.0: {"use": 8, "leak": 0.02},  # works, at the bound of the use
+        1000.0: {"use": 7, "leak": 0.0},  # the atoms are lost
+    }
+    rule = core.pilot_rule(reads, reference_leak=0.2)
+    assert rule["works"] == {1.0: False, 10.0: True, 100.0: True, 1000.0: False}
+    assert rule["outcome"] == "go" and rule["eta_star"] == 100.0  # the largest strength that works
+    none = core.pilot_rule({1.0: reads[1.0], 1000.0: reads[1000.0]}, reference_leak=0.2)
+    assert none == {"works": {1.0: False, 1000.0: False}, "outcome": "no_working_hinge", "eta_star": None}
+    assert core.pilot_rule({10.0: {"use": 12, "leak": 0.1001}}, reference_leak=0.2)["outcome"] == "no_working_hinge"
+
+
+def test_redesign_outcome() -> None:
+    assert core.redesign_outcome(False, False, True, True, True) == "blocked"  # a gate of the first protocol
+    assert core.redesign_outcome(True, False, True, True, True) == "collapsed"  # gate 8: no score counts
+    for separates, drug, gap in ((True, True, True), (True, False, False), (False, True, False), (False, False, True)):
+        expected = core.masked_outcome(True, separates, drug, gap)
+        assert core.redesign_outcome(True, True, separates, drug, gap) == expected
+    assert set(core.OUTCOMES2) == {*core.OUTCOMES, "collapsed"}

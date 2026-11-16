@@ -305,6 +305,8 @@ def fit_patient_reconstruction(
     for epoch in range(spec.epochs):
         epoch_started = time.perf_counter()
         train.batch_sampler.epoch = epoch
+        if hasattr(model, "begin_epoch"):
+            model.begin_epoch(epoch + 1)
         total, patients, seen, skipped, steps = 0.0, 0, 0, 0, 0
         epoch_draws = []
         statistics = (
@@ -317,6 +319,8 @@ def fit_patient_reconstruction(
                 labels = model.resolve_labels(labels, train.dataset.subjects[patient.numpy()])
             loss, invalid = reconstruction_backward(model, x, patient, statistics, labels)
             optimizer.step()
+            if hasattr(model, "after_optimizer_step"):
+                model.after_optimizer_step(spec.lr)  # a step of the model's own, before the projection
             with torch.no_grad():
                 model.atoms.copy_(model._constrain(model.atoms))
             n = int(patient.unique().numel())
@@ -338,7 +342,8 @@ def fit_patient_reconstruction(
             else None
         )
         val_loss = float(summary.reconstruction.mean()) if summary is not None else math.nan
-        if val_loss < best:
+        selectable = not hasattr(model, "selectable_epoch") or model.selectable_epoch(epoch + 1)
+        if val_loss < best and selectable:
             best, best_atoms, best_epoch = val_loss, model.atoms.detach().clone(), epoch + 1
             best_summary = summary
         record = {

@@ -1,7 +1,8 @@
 """Pure logic of the class-masked separable dictionary: arms, permuted labels, group counts, scores and the rule.
 
 Protocol: ``documentation/masked_separable_sae_protocol.md``. ``src/masked_dictionary.py`` holds the code that reads
-signals and trains. The constants are fixed before any result (protocol sections 4 to 7).
+signals and trains. The constants are fixed before any result (protocol sections 4 to 7). The last part holds the
+pilot and the rule of the hinge redesign (``documentation/masked_hinge_redesign_protocol.md``).
 """
 
 from __future__ import annotations
@@ -162,3 +163,120 @@ def masked_outcome(gates_ok: bool, separates: bool, drug: bool, gap: bool) -> st
             return "closes_gap"
         return "adds_to_drug" if drug else "separates_only"
     return "review" if drug else "no_signal"
+
+
+# ---------------------------------------------------------------------- hinge redesign
+# Protocol: ``documentation/masked_hinge_redesign_protocol.md``; driver: ``src/masked_hinge.py``. The constants are
+# fixed before any result (protocol sections 3 to 7).
+
+ETA_GRID = (1.0, 10.0, 100.0, 1000.0)  # the strengths of the slow hinge step in the pilot (section 4)
+PILOT_FOLD, PILOT_SEED = 0, 1
+PILOT_ARMS = ("sup", "perm")
+REFERENCE = "mask_s1"  # the dictionary of the first run without a hinge, at the pilot's fold and seed
+WARM_EPOCHS, RAMP_EPOCHS = 10, 5  # epochs with the mask alone, then the linear ramp of the hinge
+MIN_USED = 8  # of the 16 epilepsy-only atoms: the pilot rule, its gates and gate 8
+LEAK_FACTOR = 0.5  # the pilot rule: a leak of at most this share of the reference's
+SEEDS2 = {"sup2": (1, 2), "perm2": (1, 2)}  # the arms of stage 2
+SCORES2 = {
+    "Score": ("sup2", (1, 2)),
+    "Score-perm": ("perm2", (1, 2)),
+    "Score-s1": ("sup2", (1,)),
+    "Score-s2": ("sup2", (2,)),
+}
+OUTCOMES2 = (*OUTCOMES, "collapsed")
+
+
+def eta_label(eta: float) -> str:
+    """The strength as it appears in names and records: ``1``, ``10``, ``100``, ``1000``."""
+    return f"{eta:g}"
+
+
+def pilot_name(arm: str, eta: float) -> str:
+    """The name of a pilot dictionary, for example ``sup_e10_s1``.
+
+    Raises
+    ------
+    ValueError
+        If the arm or the strength is not one of the pilot's.
+    """
+    if arm not in PILOT_ARMS or eta not in ETA_GRID:
+        raise ValueError(f"unknown pilot dictionary: arm {arm!r}, strength {eta!r}")
+    return f"{arm}_e{eta_label(eta)}_s{PILOT_SEED}"
+
+
+def pilot_names() -> list[str]:
+    """The 8 pilot dictionaries; the first is the one that the first-fit gate reads."""
+    return [pilot_name(arm, eta) for eta in ETA_GRID for arm in PILOT_ARMS]
+
+
+def stage2_names() -> list[str]:
+    """The 4 dictionaries of one fold in stage 2: ``sup2`` and ``perm2`` at seeds 1 and 2."""
+    return [f"{arm}_s{seed}" for arm, seeds in SEEDS2.items() for seed in seeds]
+
+
+def parse_stage2(name: str) -> tuple[str, int]:
+    """The arm and the seed of a stage-2 dictionary name.
+
+    Raises
+    ------
+    ValueError
+        If the name is not one of ``stage2_names``.
+    """
+    if name not in stage2_names():
+        raise ValueError(f"unknown stage-2 dictionary {name!r}")
+    arm, _, seed = name.rpartition("_s")
+    return arm, int(seed)
+
+
+def used_atoms(atom_wins: np.ndarray, n_shared: int = N_SHARED) -> int:
+    """The number of epilepsy-only atoms with at least one win in ``atom_wins`` ``(segments, K)``."""
+    return int((np.asarray(atom_wins)[:, n_shared:].sum(axis=0) > 0).sum())
+
+
+def pilot_reads(
+    atom_wins: np.ndarray, leak_windows: np.ndarray, windows: np.ndarray, group: np.ndarray, n_shared: int = N_SHARED
+) -> dict[str, float]:
+    """The two reads of section 4 for one dictionary on segments coded with no mask.
+
+    ``use`` counts the epilepsy-only atoms with a win on the segments of group 1. ``leak`` is the share of the
+    windows of the segments of group 0 in which an epilepsy-only atom wins.
+
+    Raises
+    ------
+    ValueError
+        If a group has no segment.
+    """
+    group = np.asarray(group)
+    first, zero = group == 1, group == 0
+    if not first.any() or not zero.any():
+        raise ValueError("the reads need segments of both groups")
+    return {
+        "use": used_atoms(np.asarray(atom_wins)[first], n_shared),
+        "leak": float(np.asarray(leak_windows)[zero].sum() / np.asarray(windows)[zero].sum()),
+    }
+
+
+def first_fit_check(leak_rate: float, won: Sequence[float]) -> dict[str, bool]:
+    """Stage-1 gate 2 at the end of the last epoch with the mask alone: the label-0 training segments still leak,
+    and at least ``MIN_USED`` epilepsy-only atoms won a training window (``won``: the won windows of each)."""
+    return {"leaks": leak_rate > 0, "atoms_in_use": int(sum(w > 0 for w in won)) >= MIN_USED}
+
+
+def pilot_rule(reads: Mapping[float, Mapping[str, float]], reference_leak: float) -> dict[str, Any]:
+    """The rule of section 4 on the ``sup`` reads of every strength: the settings that work, the outcome, and the
+    largest strength that works."""
+    works = {eta: bool(r["use"] >= MIN_USED and r["leak"] <= LEAK_FACTOR * reference_leak) for eta, r in reads.items()}
+    chosen = [eta for eta, ok in works.items() if ok]
+    return {
+        "works": works,
+        "outcome": "go" if chosen else "no_working_hinge",
+        "eta_star": max(chosen) if chosen else None,
+    }
+
+
+def redesign_outcome(gates_ok: bool, used_ok: bool, separates: bool, drug: bool, gap: bool) -> str:
+    """The rule of section 7: ``blocked`` if a gate of the first protocol fails, ``collapsed`` if gate 8 fails,
+    otherwise the outcome of the first protocol."""
+    if not gates_ok:
+        return "blocked"
+    return masked_outcome(True, separates, drug, gap) if used_ok else "collapsed"
