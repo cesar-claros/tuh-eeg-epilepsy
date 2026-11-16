@@ -183,10 +183,15 @@ def summarize_patients(
     loader_wait, compute = 0.0, 0.0
     with tqdm(total=len(loader.dataset), desc=description, unit="segment") as progress:
         ready = time.perf_counter()
-        for x, _, patient, _ in loader:
+        for x, labels, patient, _ in loader:
             loaded = time.perf_counter()
             loader_wait += loaded - ready
+            masked = hasattr(model, "set_batch_labels")
+            if masked:
+                model.set_batch_labels(model.resolve_labels(labels, loader.dataset.subjects[patient.numpy()]))
             loss, features, zero, usable = segment_values(model, x, statistics)
+            if masked:
+                model.set_batch_labels(None)
             index = patient.to(model.device)[usable]
             values = torch.cat([features, loss[:, None], zero[:, None]], dim=1)[usable]
             sums.index_add_(0, index, values.double())
@@ -195,6 +200,8 @@ def summarize_patients(
             compute += time.perf_counter() - loaded
             progress.update(len(x))
             ready = time.perf_counter()
+    if hasattr(model, "epoch_extras"):
+        model.epoch_extras()  # drop the records of these passes: the training table holds training passes only
     if bool((numbers == 0).any()):
         empty = loader.dataset.subjects[(numbers == 0).cpu().numpy()].tolist()
         raise ValueError(f"patients have no usable segments: {empty}; audit signal validity")
@@ -248,17 +255,26 @@ def reconstruction_backward(
     x: torch.Tensor,
     patient: torch.Tensor,
     statistics: tuple[torch.Tensor, torch.Tensor] | None = None,
+    labels: torch.Tensor | None = None,
 ) -> tuple[float, int]:
     """Accumulate the mean-of-patient-means gradient in segment chunks; perform no optimizer step.
 
     With ``statistics``, also add the summed statistics of the usable segments
     (``WaveformSAE._statistics``, no gradient), including the won windows per atom.
+    A model with the hook ``set_batch_labels`` (the class-masked dictionary) gets the
+    ``labels`` of every chunk, and its ``batch_penalty`` is added to the chunk's losses.
     """
     _, weights = _batch_weights(model, x, patient)
+    masked = labels is not None and hasattr(model, "set_batch_labels")
     total = 0.0
     for start in range(0, len(x), model.train_spec.segment_batch):
         stop = start + model.train_spec.segment_batch
+        if masked:
+            model.set_batch_labels(labels[start:stop])
         losses, _, _, _ = segment_values(model, x[start:stop], statistics)
+        if masked:
+            losses = losses + model.batch_penalty()
+            model.set_batch_labels(None)
         loss = (losses * weights[start:stop]).sum()
         loss.backward()
         total += float(loss.detach())
@@ -295,9 +311,11 @@ def fit_patient_reconstruction(
             torch.zeros(7, dtype=torch.float64, device=model.device),
             torch.zeros(4, model.spec.n_atoms, dtype=torch.float64, device=model.device),
         )
-        for x, _, patient, indices in tqdm(train, desc=f"Patient reconstruction {epoch + 1}/{spec.epochs}"):
+        for x, labels, patient, indices in tqdm(train, desc=f"Patient reconstruction {epoch + 1}/{spec.epochs}"):
             optimizer.zero_grad(set_to_none=True)
-            loss, invalid = reconstruction_backward(model, x, patient, statistics)
+            if hasattr(model, "resolve_labels"):
+                labels = model.resolve_labels(labels, train.dataset.subjects[patient.numpy()])
+            loss, invalid = reconstruction_backward(model, x, patient, statistics, labels)
             optimizer.step()
             with torch.no_grad():
                 model.atoms.copy_(model._constrain(model.atoms))
@@ -309,6 +327,7 @@ def fit_patient_reconstruction(
             steps += 1
             epoch_draws.append(indices.tolist())
         moved = model._recenter(optimizer) if spec.recenter_atoms and epoch + 1 < spec.epochs else 0
+        extras = model.epoch_extras() if hasattr(model, "epoch_extras") else {}  # training passes only
         if model.device.type == "cuda":
             torch.cuda.synchronize(model.device)
         training_seconds = time.perf_counter() - epoch_started
@@ -338,6 +357,7 @@ def fit_patient_reconstruction(
             "n_steps": float(steps),
             "n_recentered": float(moved),
             **model._won_window_summary(epoch + 1, *statistics),
+            **extras,
         }
         model.history.append(record)
         saved_draws.append(epoch_draws)
