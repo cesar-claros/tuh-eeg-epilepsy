@@ -150,6 +150,8 @@ configs/local/default.yaml
 /data/v3.0.0/00_epilepsy/
 /data/v3.0.0/01_no_epilepsy/
 /data/v3.0.0/DOCS/
+# The metadata spreadsheet holds patient records: never commit it.
+/data/v3.0.0/*.xlsx
 /data/MNIST/
 /diagnostics/psd_segments/
 /diagnostics/spectrograms/

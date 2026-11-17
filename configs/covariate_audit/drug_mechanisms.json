@@ -1,0 +1,13 @@
+{
+  "source": "documentation/drug_signature_detection_protocol.md, section 4 (Sills and Rogawski 2020, Table 1; Loescher and Klein 2021, Table 2)",
+  "groups": {
+    "sodium": ["phenytoin", "carbamazepine", "lamotrigine", "lacosamide", "oxcarbazepine"],
+    "sv2a": ["levetiracetam"],
+    "gaba": ["phenobarbital", "primidone", "clobazam"],
+    "several": ["valproate", "topiramate", "zonisamide", "felbamate"]
+  },
+  "wide": {
+    "sodium": ["valproate", "topiramate", "zonisamide"],
+    "gaba": ["topiramate", "felbamate"]
+  }
+}
