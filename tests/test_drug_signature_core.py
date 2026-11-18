@@ -4,7 +4,8 @@ Runs under pytest. Covered: the contrasts and the deciding tests; the side of a 
 "added" and "removed"; a consistent report; a patient with both sides and the floor of 4 segments; the control
 halves and the control patients; the band-power layout and the four measures; the alpha frequency on spectra with a
 known peak (gate 5 at the level of the spectrum); the patient difference with equal weight for sessions; the test
-against no change and the test against time, with and without a planted effect; and every outcome of the rule.
+against no change and the test against time, with and without a planted effect; the strata and the stratified test
+against time of amendment A1, on a planted time confound; and every outcome of the rule.
 """
 
 from __future__ import annotations
@@ -159,6 +160,58 @@ def test_time_test() -> None:
     assert drift["p"] > 0.05
     assert not core.passes_time({"ran": False})
     assert core.passes_change(0.016, 3) and not core.passes_change(0.017, 3) and core.passes_change(0.05, 1)
+
+
+def test_strata() -> None:
+    assert core.stratum(0.0, True) == "same_year|same_acquisition"
+    assert core.stratum(0.0, False) == "same_year|other_acquisition"
+    assert core.stratum(1.5, True) == "later_year|same_acquisition"
+    assert core.stratum(0.5, False) == "later_year|other_acquisition"
+    assert {core.stratum(g, a) for g in (0.0, 2.0) for a in (True, False)} == set(core.STRATA)
+    entry = core.control_entry(["with", "unknown", "with", "with"], [4, 9, 4, 4])
+    assert (entry["earlier"], entry["later"]) == ([0, 2], [3])  # the unknown session is not counted
+    assert core.control_stratum(entry, [2010, 2015, 2010, 2010], ["a", "b", "a", "a"]) == "same_year|same_acquisition"
+    assert core.control_stratum(entry, [2010, 2010, 2010, 2012], ["a", "a", "a", "a"]) == "later_year|same_acquisition"
+    assert core.control_stratum(entry, [2010, 2010, 2011, 2012], ["a", "a", "b", "a"]) == "later_year|other_acquisition"
+
+
+def test_stratified_time_test() -> None:
+    rng = np.random.default_rng(0)
+    # A time confound: every patient with a later year changes by 3, with or without a new drug. The "added"
+    # patients are mostly in later years, and the control patients are mostly in the same year.
+    added = np.concatenate([rng.normal(0.0, 1.0, 4), rng.normal(3.0, 1.0, 16)])
+    added_strata = ["same"] * 4 + ["later"] * 16
+    control = np.concatenate([rng.normal(0.0, 1.0, 40), rng.normal(3.0, 1.0, 12)])
+    control_strata = ["same"] * 40 + ["later"] * 12
+    assert core.time_test(added, control, 1, n_perm=2000)["p"] <= 0.05  # the test as written passes: a false effect
+    confound = core.stratified_time_test(added, added_strata, control, control_strata, 1, n_perm=2000)
+    assert confound["ran"] and confound["stratified"] and not core.passes_time(confound)
+    assert confound["strata"] == {"later": [16, 12], "same": [4, 40]} and confound["strata_left_out"] == []
+    assert abs(confound["difference"]) < 1.0  # about 3 standard errors
+
+    # A drug effect on top of the time change: the stratified test finds it.
+    planted = core.stratified_time_test(added + 1.5, added_strata, control, control_strata, 1, n_perm=2000)
+    assert core.passes_time(planted) and abs(planted["difference"] - 1.5) < 1.0
+    assert not core.passes_time(core.stratified_time_test(added + 1.5, added_strata, control, control_strata, -1))
+
+    # The statistic: the mean over the "added" patients of their difference minus the control mean of their stratum.
+    exact = core.stratified_time_test(
+        [1.0, 3.0, 5.0] * 4, ["a", "a", "b"] * 4, [0.0] * 6 + [1.0] * 6, ["a"] * 6 + ["b"] * 6, 1
+    )
+    assert exact["difference"] == pytest.approx((8 * 2.0 + 4 * 4.0) / 12)
+    assert (exact["mean_added"], exact["mean_control"]) == (pytest.approx(3.0), pytest.approx(0.5))
+
+    # One stratum only: the same test as the one of section 8.
+    single = core.stratified_time_test(added, ["s"] * 20, control[:30], ["s"] * 30, 1, n_perm=2000)
+    assert single["difference"] == pytest.approx(core.time_test(added, control[:30], 1, n_perm=2000)["difference"])
+
+    # A stratum with no control patient leaves the test, and the floors apply to the strata that enter.
+    left = core.stratified_time_test(added, ["x"] * 4 + ["later"] * 16, control, control_strata, 1, n_perm=2000)
+    assert left["ran"] and (left["added"], left["control"]) == (16, 12) and left["strata_left_out"] == ["same", "x"]
+    few = core.stratified_time_test(added, ["x"] * 12 + ["later"] * 8, control, control_strata, 1)
+    assert not few["ran"] and few["added"] == 8 and "p" not in few
+    with pytest.raises(ValueError, match="one stratum"):
+        core.stratified_time_test(added, added_strata[:-1], control, control_strata, 1)
 
 
 def test_outcome() -> None:

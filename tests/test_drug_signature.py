@@ -6,7 +6,8 @@ of every session, the patients and the controls of every contrast, the counts at
 the between-patient read; and the refusal of a recording plan with other patients. For stages 2 and 3: the posterior
 channels, the spectrum and the alpha frequency check of gate 5; the sides of the descriptive variants; the gates on
 written files (a pass, changed features, a missing patient, a preview inventory); and the five outcomes of the rule on
-planted cohorts (an effect, the same change in the control patients, no effect, too few patients, a failed gate).
+planted cohorts (an effect, the same change in the control patients, no effect, too few patients, a failed gate),
+and the stratified test against time of amendment A1 on a planted time confound.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ rootutils.setup_root(__file__, indicator=[".git", "pyproject.toml"], pythonpath=
 
 import src.drug_signature as driver  # noqa: E402
 from src.drug_signature_core import CONTRASTS, drug_groups, session_side  # noqa: E402
+from src.drug_signature_core import passes_time as core_passes  # noqa: E402
 
 # Patient, label, and the medication text of each session in order (None: the session has no row in the sheet).
 PATIENTS = {
@@ -232,29 +234,38 @@ def test_variant_side() -> None:
 
 
 def _signature_root(
-    tmp: Path, n_added: int = 20, n_controls: int = 12, effect: float = -0.5, drift: float = 0.0
+    tmp: Path,
+    n_added: int = 20,
+    n_controls: int = 12,
+    effect: float = -0.5,
+    drift: float = 0.0,
+    same_year_controls: int = 0,
 ) -> dict[str, Path]:
     """A planted cohort for ``W-sodium``: ``n_added`` patients on levetiracetam who get phenytoin in the second
     session, where the alpha frequency moves by ``effect``; ``n_controls`` patients on levetiracetam in both
-    sessions, where it moves by ``drift``. No other contrast has a patient with both sides. The band power is noise.
+    sessions, where it moves by ``drift``. Their second session is one year later. ``same_year_controls`` more
+    control patients have both sessions in the same year and no change. No other contrast has a patient with both
+    sides. The band power is noise.
     """
     owner = drug_groups(json.loads((driver.CONFIGS / "drug_mechanisms.json").read_text())["groups"])
     rng = np.random.default_rng(0)
     rows, keys, alpha, features = [], [], [], []
-    plans = [(f"added{i:03d}", "levetiracetam+phenytoin", effect) for i in range(n_added)]
-    plans += [(f"ctrl{i:04d}", "levetiracetam", drift) for i in range(n_controls)]
-    for subject, second, shift in sorted(plans):
+    plans = [(f"added{i:03d}", "levetiracetam+phenytoin", effect, 1) for i in range(n_added)]
+    plans += [(f"ctrl{i:04d}", "levetiracetam", drift, 1) for i in range(n_controls)]
+    plans += [(f"same{i:04d}", "levetiracetam", 0.0, 0) for i in range(same_year_controls)]
+    for subject, second, shift, years in sorted(plans):
         base, level = rng.normal(9.5, 0.5), rng.normal(0.0, 1.0, 200)
         for order, (drugs, delta) in enumerate((("levetiracetam", 0.0), (second, shift))):
             groups = {owner[d] for d in drugs.split("+")}
             session = f"s{order + 1:03d}"
+            year = 2010 + order * years
             rows.append(
                 {
                     "subject": subject,
                     "label": 1,
                     "session": session,
                     "order": order,
-                    "year": 2010 + order,
+                    "year": year,
                     "recordings": 1,
                     "segments": 4,
                     "montages": "tcp_ar",
@@ -267,10 +278,10 @@ def _signature_root(
                 keys.append(
                     {
                         "subject": subject,
-                        "path": f"/d/00_epilepsy/{subject}/{session}_{2010 + order}/01_tcp_ar/{subject}_{session}.edf",
+                        "path": f"/d/00_epilepsy/{subject}/{session}_{year}/01_tcp_ar/{subject}_{session}.edf",
                         "start": 40.0 + 120.0 * k,
                         "session": session,
-                        "year": 2010 + order,
+                        "year": year,
                         "sfreq": 250.0,
                     }
                 )
@@ -353,6 +364,10 @@ def test_outcome_within_patient_effect(tmp_path: Path) -> None:
         20,
         12,
     )
+    assert sodium["against_time"]["stratified"]
+    assert sodium["against_time"]["strata"] == {"later_year|same_acquisition": [20, 12]}
+    written = sodium["against_time_as_written"]  # one stratum: the stratified test equals the test of section 8
+    assert written["ran"] and written["difference"] == pytest.approx(sodium["against_time"]["difference"])
     assert abs(sodium["against_time"]["mean_control"]) < 0.05
     assert record["deciding"]["W-gaba"]["patients"] == 0 and not record["deciding"]["W-gaba"]["passes_no_change"]
     assert record["deciding"]["W-gaba"]["against_no_change"] is None
@@ -375,6 +390,34 @@ def test_outcome_time_or_drug(tmp_path: Path) -> None:
     assert record["outcome"] == "time_or_drug"
     sodium = record["deciding"]["W-sodium"]
     assert sodium["passes_no_change"] and sodium["against_time"]["ran"] and not sodium["passes_time"]
+
+
+def test_outcome_time_confound_is_not_an_effect(tmp_path: Path) -> None:
+    # Amendment A1. Every patient with a later year changes by -0.5, with or without a new drug. 30 more control
+    # patients have both sessions in the same year and no change. The test of section 8 pools all control patients
+    # and passes; the stratified test compares the "added" patients with the control patients of later years only.
+    roots = _signature_root(tmp_path, effect=-0.5, drift=-0.5, same_year_controls=30)
+    _pass_gates(roots)
+    record = driver.run_test(roots["root"])
+    sodium = record["deciding"]["W-sodium"]
+    assert sodium["passes_no_change"]
+    assert core_passes(sodium["against_time_as_written"]) and sodium["against_time_as_written"]["control"] == 42
+    assert sodium["against_time"]["strata"] == {
+        "later_year|same_acquisition": [20, 12],
+        "same_year|same_acquisition": [0, 30],
+    }
+    assert sodium["against_time"]["strata_left_out"] == ["same_year|same_acquisition"]
+    assert (sodium["against_time"]["added"], sodium["against_time"]["control"]) == (20, 12)
+    assert sodium["against_time"]["ran"] and not sodium["passes_time"]
+    assert record["outcome"] == "time_or_drug"
+
+
+def test_outcome_effect_beyond_the_time_change(tmp_path: Path) -> None:
+    roots = _signature_root(tmp_path, effect=-1.0, drift=-0.5, same_year_controls=30)
+    _pass_gates(roots)
+    record = driver.run_test(roots["root"])
+    assert record["outcome"] == "within_patient_effect"
+    assert abs(record["deciding"]["W-sodium"]["against_time"]["difference"] + 0.5) < 0.05
 
 
 def test_outcome_time_test_cannot_run(tmp_path: Path) -> None:

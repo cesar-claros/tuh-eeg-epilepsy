@@ -27,6 +27,13 @@ BAND_NAMES = ("1_4", "4_8", "8_13", "13_30", "30_45")
 ALPHA_RANGE = (6.0, 13.0)  # Hz: the range of the alpha frequency measure
 POSTERIOR = ("T5-O1", "T6-O2", "P3-O1", "P4-O2")  # the channels of the alpha frequency measure
 OUTCOMES = ("within_patient_effect", "time_or_drug", "no_effect_measured", "too_few_patients", "blocked")
+# Amendment A1 (section 20.3): the strata of the test against time.
+STRATA = (
+    "same_year|same_acquisition",
+    "same_year|other_acquisition",
+    "later_year|same_acquisition",
+    "later_year|other_acquisition",
+)
 
 
 # ---------------------------------------------------------------------- sessions
@@ -150,6 +157,20 @@ def control_entry(sides: Sequence[str], segments: Sequence[int | None]) -> dict[
     }
 
 
+def stratum(gap_years: float, same_acquisition: bool) -> str:
+    """The stratum of a patient for the test against time (amendment A1): whether the two sides, or the two halves
+    of a control patient, are in the same calendar year, and whether all their sessions have the same acquisition."""
+    year = "same_year" if gap_years == 0 else "later_year"
+    return f"{year}|{'same' if same_acquisition else 'other'}_acquisition"
+
+
+def control_stratum(entry: Mapping[str, Any], years: Sequence[int], acquisitions: Sequence[Any]) -> str:
+    """The stratum of a control patient, from its entry of ``control_entry`` and its sessions in order."""
+    earlier, later = entry["earlier"], entry["later"]
+    gap = abs(float(np.mean([years[i] for i in later]) - np.mean([years[i] for i in earlier])))
+    return stratum(gap, len({acquisitions[i] for i in earlier + later}) == 1)
+
+
 def contrast_eligible(n_patients: int) -> bool:
     """Whether a contrast has enough eligible patients to be tested."""
     return n_patients >= MIN_PATIENTS
@@ -259,9 +280,10 @@ def sign_flip_test(
 def time_test(
     added: Sequence[float], control: Sequence[float], expected: int, n_perm: int = N_FLIPS, seed: int = 0
 ) -> dict[str, Any]:
-    """The test against time (section 8): the differences of the ``added`` patients against the later-minus-earlier
-    differences of the control patients, by a permutation of the two groups, one-sided. ``ran`` is false with fewer
-    than ``MIN_TIME_GROUP`` patients in a group."""
+    """The test against time as section 8 wrote it: the differences of the ``added`` patients against the
+    later-minus-earlier differences of the control patients, by a permutation of the two groups, one-sided. ``ran``
+    is false with fewer than ``MIN_TIME_GROUP`` patients in a group. Since amendment A1 it is a descriptive read;
+    ``stratified_time_test`` decides."""
     a, c = np.asarray(added, dtype=np.float64), np.asarray(control, dtype=np.float64)
     record: dict[str, Any] = {"ran": False, "added": len(a), "control": len(c)}
     if len(a) < MIN_TIME_GROUP or len(c) < MIN_TIME_GROUP:
@@ -277,6 +299,64 @@ def time_test(
         "ran": True,
         "mean_added": float(a.mean()),
         "mean_control": float(c.mean()),
+        "difference": observed,
+        "p": (1 + beyond) / (1 + n_perm),
+    }
+
+
+def stratified_time_test(
+    added: Sequence[float],
+    added_strata: Sequence[str],
+    control: Sequence[float],
+    control_strata: Sequence[str],
+    expected: int,
+    n_perm: int = N_FLIPS,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """The test against time of amendment A1 (section 20.3): each ``added`` patient against the control patients of
+    its stratum. The statistic is the mean over the ``added`` patients of their difference minus the mean control
+    difference of their stratum. The permutation exchanges patients inside a stratum only, one-sided. A stratum
+    with no ``added`` or no control patient leaves the test. ``ran`` is false with fewer than ``MIN_TIME_GROUP``
+    patients of a group in the strata that enter.
+
+    Raises
+    ------
+    ValueError
+        If the values and the strata of a group differ in length.
+    """
+    a, c = np.asarray(added, dtype=np.float64), np.asarray(control, dtype=np.float64)
+    a_strata, c_strata = np.asarray(added_strata, dtype=str), np.asarray(control_strata, dtype=str)
+    if len(a) != len(a_strata) or len(c) != len(c_strata):
+        raise ValueError("each patient needs one stratum")
+    names = sorted(set(a_strata.tolist()) | set(c_strata.tolist()))
+    sizes = {name: [int((a_strata == name).sum()), int((c_strata == name).sum())] for name in names}
+    entering = [name for name in names if min(sizes[name]) > 0]
+    n_added = sum(sizes[name][0] for name in entering)
+    n_control = sum(sizes[name][1] for name in entering)
+    record: dict[str, Any] = {
+        "ran": False,
+        "stratified": True,
+        "added": n_added,
+        "control": n_control,
+        "strata": sizes,
+        "strata_left_out": [name for name in names if name not in entering],
+    }
+    if n_added < MIN_TIME_GROUP or n_control < MIN_TIME_GROUP:
+        return record
+    rng = np.random.default_rng(seed)
+    observed, null = 0.0, np.zeros(n_perm)
+    for name in entering:
+        mine, theirs = a[a_strata == name], c[c_strata == name]
+        weight = len(mine) / n_added
+        observed += weight * float(mine.mean() - theirs.mean())
+        pooled = np.concatenate([mine, theirs])
+        shuffled = pooled[np.argsort(rng.random((n_perm, len(pooled))), axis=1)]
+        null += weight * (shuffled[:, : len(mine)].mean(axis=1) - shuffled[:, len(mine) :].mean(axis=1))
+    beyond = int((expected * null >= expected * observed).sum())
+    return record | {
+        "ran": True,
+        "mean_added": float(a[np.isin(a_strata, entering)].mean()),
+        "mean_control": float(c[np.isin(c_strata, entering)].mean()),
         "difference": observed,
         "p": (1 + beyond) / (1 + n_perm),
     }

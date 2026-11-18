@@ -14,7 +14,9 @@ eligibility rules, the measures, the tests and the rule. A root holds one run. S
   of every segment (``segment_features.npz``).
 - ``gates`` checks gates 2 to 6 of section 9 (the launcher runs the tests, gate 1) and writes ``gates.json``.
 - ``test`` applies the paired tests and the rule of sections 8 and 10 (``drug_signature_decision.json`` and
-  ``drug_signature_summary.csv``). If a gate failed, it writes the outcome ``blocked`` and opens no result.
+  ``drug_signature_summary.csv``). The test against time is the stratified one of amendment A1 (section 20.3); the
+  test as section 8 wrote it is kept as a descriptive read. If a gate failed, it writes the outcome ``blocked`` and
+  opens no result.
 
 The 39 test patients stay locked: every step keeps only the patients of the readout plan.
 """
@@ -52,6 +54,7 @@ from src.drug_signature_core import (  # noqa: E402
     band_cube,
     contrast_eligible,
     control_entry,
+    control_stratum,
     drug_groups,
     measure_values,
     passes_change,
@@ -61,6 +64,8 @@ from src.drug_signature_core import (  # noqa: E402
     session_side,
     sign_flip_test,
     signature_outcome,
+    stratified_time_test,
+    stratum,
     time_test,
 )
 
@@ -555,33 +560,34 @@ def variant_side(name: str, row: dict[str, Any], mechanisms: dict[str, Any]) -> 
 
 def contrast_sessions(
     rows: list[dict[str, Any]], side_of: Callable[[dict[str, Any]], str]
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """For one contrast: the eligible patients with the side of each of their sessions, and the eligible control
-    patients with ``with`` for the sessions of the later half and ``without`` for the earlier half."""
+    patients with ``with`` for the sessions of the later half and ``without`` for the earlier half. Each entry holds
+    its stratum for the test against time (amendment A1)."""
     by_subject: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_subject.setdefault(row["subject"], []).append(row)
     patients: dict[str, dict[str, Any]] = {}
-    controls: dict[str, dict[str, str]] = {}
+    controls: dict[str, dict[str, Any]] = {}
     for subject, items in by_subject.items():
         items = sorted(items, key=lambda item: item["order"])
         sides = [side_of(item) for item in items]
         segments = [item["segments"] for item in items]
-        entry = patient_entry(
-            sides,
-            segments,
-            [item["order"] for item in items],
-            [item["year"] for item in items],
-            [(item["montages"], item["rates"]) for item in items],
-        )
+        years = [item["year"] for item in items]
+        acquisitions = [(item["montages"], item["rates"]) for item in items]
+        entry = patient_entry(sides, segments, [item["order"] for item in items], years, acquisitions)
         if entry is not None and entry["eligible"]:
             patients[subject] = entry | {
-                "sides": {item["session"]: side for item, side in zip(items, sides, strict=True)}
+                "sides": {item["session"]: side for item, side in zip(items, sides, strict=True)},
+                "stratum": stratum(entry["gap_years"], entry["same_acquisition"]),
             }
         control = control_entry(sides, segments)
         if control is not None and control["eligible"]:
             halves = {items[i]["session"]: "without" for i in control["earlier"]}
-            controls[subject] = halves | {items[i]["session"]: "with" for i in control["later"]}
+            controls[subject] = {
+                "sides": halves | {items[i]["session"]: "with" for i in control["later"]},
+                "stratum": control_stratum(control, years, acquisitions),
+            }
     return patients, controls
 
 
@@ -661,9 +667,16 @@ def run_test(root: Path, mechanisms_path: Path = CONFIGS / "drug_mechanisms.json
         patients, controls = groups[name]
         d = paired(name, measure)
         result = add(name, measure, "deciding", d, expected)
-        added = paired(name, measure, lambda e: e["direction"] == "added")
-        tau = np.array(list(differences(measures[measure], subject, session, controls).values()))
-        against_time = time_test(added, tau, expected)
+        chosen = {s: e["sides"] for s, e in patients.items() if e["direction"] == "added"}
+        added = differences(measures[measure], subject, session, chosen)
+        tau = differences(measures[measure], subject, session, {s: e["sides"] for s, e in controls.items()})
+        against_time = stratified_time_test(
+            list(added.values()),
+            [patients[s]["stratum"] for s in added],
+            list(tau.values()),
+            [controls[s]["stratum"] for s in tau],
+            expected,
+        )
         change[name] = bool(name in eligible and result is not None and passes_change(result["p"], len(eligible)))
         time[name] = passes_time(against_time)
         gaps = [e["gap_years"] for s, e in patients.items()]
@@ -676,6 +689,7 @@ def run_test(root: Path, mechanisms_path: Path = CONFIGS / "drug_mechanisms.json
             "passes_no_change": change[name],
             "against_time": against_time,
             "passes_time": time[name],
+            "against_time_as_written": time_test(list(added.values()), list(tau.values()), expected),
             "gap_rank_correlation": (
                 float(spearmanr(gaps, expected * paired(name, measure)).statistic)
                 if len(d) == len(gaps) and len(d) >= 5 and len(set(gaps)) > 1
