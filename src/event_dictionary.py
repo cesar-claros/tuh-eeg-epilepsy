@@ -7,7 +7,8 @@ are fixed. Subcommand:
 - ``inventory`` (CPU, minutes) reads the header of every file (duration, rate, channel names) and every ``.rec``
   annotation file of ``edf/train`` and ``edf/eval``. It reads no signal. It writes ``files.csv`` (one row per file),
   ``patients.csv`` (the training patients with their classes and fold), ``folds.json`` and ``event_inventory.json``
-  (the counts per set and class, the lengths of the annotated intervals, the folds, and the floor for each class).
+  (the counts per set and class, the lengths of the annotated intervals, the marked seconds, the records of
+  5 minutes and the training crops of 10 s per class, the folds, and the floor for each class).
 
 The evaluation set is for one final read (protocol section 11). The inventory reports its headers and annotation
 counts only.
@@ -41,6 +42,7 @@ from src.event_dictionary_core import (  # noqa: E402
     assign_folds,
     class_eligible,
     covered_seconds,
+    crop_starts,
     interval_statistics,
     mixed_seconds,
     parse_rec,
@@ -74,7 +76,10 @@ COLUMNS = (
     "two_classes",
     "two_event_classes",
     "beyond_file",
-    *(f"{kind}_{label}" for label in LABELS for kind in ("intervals", "units", "kept")),
+    "marked_pieces",
+    "event_pieces",
+    "event_crops",
+    *(f"{kind}_{label}" for label in LABELS for kind in ("intervals", "units", "kept", "seconds", "pieces", "crops")),
     *REASONS[1:],
 )
 README = {
@@ -158,7 +163,17 @@ def file_row(path: Path, name: str, header_reader: Callable[[Path], dict[str, An
         mine = [u for u in file_units if u["label"] == label]
         row[f"intervals_{label}"] = sum(r[3] == label for r in rows)
         row[f"units_{label}"] = len(mine)
-        row[f"kept_{label}"] = sum(u["status"] == "kept" for u in mine)
+        kept = [u for u in mine if u["status"] == "kept"]
+        row[f"kept_{label}"] = len(kept)
+        seconds = {int(u["start"] + 1e-6) for u in kept}  # distinct seconds with a kept unit
+        row[f"seconds_{label}"] = len(seconds)
+        row[f"crops_{label}"] = len(crop_starts(sorted(seconds), duration))
+        row[f"pieces_{label}"] = len({u["piece"] for u in kept})
+    kept = [u for u in file_units if u["status"] == "kept"]
+    row["marked_pieces"] = len({u["piece"] for u in kept})
+    row["event_pieces"] = len({u["piece"] for u in kept if u["label"] != "bckg"})
+    event_seconds = {int(u["start"] + 1e-6) for u in kept if u["label"] != "bckg"}
+    row["event_crops"] = len(crop_starts(sorted(event_seconds), duration))
     for reason in REASONS[1:]:
         row[reason] = sum(u["status"] == reason for u in file_units)
     return row
@@ -177,6 +192,9 @@ def set_summary(frame: pl.DataFrame, name: str) -> dict[str, Any]:
             "intervals": int(marked[f"intervals_{label}"].sum()),
             "units": int(marked[f"units_{label}"].sum()),
             "kept_units": int(marked[f"kept_{label}"].sum()),
+            "kept_seconds": int(marked[f"seconds_{label}"].sum()),
+            "pieces": int(marked[f"pieces_{label}"].sum()),
+            "crops": int(marked[f"crops_{label}"].sum()),
             "readme_files": README[name][label],
         }
     rows = int(marked["rows"].sum())
@@ -206,6 +224,10 @@ def set_summary(frame: pl.DataFrame, name: str) -> dict[str, Any]:
         "seconds_with_two_classes": int(marked["two_classes"].sum()),
         "seconds_with_two_event_classes": int(marked["two_event_classes"].sum()),
         "units_that_leave": {reason: int(marked[reason].sum()) for reason in REASONS[1:]},
+        "pieces": int(read["pieces"].sum()),
+        "pieces_with_a_kept_unit": int(marked["marked_pieces"].sum()),
+        "pieces_with_a_kept_event_unit": int(marked["event_pieces"].sum()),
+        "event_crops": int(marked["event_crops"].sum()),
         "classes": per_class,
         "reproduces_readme": frame.height == README[name]["files"]
         and all(per_class[label]["files"] == README[name][label] for label in LABELS),
@@ -220,6 +242,10 @@ def patient_table(frame: pl.DataFrame) -> tuple[list[dict[str, Any]], dict[str, 
         pl.len().alias("files"),
         (pl.col("duration_s").sum() / 60).alias("minutes"),
         *(pl.col(f"kept_{label}").sum() for label in LABELS),
+        *(pl.col(f"seconds_{label}").sum() for label in LABELS),
+        *(pl.col(f"crops_{label}").sum() for label in LABELS),
+        pl.col("event_pieces").sum(),
+        pl.col("event_crops").sum(),
     )
     classes_of = {
         row["group"]: {label for label in LABELS if row[f"kept_{label}"] > 0} for row in kept.iter_rows(named=True)
@@ -246,7 +272,15 @@ def fold_summary(patients: list[dict[str, Any]]) -> dict[str, Any]:
             "kept_units_per_fold": [
                 int(sum(p[f"kept_{label}"] for p in mine if p["fold"] == fold)) for fold in range(N_FOLDS)
             ],
+            "kept_seconds_per_fold": [
+                int(sum(p[f"seconds_{label}"] for p in mine if p["fold"] == fold)) for fold in range(N_FOLDS)
+            ],
+            "crops_per_fold": [
+                int(sum(p[f"crops_{label}"] for p in mine if p["fold"] == fold)) for fold in range(N_FOLDS)
+            ],
             "median_units_per_patient": float(np.median([p[f"kept_{label}"] for p in mine])) if mine else None,
+            "median_seconds_per_patient": float(np.median([p[f"seconds_{label}"] for p in mine])) if mine else None,
+            "patients_with_background": sum(p["kept_bckg"] > 0 for p in mine),
             "eligible": class_eligible(len(mine), per_fold),
             "decides": label in EPILEPTIFORM,
         }

@@ -45,10 +45,12 @@ MONTAGE = (
 )
 EAR_CHANNELS = (8, 13)  # A1-T3 and T4-A2: not in the 20-channel montage of this project
 ELECTRODES = tuple(sorted({e for i, name in enumerate(MONTAGE) if i not in EAR_CHANNELS for e in name.split("-")}))
-PIECE_S, MIN_PIECE_S, WINDOW_S, EDGE_S = 120.0, 10.0, 2.0, 0.5
+# A piece is one record of the scenario: 5 minutes (protocol section 3). A last piece of at least 1 minute is kept.
+PIECE_S, MIN_PIECE_S, WINDOW_S, EDGE_S = 300.0, 60.0, 2.0, 0.5
+CROP_S = 10.0  # a training crop around a mark: 5 windows of 2 s
 N_FOLDS, FOLD_SEED = 5, 0
 MIN_PATIENTS, MIN_FOLD_PATIENTS = 15, 2
-REASONS = ("kept", "ear_channel", "piece_edge", "outside_pieces")
+REASONS = ("kept", "ear_channel", "piece_edge", "outside_pieces", "overlap", "class_conflict")
 TOLERANCE = 1e-6
 
 
@@ -75,13 +77,29 @@ def parse_rec(text: str) -> list[tuple[int, float, float, str]]:
 
 
 def pieces(duration: float) -> list[tuple[float, float]]:
-    """The pieces of a file: 120 s each, and a last piece of at least 10 s cut to whole windows of 2 s."""
+    """The records of a file: 5 minutes each, and a last one of at least 1 minute cut to whole windows of 2 s."""
     out = [(i * PIECE_S, (i + 1) * PIECE_S) for i in range(int((duration + TOLERANCE) // PIECE_S))]
     start = len(out) * PIECE_S
     rest = math.floor((duration - start + TOLERANCE) / WINDOW_S) * WINDOW_S
     if rest >= MIN_PIECE_S:
         out.append((start, start + rest))
     return out
+
+
+def crop_starts(seconds: Sequence[int], duration: float) -> list[float]:
+    """The starts of the training crops of 10 s for marked seconds, on the grid of 2 s. The seconds are taken in
+    order; a second that an earlier crop holds gets no crop of its own, so the crops of a file do not repeat a mark.
+    A crop is centered on its first second where the file allows it."""
+    last_start = math.floor((duration - CROP_S + TOLERANCE) / WINDOW_S) * WINDOW_S
+    if last_start < 0:
+        return []
+    starts: list[float] = []
+    for second in sorted(set(seconds)):
+        if starts and second + 1.0 <= starts[-1] + CROP_S + TOLERANCE:
+            continue
+        start = math.floor((second - (CROP_S - 1.0) / 2) / WINDOW_S) * WINDOW_S
+        starts.append(float(min(max(start, 0.0), last_start)))
+    return starts
 
 
 def unit_status(channel: int, start: float, file_pieces: Sequence[tuple[float, float]]) -> str:
@@ -98,16 +116,47 @@ def unit_status(channel: int, start: float, file_pieces: Sequence[tuple[float, f
     return "piece_edge" if held else "outside_pieces"
 
 
+def piece_of(start: float, file_pieces: Sequence[tuple[float, float]]) -> int | None:
+    """The index of the piece that holds the unit ``[start, start + 1)`` in full; ``None`` if no piece does."""
+    for index, (first, last) in enumerate(file_pieces):
+        if start >= first - TOLERANCE and start + 1.0 <= last + TOLERANCE:
+            return index
+    return None
+
+
 def units(rows: Sequence[tuple[int, float, float, str]], duration: float) -> list[dict[str, Any]]:
-    """One unit per whole second of every annotated interval: channel, start, class and status."""
+    """One unit per whole second of every annotated interval: channel, start, class, piece and status.
+
+    The annotations hold rows that overlap on one channel (inventory of 2026-11-20). On a channel, the units are
+    taken in the order of their start. A unit that overlaps a kept unit of the same class leaves as ``overlap``, so
+    the kept units of a channel do not share signal. If the two classes differ, both leave as ``class_conflict``.
+    """
     file_pieces = pieces(duration)
     out = []
     for channel, start, stop, label in rows:
         for i in range(int(math.floor(stop - start + TOLERANCE))):
             first = start + i
             out.append(
-                {"channel": channel, "start": first, "label": label, "status": unit_status(channel, first, file_pieces)}
+                {
+                    "channel": channel,
+                    "start": first,
+                    "label": label,
+                    "piece": piece_of(first, file_pieces),
+                    "status": unit_status(channel, first, file_pieces),
+                }
             )
+    last: dict[int, dict[str, Any]] = {}
+    for unit in sorted(out, key=lambda u: (u["channel"], u["start"])):
+        if unit["status"] != "kept":
+            continue
+        previous = last.get(unit["channel"])
+        if previous is not None and unit["start"] < previous["start"] + 1.0 - TOLERANCE:
+            if unit["label"] == previous["label"]:
+                unit["status"] = "overlap"
+            else:
+                unit["status"] = previous["status"] = "class_conflict"
+            continue
+        last[unit["channel"]] = unit
     return out
 
 

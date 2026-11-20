@@ -1,6 +1,7 @@
 """Checks of stage 0 of the Events corpus protocol (no corpus; CPU; seconds).
 
-Runs under pytest. Covered: the annotation parser and its refusals; the pieces of a file; the status of a unit (kept,
+Runs under pytest. Covered: the annotation parser and its refusals; the records of a file; the training crops; the
+status of a unit (kept,
 ear channel, edge of a piece, outside the pieces); the units of an interval; the interval statistics, the covered
 time and the seconds with two classes; the folds (every patient once, each class spread over the folds, the same
 result for the same seed) and the floor for a class; the channel names of the corpus; and the inventory on a written
@@ -41,23 +42,32 @@ def test_parse_rec() -> None:
 
 
 def test_pieces() -> None:
-    assert core.pieces(250.0) == [(0.0, 120.0), (120.0, 240.0), (240.0, 250.0)]
-    assert core.pieces(249.0) == [(0.0, 120.0), (120.0, 240.0)]  # the rest of 9 s is below 10 s
-    assert core.pieces(133.7) == [(0.0, 120.0), (120.0, 132.0)]  # the last piece is cut to whole windows of 2 s
-    assert core.pieces(9.0) == [] and core.pieces(120.0) == [(0.0, 120.0)]
+    assert core.pieces(650.0) == [(0.0, 300.0), (300.0, 600.0)]  # the rest of 50 s is below 1 minute
+    assert core.pieces(661.7) == [(0.0, 300.0), (300.0, 600.0), (600.0, 660.0)]  # cut to whole windows of 2 s
+    assert core.pieces(59.0) == [] and core.pieces(300.0) == [(0.0, 300.0)] and core.pieces(250.0) == [(0.0, 250.0)]
+
+
+def test_crop_starts() -> None:
+    assert core.crop_starts([10, 11, 12, 30, 31, 100], 250.0) == [4.0, 24.0, 94.0]  # one crop holds 10, 11 and 12
+    assert core.crop_starts([12, 10, 11, 10], 250.0) == [4.0]
+    assert core.crop_starts([1], 250.0) == [0.0] and core.crop_starts([248], 250.0) == [240.0]  # kept in the file
+    assert core.crop_starts([10, 14], 250.0) == [4.0, 8.0]  # 14 is not held by the crop from 4 to 14
+    assert core.crop_starts([3], 8.0) == [] and core.crop_starts([], 250.0) == []
+    for start, second in zip(core.crop_starts([10, 30, 100, 248], 250.0), (10, 30, 100, 248), strict=True):
+        assert start % 2 == 0 and start <= second and second + 1 <= start + core.CROP_S
 
 
 def test_unit_status() -> None:
-    held = core.pieces(250.0)
+    held = core.pieces(661.7)
     assert core.unit_status(0, 50.2, held) == "kept"
     assert core.unit_status(8, 50.2, held) == "ear_channel" and core.unit_status(13, 50.2, held) == "ear_channel"
-    assert core.unit_status(0, 0.2, held) == "piece_edge"  # within 0.5 s of the start of a piece
-    assert core.unit_status(0, 0.5, held) == "kept" and core.unit_status(0, 118.5, held) == "kept"
-    assert core.unit_status(0, 118.7, held) == "piece_edge"
-    assert core.unit_status(0, 119.5, held) == "piece_edge"  # across the border of two pieces
-    assert core.unit_status(0, 249.5, held) == "piece_edge"  # across the end of the last piece
-    assert core.unit_status(0, 260.0, held) == "outside_pieces"
-    assert core.unit_status(0, 245.0, core.pieces(249.0)) == "outside_pieces"  # in the rest that no piece holds
+    assert core.unit_status(0, 0.2, held) == "piece_edge"  # within 0.5 s of the start of a record
+    assert core.unit_status(0, 0.5, held) == "kept" and core.unit_status(0, 298.5, held) == "kept"
+    assert core.unit_status(0, 298.7, held) == "piece_edge"
+    assert core.unit_status(0, 299.5, held) == "piece_edge"  # across the border of two records
+    assert core.unit_status(0, 659.5, held) == "piece_edge"  # across the end of the last record
+    assert core.unit_status(0, 670.0, held) == "outside_pieces"
+    assert core.unit_status(0, 620.0, core.pieces(650.0)) == "outside_pieces"  # in the rest that no record holds
 
 
 def test_units_and_statistics() -> None:
@@ -65,7 +75,12 @@ def test_units_and_statistics() -> None:
     found = core.units(rows, 250.0)
     assert [u["label"] for u in found] == ["spsw", "spsw", "spsw", "bckg", "bckg", "eyem"]
     assert [round(u["start"], 1) for u in found[:3]] == [10.4, 11.4, 12.4]  # one unit per whole second
-    assert [u["status"] for u in found] == ["kept"] * 5 + ["ear_channel"]
+    # The background unit at 12.0 on channel 0 overlaps the spike unit at 11.4: two classes, so both leave.
+    assert [u["status"] for u in found] == ["kept", "class_conflict", "kept", "class_conflict", "kept", "ear_channel"]
+    assert [u["piece"] for u in found] == [0] * 6
+    same = core.units([(0, 10.0, 11.0, "gped"), (0, 10.5, 11.5, "gped"), (0, 11.0, 12.0, "gped")], 250.0)
+    assert [u["status"] for u in same] == ["kept", "overlap", "kept"]  # the third does not overlap the first
+    assert core.piece_of(299.5, core.pieces(661.7)) is None and core.piece_of(330.0, core.pieces(661.7)) == 1
     assert core.units([(0, 5.0, 5.6, "spsw")], 250.0) == []  # shorter than one second: no unit
     statistics = core.interval_statistics(rows)
     assert (statistics["rows"], statistics["one_second"], statistics["whole_seconds"]) == (4, 3, 4)
@@ -107,8 +122,8 @@ def test_channel_names() -> None:
 TREE = {
     "train": [
         ("00000001", "00000001_00000001.edf", 250.0, "0,10.4,13.4,1\n1,10.4,11.4,6\n8,10.0,11.0,4\n"),
-        ("00000001", "00000001_00000002.edf", 130.0, "2,119.5,120.5,6\n3,50.0,51.0,3\n"),
-        ("00000002", "00000002_00000001.edf", 60.0, "4,5.0,7.0,2\n4,30.0,31.0,6\n"),
+        ("00000001", "00000001_00000002.edf", 130.0, "2,0.2,1.2,6\n3,50.0,51.0,3\n"),
+        ("00000002", "00000002_00000001.edf", 60.0, "4,5.0,7.0,2\n4,30.0,31.0,6\n4,30.5,31.5,6\n"),
         ("00000003", "00000003_00000001.edf", 60.0, None),
         ("00000004", "00000004_00000001.edf", -1.0, "0,1.0,2.0,6\n"),  # its header cannot be read
         ("00000005", "00000005_00000001.edf", 61.0, "0,20.0,21.0,5\n0,70.0,71.0,6\n"),
@@ -151,10 +166,17 @@ def test_inventory(tmp_path: Path) -> None:
     assert train["hours_in_pieces"] == pytest.approx((250 + 130 + 60 + 60 + 60) / 3600)
     assert train["rates"] == {250.0: 5} and train["references"] == {"AR": 5}
     assert train["files_without_an_electrode"] == 1 and not train["reproduces_readme"]
-    assert (train["annotation_rows"], train["rows_of_one_second"], train["rows_of_whole_seconds"]) == (9, 7, 9)
+    assert (train["annotation_rows"], train["rows_of_one_second"], train["rows_of_whole_seconds"]) == (10, 8, 10)
     assert (train["shortest_row_s"], train["longest_row_s"]) == (pytest.approx(1.0), pytest.approx(3.0))
     assert train["rows_beyond_the_file"] == 1  # the row at 70 s of a file of 61 s
-    assert train["units_that_leave"] == {"ear_channel": 1, "piece_edge": 1, "outside_pieces": 1}
+    assert train["units_that_leave"] == {
+        "ear_channel": 1,
+        "piece_edge": 1,
+        "outside_pieces": 1,
+        "overlap": 1,
+        "class_conflict": 0,
+    }
+    assert (train["pieces"], train["pieces_with_a_kept_unit"], train["pieces_with_a_kept_event_unit"]) == (5, 4, 4)
     spikes = train["classes"]["spsw"]
     assert (spikes["files"], spikes["groups"], spikes["intervals"], spikes["units"], spikes["kept_units"]) == (
         1,
@@ -163,9 +185,11 @@ def test_inventory(tmp_path: Path) -> None:
         3,
         3,
     )
-    assert train["classes"]["bckg"]["units"] == 4 and train["classes"]["bckg"]["kept_units"] == 2
+    assert train["classes"]["bckg"]["units"] == 5 and train["classes"]["bckg"]["kept_units"] == 2
     assert train["classes"]["eyem"]["units"] == 1 and train["classes"]["eyem"]["kept_units"] == 0  # an ear channel
     assert train["classes"]["gped"]["units"] == 2 and spikes["readme_files"] == 27
+    assert (spikes["kept_seconds"], spikes["pieces"]) == (3, 1) and train["classes"]["gped"]["kept_seconds"] == 2
+    assert (spikes["crops"], train["classes"]["gped"]["crops"], train["event_crops"]) == (1, 1, 4)
     assert (train["marked_seconds"], train["seconds_with_two_classes"]) == (10, 1)
     assert (held["files"], held["groups"], held["classes"]["eyem"]["files"]) == (2, 1, 1)
 
@@ -173,7 +197,8 @@ def test_inventory(tmp_path: Path) -> None:
     assert files.height == 8 and files.filter(~pl.col("header_ok")).height == 1
     assert files.filter(pl.col("file") == "00000003_00000001.edf")["has_rec"].to_list() == [False]
     first = files.filter(pl.col("file") == "00000001_00000001.edf").to_dicts()[0]
-    assert (first["pieces"], first["kept_spsw"], first["ear_channel"]) == (3, 3, 1)
+    assert (first["pieces"], first["kept_spsw"], first["ear_channel"]) == (1, 3, 1)
+    assert (first["crops_spsw"], first["event_crops"]) == (1, 1)
     assert first["covered_s"] == pytest.approx(3.4)
 
     patients = pl.read_csv(root / "patients.csv", schema_overrides={"patient": pl.Utf8}).to_dicts()
@@ -184,7 +209,11 @@ def test_inventory(tmp_path: Path) -> None:
     classes = record["training_classes"]
     assert classes["spsw"]["patients"] == 1 and sum(classes["spsw"]["patients_per_fold"]) == 1
     assert not classes["spsw"]["eligible"] and classes["spsw"]["decides"] and not classes["artf"]["decides"]
-    assert sum(classes["bckg"]["kept_units_per_fold"]) == 2
+    assert sum(classes["bckg"]["kept_units_per_fold"]) == 2 and sum(classes["bckg"]["kept_seconds_per_fold"]) == 2
+    assert classes["spsw"]["patients_with_background"] == 1 and classes["spsw"]["median_seconds_per_patient"] == 3
+    assert patients[0]["seconds_spsw"] == 3 and patients[0]["event_pieces"] == 2
+    assert patients[0]["crops_spsw"] == 1 and patients[0]["event_crops"] == 2
+    assert sum(classes["spsw"]["crops_per_fold"]) == 1
     assert json.loads((root / "event_inventory.json").read_text())["folds"]["patients"] == 3
 
 
