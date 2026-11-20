@@ -98,6 +98,9 @@ step event_pilot cache --root "$ROOT" --events-dir "$EVENTS_DIR" --n-jobs "$N_JO
 step event_pilot reader-check --root "$ROOT" --manifests "$M" --data-dir "$DATA_DIR" \
   --signal-cache-dir "$SIGNAL_CACHE_DIR" --num-workers "$NUM_WORKERS"
 step event_pilot features --root "$ROOT" --events-dir "$EVENTS_DIR" --sweep-root "$SWEEP_ROOT" --device "$DEVICE"
+if [[ -f "$ROOT/pilot.json" ]]; then
+  cp -- "$ROOT/pilot.json" "$ROOT/pilot_before_$STAMP.json"  # keep the record of an earlier read
+fi
 step event_pilot read --root "$ROOT" --n-boot "$N_BOOT"
 cat "$ROOT/pilot.json" | head -60
 echo "Pilot: $ROOT/pilot.json and $ROOT/pilot_summary.csv. The pilot is descriptive."

@@ -12,8 +12,10 @@ Protocol: ``documentation/event_corpus_dictionary_protocol.md``, sections 5 to 1
   three bands: as the rank inside the record (``rank.npy``), as the plain value (``plain.npy``), and as the rank at
   a displaced second of the same record (``null.npy``). It also runs the time-alignment check (gate 4).
 - ``read``: the choice of the feature on the training folds and its score on the held-out fold, for each class,
-  family and read; the gains of ``Transfer`` over ``Untrained`` and over the simple measures; and the gates
-  (``pilot.json``, ``pilot_summary.csv``). The pilot is descriptive: no dictionary of this corpus exists yet.
+  family and read; the gains of ``Transfer`` over ``Untrained`` and over the simple measures; the mean rank of the
+  class units and of the background units; the scores of the random waveforms and of the simple measures in each
+  band alone; and the gates (``pilot.json``, ``pilot_summary.csv``). The pilot is descriptive: no dictionary of
+  this corpus exists yet.
 """
 
 from __future__ import annotations
@@ -281,9 +283,10 @@ def alignment_check(root: Path, table: pl.DataFrame, waves: np.ndarray, device: 
     rng = np.random.default_rng(0)
     background = table.filter((pl.col("fold") == 0) & (pl.col("label") == "bckg"))
     planted, shifted, labels, shifted_labels = [], [], [], []
+    n_records = 0
     groups = background.group_by("patient", "file", "piece", maintain_order=True)
     for count, ((patient, file, _), items) in enumerate(groups):
-        if len(planted) >= ALIGN_RECORDS:
+        if n_records >= ALIGN_RECORDS:
             break
         signal = np.load(cache_path(root, patient, file), mmap_mode="r")
         first, last = int(items["piece_start"][0] * SFREQ), int(items["piece_stop"][0] * SFREQ)
@@ -295,6 +298,7 @@ def alignment_check(root: Path, table: pl.DataFrame, waves: np.ndarray, device: 
         if others.sum() < 3:
             continue
         wave = torch.from_numpy(waves[count % len(waves)]).to(device)
+        n_records += 1
         centre = start[target] + SFREQ // 2
         rows[channel[target], centre - 64 : centre + 64] += PLANT_AMPLITUDE * wave / wave.abs().max()
         response = responses(rows, wave.unsqueeze(0))
@@ -312,7 +316,7 @@ def alignment_check(root: Path, table: pl.DataFrame, waves: np.ndarray, device: 
     score = float(auroc_columns(np.array(planted)[:, None], np.array(labels))[0]) if planted else float("nan")
     moved = float(auroc_columns(np.array(shifted)[:, None], np.array(shifted_labels))[0]) if shifted else float("nan")
     return {
-        "records": int(np.sum(labels)),
+        "records": n_records,
         "auroc": score,
         "auroc_2s_later": moved,
         "pass": bool(score >= ALIGN_PASS and moved < ALIGN_SHIFTED),
@@ -367,6 +371,28 @@ def family_columns(columns: list[dict[str, Any]], family: str, fold: int) -> lis
     ]
 
 
+def band_columns(columns: list[dict[str, Any]], family: str, band: str) -> list[int]:
+    """The columns of a family in one band."""
+    return [i for i, column in enumerate(columns) if column["family"] == family and column["band"] == band]
+
+
+def held_out_means(
+    matrix: np.ndarray, chosen: list[dict[str, Any] | None], label: np.ndarray, fold: np.ndarray, target: str
+) -> dict[str, float | None]:
+    """The mean rank of the chosen feature on the held-out units of the target class and on the held-out background
+    units, averaged over the folds. A rank of 0.5 is a typical second of the record, so the first number says how
+    far a marked event stands out in its own record, and the second says how calm the marked background is."""
+    out: dict[str, float | None] = {}
+    for key, name in (("class", target), ("background", "bckg")):
+        values = [
+            float(np.nanmean(matrix[(fold == f) & (label == name), entry["column"]]))
+            for f, entry in enumerate(chosen)
+            if entry is not None and ((fold == f) & (label == name)).any()
+        ]
+        out[key] = float(np.mean(values)) if values else None
+    return out
+
+
 def read(root: Path, n_boot: int = 10_000) -> dict[str, Any]:
     """The pilot read: scores, gains and gates (protocol sections 6, 7 and 10). Descriptive."""
     folder = root / "pilot"
@@ -401,7 +427,8 @@ def read(root: Path, n_boot: int = 10_000) -> dict[str, Any]:
                     N_FOLDS,
                 )
                 arms[family] = summarize(chosen, draws) | {
-                    "chosen": [columns[e["column"]] if e is not None else None for e in chosen]
+                    "chosen": [columns[e["column"]] if e is not None else None for e in chosen],
+                    "mean_rank": held_out_means(matrix, chosen, label, fold, target) if name == "rank" else None,
                 }
             entry: dict[str, Any] = {}
             for family, arm in arms.items():
@@ -411,6 +438,8 @@ def read(root: Path, n_boot: int = 10_000) -> dict[str, Any]:
                     "interval": interval(arm["boot"]) if known else None,
                     "chosen": arm["chosen"],
                 }
+                if arm["mean_rank"] is not None:
+                    entry[family]["mean_rank"] = arm["mean_rank"]
                 if name == "null" and known and target in DECIDING:
                     null_boots.append(arm["boot"])
                 summary.append(
@@ -437,6 +466,25 @@ def read(root: Path, n_boot: int = 10_000) -> dict[str, Any]:
                     entry["outcome_if_it_decided"] = class_outcome(
                         arms["transfer"]["score"], gains["untrained"], gains["simple"]
                     )
+            if name == "rank":
+                entry["by_band"] = {
+                    band: {
+                        family: summarize(
+                            choose_and_score(
+                                matrix,
+                                [band_columns(columns, family, band)] * N_FOLDS,
+                                label,
+                                patient,
+                                fold,
+                                target,
+                                N_FOLDS,
+                            ),
+                            draws,
+                        )["score"]
+                        for family in ("untrained", "simple")
+                    }
+                    for band in BANDS
+                }
             classes.setdefault(target, {})[name] = entry
     null_level = 1 - NULL_ERROR / max(len(null_boots), 1)
     null_intervals = [interval(boot, null_level) for boot in null_boots]
@@ -455,6 +503,11 @@ def read(root: Path, n_boot: int = 10_000) -> dict[str, Any]:
         "units": table.height,
         "patients": int(len(np.unique(patient))),
         "units_per_class": {name: int((label == name).sum()) for name in CLASSES.values()},
+        "patients_per_class": {name: int(len(np.unique(patient[label == name]))) for name in CLASSES.values()},
+        "patients_per_class_and_fold": {
+            name: [int(len(np.unique(patient[(label == name) & (fold == f)]))) for f in range(N_FOLDS)]
+            for name in CLASSES.values()
+        },
         "units_that_leave": json.loads((folder / "units.json").read_text())["units_that_leave"],
         "gates": gates,
         "status": "pass" if all(value is not False for value in gates.values()) else "blocked",

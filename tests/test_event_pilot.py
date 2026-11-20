@@ -271,6 +271,7 @@ def test_pilot_features_and_read(tmp_path: Path) -> None:
     assert abs(float(null[spikes][:, own].mean()) - 0.5) < 0.15  # at a displaced second it does not
     alignment = json.loads((folder / "alignment.json").read_text())
     assert alignment["pass"] and alignment["auroc"] >= 0.95 and alignment["auroc_2s_later"] < 0.60
+    assert alignment["records"] == 6  # the records of fold 0, one planted unit in each: not the number of units
 
     record = pilot.read(paths["root"], n_boot=300)
     spsw = record["classes"]["spsw"]
@@ -287,6 +288,12 @@ def test_pilot_features_and_read(tmp_path: Path) -> None:
     assert spsw["rank"]["gain_over_simple"]["gain"] < 0.03
     assert spsw["rank"]["outcome_if_it_decided"] == "detected_not_specific"
     assert record["classes"]["artf"]["rank"]["simple"]["score"] > 0.9  # an amplitude change: a simple measure finds it
+    means = spsw["rank"]["transfer"]["mean_rank"]
+    assert means["class"] > 0.95 and 0.3 < means["background"] < 0.7  # the event stands out; the background does not
+    assert set(spsw["rank"]["by_band"]) == {"30", "70", "70-diff"}
+    assert set(spsw["rank"]["by_band"]["70"]) == {"untrained", "simple"} and "by_band" not in spsw["plain"]
+    assert record["patients_per_class"] == {"spsw": 10, "gped": 0, "pled": 0, "eyem": 0, "artf": 10, "bckg": 30}
+    assert sum(record["patients_per_class_and_fold"]["spsw"]) == 10
     assert 0.4 < spsw["null"]["transfer"]["score"] < 0.6
     assert record["gates"]["time_alignment"] and record["gates"]["reader_agrees"] is None
     assert record["gates"]["displaced_units_at_chance"] and record["status"] == "pass"
