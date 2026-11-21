@@ -57,6 +57,16 @@ def test_crop_starts() -> None:
         assert start % 2 == 0 and start <= second and second + 1 <= start + core.CROP_S
 
 
+def test_crop_plan_and_shifts() -> None:
+    assert core.crop_plan([10, 11, 12, 30], 250.0) == [(4.0, 10), (24.0, 30)]  # the crop and the second it is for
+    assert core.crop_shifts(4.0, 10, 250.0) == [2.0, 4.0, 6.0, 8.0]  # 0.0 would not hold the second after second 10
+    assert core.crop_shifts(0.0, 1, 250.0) == [0.0]  # at the start of the record: no copy to the left
+    assert core.crop_shifts(240.0, 248, 250.0) == [240.0]  # at the end of the record
+    for start in core.crop_shifts(24.0, 30, 250.0):
+        assert start % 2 == 0 and start <= 30 and 32 <= start + core.CROP_S
+    assert core.crop_shifts(24.0, 30, 250.0) == [22.0, 24.0, 26.0, 28.0]
+
+
 def test_unit_status() -> None:
     held = core.pieces(661.7)
     assert core.unit_status(0, 50.2, held) == "kept"

@@ -48,6 +48,7 @@ ELECTRODES = tuple(sorted({e for i, name in enumerate(MONTAGE) if i not in EAR_C
 # A piece is one record of the scenario: 5 minutes (protocol section 3). A last piece of at least 1 minute is kept.
 PIECE_S, MIN_PIECE_S, WINDOW_S, EDGE_S = 300.0, 60.0, 2.0, 0.5
 CROP_S = 10.0  # a training crop around a mark: 5 windows of 2 s
+CROP_SHIFTS_S = (-4.0, -2.0, 0.0, 2.0, 4.0)
 N_FOLDS, FOLD_SEED = 5, 0
 MIN_PATIENTS, MIN_FOLD_PATIENTS = 15, 2
 REASONS = ("kept", "ear_channel", "piece_edge", "outside_pieces", "overlap", "class_conflict")
@@ -86,20 +87,43 @@ def pieces(duration: float) -> list[tuple[float, float]]:
     return out
 
 
-def crop_starts(seconds: Sequence[int], duration: float) -> list[float]:
-    """The starts of the training crops of 10 s for marked seconds, on the grid of 2 s. The seconds are taken in
-    order; a second that an earlier crop holds gets no crop of its own, so the crops of a file do not repeat a mark.
-    A crop is centered on its first second where the file allows it."""
+def crop_plan(seconds: Sequence[int], duration: float) -> list[tuple[float, int]]:
+    """The training crops of 10 s for marked seconds, on the grid of 2 s: the start of each crop and the marked
+    second that it was made for. The seconds are taken in order; a second that an earlier crop holds gets no crop of
+    its own, so the crops of a record do not repeat a mark. A crop is centered on its second where the record allows
+    it."""
     last_start = math.floor((duration - CROP_S + TOLERANCE) / WINDOW_S) * WINDOW_S
     if last_start < 0:
         return []
-    starts: list[float] = []
+    plan: list[tuple[float, int]] = []
     for second in sorted(set(seconds)):
-        if starts and second + 1.0 <= starts[-1] + CROP_S + TOLERANCE:
+        if plan and second + 1.0 <= plan[-1][0] + CROP_S + TOLERANCE:
             continue
         start = math.floor((second - (CROP_S - 1.0) / 2) / WINDOW_S) * WINDOW_S
-        starts.append(float(min(max(start, 0.0), last_start)))
-    return starts
+        plan.append((float(min(max(start, 0.0), last_start)), int(second)))
+    return plan
+
+
+def crop_starts(seconds: Sequence[int], duration: float) -> list[float]:
+    """The starts of the training crops of ``crop_plan``."""
+    return [start for start, _ in crop_plan(seconds, duration)]
+
+
+def crop_shifts(start: float, second: int, duration: float) -> list[float]:
+    """The starts of a crop and of its shifted copies (2 and 4 s to each side, the user's decision of 2026-11-20). A
+    copy is kept if it lies in the record and still holds the two seconds from the marked second on, so that a unit
+    that starts inside that second stays in the crop."""
+    out = []
+    for shift in CROP_SHIFTS_S:
+        moved = start + shift
+        if (
+            moved >= -TOLERANCE
+            and moved + CROP_S <= duration + TOLERANCE
+            and moved <= second
+            and second + 2 <= moved + CROP_S
+        ):
+            out.append(float(moved))
+    return out
 
 
 def unit_status(channel: int, start: float, file_pieces: Sequence[tuple[float, float]]) -> str:

@@ -2,8 +2,7 @@
 #*----------------------------------------------------------------------------*
 #* Events corpus protocol (documentation/event_corpus_dictionary_protocol.md): do dictionary waveforms mark the
 #* annotated events of the TUH EEG Events Corpus (v2.0.1), and do they find them in records of 5 minutes? Stages 0
-#* (inventory) and 1 (pilot) exist; stage 2 (new dictionaries) is built after the pilot has run. Run inside the HPC
-#* container from code/:
+#* (inventory), 1 (pilot) and 2a (crop dictionaries) exist. Run inside the HPC container from code/:
 #*   STAGE=inventory EVENTS_DIR=<the folder that holds edf/> bash run_event_dictionary.sh
 #*   STAGE=pilot ROOT=<the inventory root> EVENTS_DIR=<...> SWEEP_ROOT=<the band sweep root> M=<40 s audit> \
 #*     SMOKE_DIR=<its cache smoke dir> nohup bash run_event_dictionary.sh > event_pilot.log 2>&1 &
@@ -12,7 +11,12 @@
 #* of the training files, the signal cache, the reader check on the epilepsy corpus (gate 3), the three reads of every
 #* unit for the adopted dictionaries of the epilepsy corpus, random waveforms and the simple measures, with the
 #* time-alignment check (gate 4), then pilot.json and pilot_summary.csv. A rerun with the same ROOT keeps finished
-#* sidecars and cached files. The evaluation set is not read.
+#* sidecars and cached files. The evaluation set is not read. crops (stage 2a; GPU node, about 3 h; on the root of
+#* the pilot): the tests, the crop dictionaries of every fold and band (40 per fold), the supervised reference and
+#* the features per fold, then the rule (stage2.json) and the scan of 5-minute records (scan.json). A rerun keeps
+#* finished dictionaries:
+#*   STAGE=crops ROOT=<the pilot root> EVENTS_DIR=<...> SWEEP_ROOT=<the band sweep root> \
+#*     nohup bash run_event_dictionary.sh > event_crops.log 2>&1 &
 #* Environment: ROOT, STAGE=inventory|pilot, EVENTS_DIR (default <DATA_DIR>/v2.0.1), DATA_DIR (the data root, which
 #* also holds the epilepsy corpus), SWEEP_ROOT, M, SMOKE_DIR or SIGNAL_CACHE_DIR, N_JOBS=8, NUM_WORKERS=4,
 #* DEVICE=cuda, N_BOOT=10000.
@@ -20,7 +24,7 @@
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  sed -n '3,18p' "$0" | sed 's/^#\* \{0,1\}//'
+  sed -n '3,22p' "$0" | sed 's/^#\* \{0,1\}//'
   exit 0
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -31,7 +35,7 @@ DEVICE="${DEVICE:-cuda}"
 N_BOOT="${N_BOOT:-10000}"
 DATA_DIR="${DATA_DIR:-/work/cniel/sw/singularity_containers/tuh-eeg-epilepsy/project/data}"
 EVENTS_DIR="${EVENTS_DIR:-$DATA_DIR/v2.0.1}"
-[[ "$STAGE" =~ ^(inventory|pilot)$ ]] || { echo "ERROR: STAGE must be inventory or pilot" >&2; exit 2; }
+[[ "$STAGE" =~ ^(inventory|pilot|crops)$ ]] || { echo "ERROR: STAGE must be inventory, pilot or crops" >&2; exit 2; }
 for value in "$N_JOBS" "$NUM_WORKERS" "$N_BOOT"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "ERROR: bad N_JOBS, NUM_WORKERS or N_BOOT" >&2; exit 2; }
 done
@@ -48,6 +52,12 @@ else
   [[ -f "$SWEEP_ROOT/dictionaries/K64_L128_D8_P512_R4_E30_s1_f0/sae_time_atoms.npy" ]] || {
     echo "ERROR: $SWEEP_ROOT holds no adopted dictionaries" >&2; exit 2; }
   SWEEP_ROOT=$(cd -- "$SWEEP_ROOT" && pwd)
+fi
+if [[ "$STAGE" == crops ]]; then
+  [[ -f "$ROOT/pilot.json" && -f "$ROOT/pilot/rank.npy" && -f "$ROOT/pilot/units.csv" ]] || {
+    echo "ERROR: run STAGE=pilot on this root first: $ROOT" >&2; exit 2; }
+fi
+if [[ "$STAGE" == pilot ]]; then
   M="${M:?Set M to the 40 s offset audit directory}"
   if [[ -z ${SIGNAL_CACHE_DIR:-} ]]; then
     [[ -n ${SMOKE_DIR:-} && -f "$SMOKE_DIR/signal_cache_path.txt" ]] || {
@@ -71,8 +81,11 @@ echo "$STAMP STAGE=$STAGE EVENTS_DIR=$EVENTS_DIR SWEEP_ROOT=${SWEEP_ROOT:-} M=${
 
 export PYTHONHASHSEED=0
 export HYDRA_FULL_ERROR=1
+export CUBLAS_WORKSPACE_CONFIG=:4096:8  # deterministic algorithms on CUDA need it for the fits
 # Gate 1: the tests of this protocol. A failure stops the script here.
-python -m pytest -q tests/test_event_dictionary.py tests/test_event_pilot.py 2>&1 | tee -a "$ROOT/tests.log"
+TESTS=(tests/test_event_dictionary.py tests/test_event_pilot.py)
+[[ "$STAGE" == crops ]] && TESTS+=(tests/test_event_stage2.py)
+python -m pytest -q "${TESTS[@]}" 2>&1 | tee -a "$ROOT/tests.log"
 
 step() {
   local script=$1
@@ -86,6 +99,32 @@ if [[ "$STAGE" == inventory ]]; then
   step event_dictionary inventory --root "$ROOT" --events-dir "$EVENTS_DIR"
   cat "$ROOT/event_inventory.json"
   echo "Inventory: $ROOT. It read headers and annotation files only."
+  exit 0
+fi
+
+if [[ "$STAGE" == crops ]]; then
+  for fold in 0 1 2 3 4; do
+    for band in 30 70 70-diff; do
+      step event_stage2 fit --root "$ROOT" --fold "$fold" --band "$band" --sweep-root "$SWEEP_ROOT" --device "$DEVICE"
+    done
+    step event_stage2 reference --root "$ROOT" --fold "$fold" --device "$DEVICE"
+    step event_stage2 features --root "$ROOT" --fold "$fold" --device "$DEVICE"
+  done
+  if [[ -f "$ROOT/stage2.json" ]]; then
+    cp -- "$ROOT/stage2.json" "$ROOT/stage2_before_$STAMP.json"  # keep the record of an earlier read
+  fi
+  step event_stage2 read --root "$ROOT" --n-boot "$N_BOOT" --device "$DEVICE"
+  step event_stage2 scan --root "$ROOT" --device "$DEVICE"
+  python - "$ROOT/stage2.json" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+print("outcome:", record["outcome"], "| identified:", record["identified"])
+for name in ("spsw", "gped", "pled"):
+    entry = record["classes"][name]
+    families = ("trained", "untrained", "simple", "reference")
+    print(name, entry.get("outcome"), {family: entry[family]["score"] for family in families})
+PY
+  echo "Stage 2a: $ROOT/stage2.json, $ROOT/stage2_summary.csv and $ROOT/scan.json."
   exit 0
 fi
 

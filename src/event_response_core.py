@@ -8,6 +8,7 @@ a lower value. ``src/event_dictionary.py`` holds the code that reads files.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -210,7 +211,10 @@ def summarize(folds: list[dict[str, Any] | None], draws: list[dict[str, Any] | N
         boots.append(aligned_draws(entry["counts"], weights))
     if not points:
         return {"score": None, "boot": None, "folds": 0}
-    return {"score": float(np.mean(points)), "boot": np.nanmean(np.stack(boots), axis=0), "folds": len(points)}
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # a draw can lack the class in every fold
+        boot = np.nanmean(np.stack(boots), axis=0)
+    return {"score": float(np.mean(points)), "boot": boot, "folds": len(points)}
 
 
 def aligned_draws(counts: dict[str, Any], weights: dict[str, Any]) -> np.ndarray:
@@ -235,3 +239,52 @@ def class_outcome(score: float, learning: dict[str, float], simple: dict[str, fl
     if not passed:
         return "detected_not_specific"
     return "identified (strong)" if score >= STRONG else "identified (weak)"
+
+
+# ---------------------------------------------------------------------- the scan of a record (protocol section 8)
+
+
+def second_scores(grid: torch.Tensor) -> torch.Tensor:
+    """The score of every second of a record from the values ``(channels, seconds)`` of one feature: each channel in
+    robust units of its own record (minus the median, over 1.4826 MAD), then the second-largest channel value, so
+    that two channels must agree."""
+    median = grid.median(dim=-1, keepdim=True).values
+    spread = 1.4826 * (grid - median).abs().median(dim=-1, keepdim=True).values
+    units = (grid - median) / spread.clamp_min(1e-12)
+    return units.topk(2, dim=0).values[1]
+
+
+def alarm_starts(score: np.ndarray, threshold: float) -> np.ndarray:
+    """The first second of every alarm: a run of consecutive seconds above the threshold."""
+    above = np.asarray(score) > threshold
+    return np.flatnonzero(above & ~np.concatenate([[False], above[:-1]]))
+
+
+def alarms_per_record(scores: Sequence[np.ndarray], threshold: float, record_s: float = 300.0) -> float:
+    """The alarms per record length (5 minutes) over a set of records, each given by its score per second."""
+    seconds = sum(len(score) for score in scores)
+    alarms = sum(len(alarm_starts(score, threshold)) for score in scores)
+    return float(alarms * record_s / seconds) if seconds else float("nan")
+
+
+def threshold_for_rate(scores: Sequence[np.ndarray], rate: float, record_s: float = 300.0) -> float:
+    """The lowest threshold at which the records give at most ``rate`` alarms per record length. The candidates are
+    the scores themselves, from the highest down; NaN without a record."""
+    if not scores:
+        return float("nan")
+    candidates = np.unique(np.concatenate(scores))[::-1]
+    low, high = 0, len(candidates) - 1  # the rate rises as the threshold falls, apart from merged runs
+    best = float(candidates[0])
+    while low <= high:
+        middle = (low + high) // 2
+        if alarms_per_record(scores, float(candidates[middle]), record_s) <= rate:
+            best, low = float(candidates[middle]), middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def found_marks(score: np.ndarray, marks: Sequence[int], threshold: float) -> int:
+    """How many marked seconds have a second above the threshold within 1 s."""
+    above = np.asarray(score) > threshold
+    return int(sum(above[max(mark - 1, 0) : mark + 2].any() for mark in marks))
